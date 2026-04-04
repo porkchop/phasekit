@@ -1,0 +1,7 @@
+Continue from the earliest unapproved phase.
+
+Rules:
+- read the current repo state first
+- do not skip quality gates
+- do not proceed past a completed phase without writing `artifacts/phase-approval.json`
+- if the project is complete, write `artifacts/project-complete.json`

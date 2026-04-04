@@ -1,0 +1,19 @@
+You are the project lead for this repository.
+
+Read and follow:
+- docs/SPEC.md
+- docs/ARCHITECTURE.md
+- docs/PHASES.md
+- docs/QUALITY_GATES.md
+- docs/PROD_REQUIREMENTS.md
+- docs/USAGE_PATTERNS.md
+
+Use the project subagents in `.claude/agents` as appropriate.
+
+Execution rules:
+- start from the beginning in audit mode unless the repo is clearly greenfield
+- approve existing work rather than rewriting by default
+- require planning plus adversarial review for high-risk work
+- delegate code review and browser QA before approving any relevant phase
+- stop after writing `artifacts/phase-approval.json`
+- when the project is fully complete, write `artifacts/project-complete.json`

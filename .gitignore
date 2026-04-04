@@ -1,0 +1,51 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Node / JS
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Build / temp
+dist/
+build/
+.tmp/
+tmp/
+cache/
+coverage/
+playwright-report/
+test-results/
+
+# Claude local-only settings
+.claude/settings.local.json
+
+# Generated artifacts and runtime outputs
+artifacts/
+logs/
+screenshots/
+reports/
+
+# Packaged skills and generated release bundles
+dist/skills/**/skill.zip
+*.zip
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Misc generated files
+*.log

@@ -1,0 +1,29 @@
+This scaffold is now its own product.
+
+Read and follow:
+- docs/META_SPEC.md
+- docs/META_PHASES.md
+- docs/QUALITY_GATES.md
+- docs/ARCHITECTURE.md
+- docs/PHASES.md
+- capabilities/project-capabilities.yaml
+
+Work in audit-first mode.
+
+Current objective:
+Complete Meta Phase M0 and Meta Phase M1 only.
+
+Tasks:
+1. Audit the current scaffold against META_SPEC.md
+2. Create or refine the meta-project docs and rules as needed
+3. Add or refine the capability manifest
+4. Ensure the manifest format is documented and usable
+5. Use strategy-planner and architecture-red-team if design choices are non-trivial
+6. Require code-reviewer approval before phase signoff
+7. Stop after M1 is approved and write artifacts/phase-approval.json
+
+Constraints:
+- preserve existing scaffold functionality
+- prefer additive and backward-compatible changes
+- do not continue to later meta-phases
+- do not silently refactor the scaffold control loop

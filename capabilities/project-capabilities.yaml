@@ -1,0 +1,158 @@
+version: 1
+
+project:
+  name: competent-developer-template
+  mode:
+    - scaffold
+    - capability-packager
+    - self-improvement
+
+profiles:
+  default:
+    include_agents:
+      - project-lead
+      - strategy-planner
+      - architecture-red-team
+      - code-reviewer
+      - qa-playwright
+    include_skills:
+      - autonomous-product-builder
+    include_docs:
+      - SPEC
+      - ARCHITECTURE
+      - PHASES
+      - QUALITY_GATES
+      - PROD_REQUIREMENTS
+      - USAGE_PATTERNS
+      - META_SPEC
+      - META_PHASES
+    include_hooks:
+      - deny-dangerous-commands
+    include_scripts:
+      - run-phase
+      - run-until-done
+
+  game-project:
+    extends: default
+    include_agents:
+      - engine-builder
+      - frontend-builder
+      - backend-builder
+      - release-hardening
+    include_skills:
+      - autonomous-product-builder
+
+  saas-project:
+    extends: default
+    include_agents:
+      - frontend-builder
+      - backend-builder
+      - release-hardening
+
+agents:
+  project-lead:
+    enabled: true
+    source: .claude/agents/project-lead.md
+    purpose: orchestrate phased delivery and approvals
+
+  strategy-planner:
+    enabled: true
+    source: .claude/agents/strategy-planner.md
+    purpose: write implementation strategy memos and task breakdowns
+
+  architecture-red-team:
+    enabled: true
+    source: .claude/agents/architecture-red-team.md
+    purpose: challenge design choices and identify risks
+
+  engine-builder:
+    enabled: true
+    source: .claude/agents/engine-builder.md
+    purpose: build deterministic core logic where applicable
+
+  frontend-builder:
+    enabled: true
+    source: .claude/agents/frontend-builder.md
+    purpose: build UI without leaking business rules
+
+  backend-builder:
+    enabled: true
+    source: .claude/agents/backend-builder.md
+    purpose: build persistence, APIs, auth, and server authority
+
+  code-reviewer:
+    enabled: true
+    source: .claude/agents/code-reviewer.md
+    purpose: enforce code quality and architecture compliance
+
+  qa-playwright:
+    enabled: true
+    source: .claude/agents/qa-playwright.md
+    purpose: verify user-visible functionality in browser
+
+  release-hardening:
+    enabled: true
+    source: .claude/agents/release-hardening.md
+    purpose: production-readiness and operational hardening
+
+skills:
+  autonomous-product-builder:
+    enabled: true
+    source_dir: .claude/skills/autonomous-product-builder
+    package_output: dist/skills/autonomous-product-builder/skill.zip
+    validate: true
+    package: true
+    purpose: reusable workflow skill for project buildout, audit-first execution, and scaffold self-improvement
+
+docs:
+  SPEC:
+    path: docs/SPEC.md
+    required: true
+
+  ARCHITECTURE:
+    path: docs/ARCHITECTURE.md
+    required: true
+
+  PHASES:
+    path: docs/PHASES.md
+    required: true
+
+  QUALITY_GATES:
+    path: docs/QUALITY_GATES.md
+    required: true
+
+  PROD_REQUIREMENTS:
+    path: docs/PROD_REQUIREMENTS.md
+    required: true
+
+  USAGE_PATTERNS:
+    path: docs/USAGE_PATTERNS.md
+    required: true
+
+  META_SPEC:
+    path: docs/META_SPEC.md
+    required: true
+
+  META_PHASES:
+    path: docs/META_PHASES.md
+    required: true
+
+hooks:
+  deny-dangerous-commands:
+    path: .claude/hooks/deny-dangerous-commands.sh
+    required: true
+
+scripts:
+  run-phase:
+    path: scripts/run-phase.sh
+    required: true
+
+  run-until-done:
+    path: scripts/run-until-done.sh
+    required: true
+
+generation:
+  output_root: generated
+  skills_output_root: dist/skills
+  preserve_existing_files: true
+  require_review_for_overwrite: true

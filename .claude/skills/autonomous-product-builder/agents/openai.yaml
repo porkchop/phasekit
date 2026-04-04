@@ -1,0 +1,3 @@
+interface:
+  display_name: "Autonomous Product Builder"
+  short_description: "Run a phase-gated build, audit, or hardening workflow"
