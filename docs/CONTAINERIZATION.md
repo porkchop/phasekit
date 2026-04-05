@@ -98,6 +98,8 @@ The working directory (`/workspace`) is bind-mounted from the host, so all chang
 | `MAX_ITERATIONS` | `50` | Phase loop iteration limit |
 | `CLAUDE_MODE` | `new` | Set to `continue` to resume a session |
 | `IMAGE_NAME` | `scaffold-runner` | Docker image name |
+| `GIT_USER_NAME` | `Scaffold Runner` | Git author name for commits |
+| `GIT_USER_EMAIL` | `scaffold-runner@localhost` | Git author email for commits |
 
 ## Container capabilities
 
@@ -105,6 +107,8 @@ The container runs with a minimal capability set:
 - `--cap-drop=ALL` — drops all default Linux capabilities
 - `--cap-add=NET_ADMIN` — required for iptables firewall configuration
 - `--cap-add=NET_RAW` — required for raw socket operations used by the firewall
+- `--cap-add=SETUID` — required for `sudo` to run the firewall init as root
+- `--cap-add=SETGID` — required for `sudo` to switch group identity
 
 ## VS Code devcontainer support (optional)
 

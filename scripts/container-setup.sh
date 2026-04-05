@@ -22,6 +22,8 @@ set -euo pipefail
 #   ANTHROPIC_API_KEY   Required for 'run' and 'shell' commands
 #   MAX_ITERATIONS      Phase loop iteration limit (default: 50)
 #   IMAGE_NAME          Docker image name (default: scaffold-runner)
+#   GIT_USER_NAME       Git author name (default: Scaffold Runner)
+#   GIT_USER_EMAIL      Git author email (default: scaffold-runner@localhost)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -59,8 +61,12 @@ run_container() {
     --cap-drop=ALL \
     --cap-add=NET_ADMIN \
     --cap-add=NET_RAW \
+    --cap-add=SETUID \
+    --cap-add=SETGID \
     -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
     -e MAX_ITERATIONS="${MAX_ITERATIONS:-50}" \
+    ${GIT_USER_NAME:+-e GIT_USER_NAME="$GIT_USER_NAME"} \
+    ${GIT_USER_EMAIL:+-e GIT_USER_EMAIL="$GIT_USER_EMAIL"} \
     -v "$ROOT_DIR":/workspace \
     "$IMAGE_NAME" \
     "${cmd[@]}"

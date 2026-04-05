@@ -84,6 +84,10 @@ ENV PATH=$PATH:/usr/local/share/npm-global/bin
 # Set the default shell to bash (scaffold preference over zsh)
 ENV SHELL=/bin/bash
 
+# SCAFFOLD: Default git identity for unattended commits (overridable via env vars)
+RUN git config --global user.name "Scaffold Runner" && \
+  git config --global user.email "scaffold-runner@localhost"
+
 # Install Claude Code
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
