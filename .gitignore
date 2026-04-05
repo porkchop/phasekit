@@ -49,5 +49,3 @@ dist/skills/**/skill.zip
 
 # Misc generated files
 *.log
-
-artifacts/

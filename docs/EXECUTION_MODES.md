@@ -54,7 +54,7 @@ These scripts pass `--permission-mode bypassPermissions` to Claude. This flag on
 | Variable | Default | Purpose |
 |---|---|---|
 | `CLAUDE_MODE` | `new` | Set to `continue` to resume a previous session |
-| `MAX_ITERATIONS` | `100` | Maximum phase iterations for `run-until-done.sh` |
+| `MAX_ITERATIONS` | `50` | Maximum phase iterations for `run-until-done.sh` |
 
 ## Settings layering
 
