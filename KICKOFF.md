@@ -6,13 +6,16 @@ The recommended entrypoint is the unattended wrapper:
 ./scripts/run-until-done.sh
 ```
 
-That wrapper uses `KICKOFF_PROMPT.txt` on the first iteration and `CONTINUE_PROMPT.txt` on later iterations.
+The wrapper uses `CONTINUE_PROMPT.txt` for all iterations. It instructs Claude to find the earliest unapproved phase automatically by reading `artifacts/phase-approval.json`.
 
 ## Manual kickoff
 
-If you prefer to start manually, use the contents of `KICKOFF_PROMPT.txt` in Claude Code from the repository root.
+If you prefer to start manually, use the contents of `CONTINUE_PROMPT.txt` in Claude Code from the repository root.
 
+## Custom prompt
 
-## Meta-project kickoff
+To use a different prompt file:
 
-To improve the scaffold itself, use `META_KICKOFF_PROMPT.txt` instead of `KICKOFF_PROMPT.txt` and keep the lead in audit mode.
+```bash
+./scripts/run-until-done.sh ./my-custom-prompt.txt
+```

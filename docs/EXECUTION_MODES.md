@@ -42,7 +42,7 @@ Used when the scaffold runs autonomous phase-gated work inside an isolated conta
 Unattended mode is activated by running the wrapper scripts:
 ```bash
 # Single phase
-./scripts/run-phase.sh ./KICKOFF_PROMPT.txt
+./scripts/run-phase.sh ./CONTINUE_PROMPT.txt
 
 # Multi-phase loop
 MAX_ITERATIONS=50 ./scripts/run-until-done.sh

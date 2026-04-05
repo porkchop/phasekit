@@ -1,0 +1,6 @@
+{
+  "phase": "meta-M5",
+  "approved": true,
+  "summary": "Containerized unattended execution support verified. All five acceptance criteria pass: initialization via container-setup.sh, unattended wrappers (run-until-done.sh/run-phase.sh) work correctly, permissive mode is confined to CLI invocation layer (not project settings), approach is documented as opt-in in CONTAINERIZATION.md and EXECUTION_MODES.md, and VS Code is not required (CLI-only path fully supported). Code-reviewer approved with no blocking issues.",
+  "suggested_commit_message": "meta-M5: approve containerized unattended execution"
+}

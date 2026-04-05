@@ -36,9 +36,15 @@ Operating rules:
 - If the project is complete, write `artifacts/project-complete.json`
 - Do not continue into the next phase until the repository has been committed externally
 
+How to determine what is already approved:
+- Check `artifacts/phase-approval.json` — it records the most recently approved phase
+- Check `git log` for prior phase approval commits
+- Phases up to and including the one in `phase-approval.json` are approved
+- Start work on the next phase after that
+
 First task:
-1. Determine the earliest unapproved phase or meta-phase from the repo state
-2. Summarize what is already approved
-3. List the minimum work needed for the current phase
+1. Read `artifacts/phase-approval.json` to find the last approved phase
+2. Identify the next unapproved phase from docs/META_PHASES.md or docs/PHASES.md
+3. List the minimum work needed for that phase
 4. Execute only that phase
 5. Stop after approval, phase update, blocker, or completion

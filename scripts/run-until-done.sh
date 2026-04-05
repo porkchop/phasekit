@@ -4,8 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACTS_DIR="$ROOT_DIR/artifacts"
 RUN_PHASE_SCRIPT="$ROOT_DIR/scripts/run-phase.sh"
-KICKOFF_PROMPT="${1:-$ROOT_DIR/KICKOFF_PROMPT.txt}"
-CONTINUE_PROMPT="$ROOT_DIR/CONTINUE_PROMPT.txt"
+# The prompt file can be overridden via the first argument.
+# Default is CONTINUE_PROMPT.txt which instructs Claude to find the
+# earliest unapproved phase automatically. KICKOFF_PROMPT.txt and
+# META_KICKOFF_PROMPT.txt exist for legacy/manual use but are not
+# used by the autonomous loop since they target specific phases.
+PROMPT_FILE="${1:-$ROOT_DIR/CONTINUE_PROMPT.txt}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-50}"
 CLAUDE_MODE="${CLAUDE_MODE:-new}"
 
@@ -44,12 +48,17 @@ commit_from_artifact() {
     msg="$fallback_msg"
   fi
 
-  if git diff --quiet && git diff --cached --quiet; then
+  # Force-add tracked artifact files (they may be partially gitignored)
+  git add -f "$file" 2>/dev/null || true
+
+  # Also stage any other repo changes
+  git add -A
+
+  if git diff --cached --quiet; then
     echo "No repo changes detected; skipping commit."
     return 0
   fi
 
-  git add -A
   git commit -m "$msg"
 }
 
@@ -70,9 +79,9 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   cleanup_artifacts
 
   if [[ "$iteration" -eq 1 && "$CLAUDE_MODE" == "new" ]]; then
-    run_once "$KICKOFF_PROMPT" "new"
+    run_once "$PROMPT_FILE" "new"
   else
-    run_once "$CONTINUE_PROMPT" "continue"
+    run_once "$PROMPT_FILE" "continue"
   fi
 
   if [[ -f "$ARTIFACTS_DIR/project-complete.json" ]]; then

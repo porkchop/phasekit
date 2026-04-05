@@ -156,6 +156,6 @@ If you previously used the `container/Dockerfile` from M5:
 - **"Firewall initialization failed"**: Ensure Docker supports `--cap-add=NET_ADMIN` (rootless Docker may not)
 - **Permission errors on /workspace**: Ensure the host directory is readable by UID 1000 (the `node` user)
 - **Claude CLI not found**: Rebuild the image to pick up the latest CLI version
-- **Phase loop exits immediately**: Check that `KICKOFF_PROMPT.txt` and `CONTINUE_PROMPT.txt` exist in the repo root
+- **Phase loop exits immediately**: Check that `CONTINUE_PROMPT.txt` exists in the repo root
 - **Firewall blocking needed domains**: Check `init-firewall.sh` whitelist; add domains if your workflow requires additional network access
 - **Stale DNS in long-running containers**: The firewall resolves domain IPs at startup; CDN-backed services may rotate IPs over time. Restart the container or re-run `sudo /usr/local/bin/init-firewall.sh` to refresh

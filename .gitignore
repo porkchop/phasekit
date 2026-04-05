@@ -33,7 +33,11 @@ test-results/
 .claude/settings.local.json
 
 # Generated artifacts and runtime outputs
-artifacts/
+# Phase-approval and project-complete artifacts are tracked by git
+# so the autonomous loop can detect what has already been approved.
+artifacts/*
+!artifacts/phase-approval.json
+!artifacts/project-complete.json
 logs/
 screenshots/
 reports/
