@@ -3,15 +3,20 @@ set -euo pipefail
 
 # Container setup script for scaffold unattended execution.
 #
-# This script builds the container image and optionally runs it.
+# Builds from .devcontainer/ using Anthropic's reference devcontainer
+# with scaffold-specific additions (Python, pyyaml, entrypoint wrapper).
+#
+# The container includes a firewall (init-firewall.sh) that restricts
+# outbound network access to whitelisted domains only. The firewall is
+# best-effort network hygiene, not a hard security boundary.
 #
 # Usage:
 #   bash scripts/container-setup.sh [build|run|shell]
 #
 # Commands:
 #   build   Build the container image (default)
-#   run     Build and run the phase loop
-#   shell   Build and open an interactive shell
+#   run     Build and run the phase loop (with firewall)
+#   shell   Build and open an interactive shell (with firewall)
 #
 # Environment:
 #   ANTHROPIC_API_KEY   Required for 'run' and 'shell' commands
@@ -34,7 +39,7 @@ require_cmd docker
 
 build_image() {
   echo "Building container image: $IMAGE_NAME"
-  docker build -t "$IMAGE_NAME" "$ROOT_DIR/container/"
+  docker build -t "$IMAGE_NAME" "$ROOT_DIR/.devcontainer/"
   echo "Image built successfully: $IMAGE_NAME"
 }
 
@@ -47,16 +52,18 @@ check_api_key() {
 }
 
 run_container() {
-  local entrypoint=("$@")
+  local cmd=("$@")
   check_api_key
   echo "Starting container from: $ROOT_DIR"
   docker run --rm -it \
+    --cap-drop=ALL \
+    --cap-add=NET_ADMIN \
+    --cap-add=NET_RAW \
     -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
     -e MAX_ITERATIONS="${MAX_ITERATIONS:-50}" \
     -v "$ROOT_DIR":/workspace \
-    ${entrypoint:+--entrypoint "${entrypoint[0]}"} \
     "$IMAGE_NAME" \
-    ${entrypoint:+"${entrypoint[@]:1}"}
+    "${cmd[@]}"
 }
 
 case "$COMMAND" in
@@ -65,10 +72,13 @@ case "$COMMAND" in
     ;;
   run)
     build_image
-    run_container
+    # Entrypoint (entrypoint.sh) runs firewall init, then executes the command.
+    # Default CMD is "bash scripts/run-until-done.sh", so no args needed.
+    run_container bash scripts/run-until-done.sh
     ;;
   shell)
     build_image
+    # Entrypoint runs firewall init, then drops to bash.
     run_container bash
     ;;
   *)
