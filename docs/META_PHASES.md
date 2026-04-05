@@ -123,7 +123,7 @@ Make it easy to apply scaffold capabilities to another repo.
 
 ---
 
-## Meta Phase M4 — Execution modes and non-interference
+## Meta Phase M4.5 — Execution modes and non-interference
 
 ### Goal
 Formalize interactive collaboration mode and containerized unattended mode.
@@ -143,7 +143,7 @@ Formalize interactive collaboration mode and containerized unattended mode.
 
 ---
 
-## Meta Phase M5 — Containerized unattended execution
+## Meta Phase M5.5 — Containerized unattended execution
 
 ### Goal
 Support running the scaffold inside an isolated container for permissive unattended operation.
@@ -164,7 +164,7 @@ Support running the scaffold inside an isolated container for permissive unatten
 
 ---
 
-## Meta Phase M6 — Reasoning profile guidance
+## Meta Phase M5 — Reasoning profile guidance
 
 ### Goal
 Define when deeper reasoning should be used for scaffold work without forcing it for all interactions.
@@ -181,7 +181,7 @@ Define when deeper reasoning should be used for scaffold work without forcing it
 
 ---
 
-## Meta Phase M7 - Planner and red-team integration
+## Meta Phase M6 - Planner and red-team integration
 
 ### Goal
 Formalize plan/adversarial review for material architectural work.
@@ -199,7 +199,7 @@ Formalize plan/adversarial review for material architectural work.
 
 ---
 
-## Meta Phase M8 - Self-application and refinement
+## Meta Phase M7 - Self-application and refinement
 
 ### Goal
 Use the scaffold to improve itself under full quality gates.
@@ -217,7 +217,7 @@ Use the scaffold to improve itself under full quality gates.
 
 ---
 
-## Meta Phase M9 - Generalization and compatibility
+## Meta Phase M8 - Generalization and compatibility
 
 ### Goal
 Broaden the scaffold beyond the original project style without losing quality.

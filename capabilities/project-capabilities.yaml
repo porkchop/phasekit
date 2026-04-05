@@ -35,6 +35,7 @@ profiles:
       - generate-skill
       - validate-skill
       - package-skill
+      - enrich-project
 
   game-project:
     extends: default
@@ -169,6 +170,10 @@ scripts:
 
   package-skill:
     path: scripts/package-skill.py
+    required: true
+
+  enrich-project:
+    path: scripts/enrich-project.py
     required: true
 
 generation:

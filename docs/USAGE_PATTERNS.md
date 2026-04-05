@@ -4,19 +4,29 @@
 Use when a repository is new or nearly empty.
 
 Workflow:
-1. adapt the templates in `docs/`
-2. let `project-lead` start at phase 0
-3. require planning memos for architecture choices
-4. iterate phase by phase until `project-complete.json`
+1. from the new project directory, run:
+   ```
+   bash /path/to/scaffold/scripts/bootstrap-new-project.sh [PROFILE]
+   ```
+   This copies agents, docs, hooks, and generates `.claude/CLAUDE.md` using the manifest profile (default: `default`).
+2. customize `docs/SPEC.md`, `docs/ARCHITECTURE.md`, `docs/PHASES.md`, and `docs/PROD_REQUIREMENTS.md`
+3. let `project-lead` start at phase 0
+4. require planning memos for architecture choices
+5. iterate phase by phase until `project-complete.json`
 
 ## Pattern 2 - Existing repo adoption
 Use when code already exists and needs methodical continuation.
 
 Workflow:
-1. adapt `docs/` to the current state of the codebase
-2. start the lead in audit mode
-3. re-vet already-built phases before continuing
-4. patch minimally rather than rewriting by default
+1. from the existing project directory, run:
+   ```
+   bash /path/to/scaffold/scripts/adopt-existing-repo.sh [PROFILE]
+   ```
+   This copies agents, hooks, and doc templates without overwriting existing files.
+2. adapt `docs/` to the current state of the codebase
+3. start the lead in audit mode
+4. re-vet already-built phases before continuing
+5. patch minimally rather than rewriting by default
 
 ## Pattern 3 - Hardening sprint
 Use when the product mostly exists and the focus is quality.

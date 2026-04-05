@@ -1,18 +1,24 @@
 {
-  "phase": "meta-M3",
+  "phase": "meta-M4",
   "approved": true,
-  "summary": "M3 (Skill validation and packaging): Added scripts/validate-skill.py to validate skill folder structure (SKILL.md frontmatter, agents/openai.yaml) and scripts/package-skill.py to produce skill.zip archives. Packaging runs validation first and rejects symlinks and out-of-tree paths. Both scripts registered in manifest and default profile. Packaging flow documented in META_SPEC.md. Architecture red-team caught two blocking issues (symlink traversal, dead __pycache__ filter) — both fixed. Code-reviewer approved.",
+  "summary": "M4 (Downstream enrichment flow): Created scripts/enrich-project.py — a manifest-driven enrichment script that resolves capability profiles and copies agents, docs, hooks, scripts, and a rendered .claude/CLAUDE.md to downstream projects. Refactored bootstrap-new-project.sh and adopt-existing-repo.sh to delegate to the enrichment script. Fixed duplicate M4 naming conflict in META_PHASES.md (execution modes → M4.5, containerization → M5.5). Updated USAGE_PATTERNS.md with concrete enrichment commands. Updated example READMEs with expected directory structures. Code-reviewer caught three blocking issues (force flag on CLAUDE.md, $2→$1 in shell scripts, cycle detection in profile resolution) — all fixed.",
   "changes": [
-    "Created scripts/validate-skill.py (skill structure validation)",
-    "Created scripts/package-skill.py (skill packaging with pre-validation)",
-    "Updated capabilities/project-capabilities.yaml (added validate-skill and package-skill entries)",
-    "Updated docs/META_SPEC.md (added validation and packaging flow documentation)"
+    "Created scripts/enrich-project.py (manifest-driven downstream enrichment)",
+    "Refactored scripts/bootstrap-new-project.sh to delegate to enrich-project.py",
+    "Refactored scripts/adopt-existing-repo.sh to delegate to enrich-project.py",
+    "Updated capabilities/project-capabilities.yaml (added enrich-project entry)",
+    "Updated docs/USAGE_PATTERNS.md (concrete enrichment commands for Pattern 1 and 2)",
+    "Updated docs/META_PHASES.md (fixed duplicate M4 naming, renumbered M4.5/M5.5/M5-M8)",
+    "Updated examples/game-project/README.md (expected structure and setup steps)",
+    "Updated examples/saas-project/README.md (expected structure and setup steps)"
   ],
   "reviewer_notes": [
-    "Red-team blocking: symlink traversal in zip creation — fixed with is_symlink() and is_relative_to() checks",
-    "Red-team blocking: __pycache__ filter was dead code — fixed to check path parts",
-    "Non-blocking: duplicated load_manifest/resolve_skill_dir across scripts (acceptable at this scale)",
-    "Non-blocking: validation is shallow (SKILL.md + openai.yaml only) — sufficient for M3, can deepen later"
+    "Blocking (fixed): render_claude_md did not respect --force flag",
+    "Blocking (fixed): shell scripts used $2 for profile instead of $1",
+    "Blocking (fixed): resolve_profile had no cycle detection for extends",
+    "Non-blocking: PHASES/QUALITY_GATES/USAGE_PATTERNS copied verbatim (may need downstream customization)",
+    "Non-blocking: workflow_scripts allowlist and scaffold_only_docs are hardcoded (could be manifest-driven later)",
+    "Non-blocking: template_map duplicates knowledge about which docs have templates"
   ],
-  "suggested_commit_message": "meta-M3: add skill validation and packaging scripts"
+  "suggested_commit_message": "meta-M4: add manifest-driven downstream enrichment flow"
 }
