@@ -143,7 +143,7 @@ Formalize interactive collaboration mode and containerized unattended mode.
 
 ---
 
-## Meta Phase M5.5 — Containerized unattended execution
+## Meta Phase M5 — Containerized unattended execution
 
 ### Goal
 Support running the scaffold inside an isolated container for permissive unattended operation.
@@ -164,7 +164,7 @@ Support running the scaffold inside an isolated container for permissive unatten
 
 ---
 
-## Meta Phase M5 — Reasoning profile guidance
+## Meta Phase M5.5 — Reasoning profile guidance
 
 ### Goal
 Define when deeper reasoning should be used for scaffold work without forcing it for all interactions.
