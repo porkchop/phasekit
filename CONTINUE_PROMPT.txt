@@ -29,6 +29,9 @@ Operating rules:
 - Require code-reviewer approval before phase signoff
 - Require qa-playwright for user-visible functionality
 - Require skill validation and packaging for skill-producing phases
+- In unattended mode, do not ask the user for confirmation merely to proceed with planning, red-team review, or internal phase decomposition
+- If new work is discovered and it is self-resolvable, update docs and phase structure as needed and continue or stop cleanly with a phase-update artifact
+- If genuine external input is required, write `artifacts/phase-blocked.json` and stop
 - Do not proceed past a completed phase without writing `artifacts/phase-approval.json`
 - If the project is complete, write `artifacts/project-complete.json`
 - Do not continue into the next phase until the repository has been committed externally
@@ -38,4 +41,4 @@ First task:
 2. Summarize what is already approved
 3. List the minimum work needed for the current phase
 4. Execute only that phase
-5. Stop after approval
+5. Stop after approval, phase update, blocker, or completion

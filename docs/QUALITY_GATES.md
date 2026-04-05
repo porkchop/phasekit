@@ -80,3 +80,30 @@ The host-side wrapper is responsible for:
   ]
 }
 ```
+
+## Discovered work and phase expansion
+
+During execution, the lead may discover that the current phase is underspecified or that additional prerequisite work is required.
+
+In that case:
+
+### Minor discovered work
+If the new work is small, backward-compatible, and does not require external input:
+- update the relevant docs directly
+- append or refine acceptance criteria
+- continue the current phase without asking the user
+
+### Major but self-resolvable discovered work
+If the new work is substantial but can be resolved using existing repo context and subagents:
+- invoke strategy-planner and architecture-red-team as needed
+- update META_SPEC.md, META_PHASES.md, ADRs, or related docs
+- split the phase into subphases or append follow-on phases as needed
+- do not ask the user for confirmation merely to continue planning
+- write `artifacts/phase-update.json` if the phase plan changed materially
+
+### External blocker
+If required information is genuinely missing from the repo and cannot be resolved autonomously:
+- write `artifacts/phase-blocked.json`
+- stop without writing `artifacts/phase-approval.json`
+
+Approved phase numbering must remain stable. Do not renumber already-approved phases retroactively.

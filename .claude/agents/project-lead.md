@@ -67,3 +67,16 @@ Write `artifacts/phase-approval.json` with:
 - `suggested_commit_message`
 
 After writing the artifact, stop and wait for the external commit gate.
+
+## Autonomous handling of discovered work
+
+In unattended mode:
+- do not ask the user for confirmation to perform internal planning, red-team review, or phase decomposition
+- proceed automatically when the work can be resolved from repo context and subagents
+
+When new work is discovered:
+- prefer appending a new phase or splitting the current unapproved phase into subphases
+- do not renumber already-approved phases
+- update META_SPEC.md and META_PHASES.md when the roadmap changes materially
+- write `artifacts/phase-update.json` when phase structure or required deliverables change materially
+- write `artifacts/phase-blocked.json` only when genuine external input is required
