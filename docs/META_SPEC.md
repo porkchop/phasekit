@@ -114,4 +114,11 @@ The scaffold must support generation of downstream Claude startup files, includi
 
 These files must be concise, project-oriented, and derived from the selected capability profile and project docs.
 
+### Generation flow
+
+1. Source template: `templates/CLAUDE.template.md`
+2. Placeholders: `{{PROJECT_NAME}}`, `{{OPTIONAL_REFERENCES}}` (currently unused; reserved for profile-driven references)
+3. Rendered by: `scripts/bootstrap-new-project.sh` or `scripts/adopt-existing-repo.sh`
+4. Output: `.claude/CLAUDE.md` in the downstream project (skipped if file already exists)
+
 The scaffold repo’s own `.claude/CLAUDE.md` should remain generic and stable.

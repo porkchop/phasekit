@@ -1,18 +1,17 @@
 {
-  "phase": "meta-M2",
+  "phase": "meta-M2.5",
   "approved": true,
-  "summary": "M2 (skill generation templates): Added templates/skill/ with parameterized SKILL.template.md and agents/openai.yaml. Created scripts/generate-skill.py that reads the capability manifest and generates skill folders by rendering templates with manifest data. Verified reproducible generation of autonomous-product-builder skill folder. Code-reviewer approved with non-blocking suggestions for future hardening.",
+  "summary": "M2.5 (Claude startup file generation): Template existed at templates/CLAUDE.template.md. Patched bootstrap and adopt scripts to render it into downstream .claude/CLAUDE.md. Documented generation flow in META_SPEC.md. Scaffold's own CLAUDE.md unchanged. Code-reviewer approved with non-blocking suggestions (sed escaping, dedup template block, OPTIONAL_REFERENCES placeholder).",
   "changes": [
-    "Created templates/skill/SKILL.template.md (parameterized skill template)",
-    "Created templates/skill/agents/openai.yaml (OpenAI interface template)",
-    "Created scripts/generate-skill.py (manifest-driven skill generation)",
-    "Generated generated/skills/autonomous-product-builder/ (example output)",
-    "Updated capabilities/project-capabilities.yaml (added generate-skill script entry and profile include)"
+    "Patched scripts/bootstrap-new-project.sh to render CLAUDE.template.md",
+    "Patched scripts/adopt-existing-repo.sh to render CLAUDE.template.md",
+    "Added generation flow docs to docs/META_SPEC.md",
+    "Clarified OPTIONAL_REFERENCES placeholder scope in docs"
   ],
   "reviewer_notes": [
-    "Non-blocking: consider warning on unresolved template placeholders",
-    "Non-blocking: .template stripping is substring-based (safe for current templates)",
-    "Non-blocking: manifest preserve_existing_files/require_review_for_overwrite not yet enforced (M3 scope)"
+    "Non-blocking: sed replacement not safe for special chars in PROJECT_NAME (unlikely with basename)",
+    "Non-blocking: duplicated template-rendering block across bootstrap/adopt scripts",
+    "Non-blocking: OPTIONAL_REFERENCES always blanked (profile-driven population deferred)"
   ],
-  "suggested_commit_message": "meta-M2: add skill generation templates and generation script"
+  "suggested_commit_message": "meta-M2.5: approve Claude startup file generation"
 }

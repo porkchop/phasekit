@@ -17,9 +17,9 @@ fi
 PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
 
 if [[ "$MODE" == "continue" ]]; then
-  claude -c -p "$PROMPT_CONTENT"
+  claude -c --permission-mode bypassPermissions -p "$PROMPT_CONTENT"
 else
-  claude -p "$PROMPT_CONTENT"
+  claude -p --permission-mode bypassPermissions "$PROMPT_CONTENT"
 fi
 
 if [[ -f "$DONE_ARTIFACT" ]]; then
