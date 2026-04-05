@@ -34,4 +34,6 @@ Document the chosen stack and any alternatives ruled out.
 
 ## Capability manifest
 
-The scaffold may also use `capabilities/project-capabilities.yaml` as a source of truth for which agents, docs, hooks, scripts, and skills should be present or generated for downstream projects.
+The scaffold uses `capabilities/project-capabilities.yaml` as the single source of truth for which agents, docs, hooks, scripts, and skills should be present or generated for downstream projects.
+
+The manifest schema, field definitions, and output-mapping rules are documented in `docs/CAPABILITY_MANIFEST.md`.
