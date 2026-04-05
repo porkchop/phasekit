@@ -66,6 +66,24 @@ Add templates and generation logic for project-enrichment skills.
 
 ---
 
+## Meta Phase M2.5 — Claude startup file generation
+
+### Goal
+Support generation of downstream `.claude/CLAUDE.md` and optional rules files from templates and capability manifest data.
+
+### Deliverables
+- `templates/CLAUDE.template.md`
+- generation logic or documented generation flow for downstream Claude startup files
+- docs describing how downstream startup files are derived
+
+### Acceptance criteria
+- scaffold can generate a valid downstream `.claude/CLAUDE.md`
+- generated file is concise and references project docs
+- scaffold repo’s own `.claude/CLAUDE.md` remains generic and stable
+- generation behavior is documented
+
+---
+
 ## Meta Phase M3 - Skill validation and packaging
 
 ### Goal

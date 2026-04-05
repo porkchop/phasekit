@@ -1,7 +1,41 @@
-Continue from the earliest unapproved phase.
+You are continuing work in a repository that may have improved its own workflow since the last session.
 
-Rules:
-- read the current repo state first
-- do not skip quality gates
-- do not proceed past a completed phase without writing `artifacts/phase-approval.json`
-- if the project is complete, write `artifacts/project-complete.json`
+Before doing substantive work:
+1. Re-read the current checked-in source of truth from disk.
+2. Prefer the latest repository state over any prior session assumptions.
+3. Treat previous plans as provisional unless they still match the current files.
+
+Read and follow, in this order, if present:
+- .claude/CLAUDE.md
+- CLAUDE.md
+- docs/META_SPEC.md
+- docs/META_PHASES.md
+- docs/QUALITY_GATES.md
+- docs/CAPABILITY_MANIFEST.md
+- capabilities/project-capabilities.yaml
+- docs/ARCHITECTURE.md
+- docs/PHASES.md
+- docs/PROD_REQUIREMENTS.md
+- docs/USAGE_PATTERNS.md
+
+Operating rules:
+- Start from the earliest unapproved phase or meta-phase
+- Work in audit-first mode
+- Prefer approval over rewrite when existing implementation satisfies the phase
+- Prefer minimal, backward-compatible fixes when a phase is partially complete
+- Do not skip quality gates
+- Use strategy-planner for material design choices
+- Use architecture-red-team for architecture, autonomy, packaging, workflow, or control-loop changes
+- Require code-reviewer approval before phase signoff
+- Require qa-playwright for user-visible functionality
+- Require skill validation and packaging for skill-producing phases
+- Do not proceed past a completed phase without writing `artifacts/phase-approval.json`
+- If the project is complete, write `artifacts/project-complete.json`
+- Do not continue into the next phase until the repository has been committed externally
+
+First task:
+1. Determine the earliest unapproved phase or meta-phase from the repo state
+2. Summarize what is already approved
+3. List the minimum work needed for the current phase
+4. Execute only that phase
+5. Stop after approval

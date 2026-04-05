@@ -69,6 +69,8 @@ The scaffold must support generation and maintenance of:
 - capability manifest files
 - docs describing usage, adoption, and extension
 - templates for new downstream projects
+- downstream Claude startup files such as `.claude/CLAUDE.md`
+- optional downstream `.claude/rules/*.md` files
 
 ## Safety rules for self-improvement
 
@@ -103,3 +105,13 @@ This scaffold is successful when it can:
 - generate project skills and supporting assets from a manifest
 - package those skills reliably
 - improve its own workflow safely over time
+
+## Downstream Claude startup files
+
+The scaffold must support generation of downstream Claude startup files, including:
+- `.claude/CLAUDE.md`
+- optional `.claude/rules/*.md`
+
+These files must be concise, project-oriented, and derived from the selected capability profile and project docs.
+
+The scaffold repo’s own `.claude/CLAUDE.md` should remain generic and stable.

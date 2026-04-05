@@ -91,6 +91,12 @@ When doing that:
 - Commits are created by the outer shell wrapper, not by Claude.
 - Keep `.claude/settings.local.json` out of version control.
 
+## Claude startup files
+
+This scaffold includes a generic `.claude/CLAUDE.md` for the scaffold repo itself.
+
+Downstream project-specific Claude startup files should be generated from templates rather than copied from the scaffold repo unchanged.
+
 ## Deliverables produced by the workflow
 
 - `artifacts/decision-memo.md`
