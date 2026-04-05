@@ -104,3 +104,21 @@ Downstream project-specific Claude startup files should be generated from templa
 - `artifacts/project-complete.json`
 - packaged skill artifacts where relevant
 - one git commit per approved phase
+
+## Execution modes
+
+This scaffold supports two ways of working:
+
+### Interactive collaboration mode
+Use Claude directly on the repository with conservative shared settings. This is the default mode and is intended for normal development, design, review, and iteration.
+
+### Containerized unattended mode
+Use the wrapper scripts in an isolated container when you intentionally want autonomous phase-gated work with permissive execution. This mode is opt-in and intended only for trusted repositories.
+
+The scaffold is designed so that unattended behavior does not interfere with normal direct work on the repo.
+
+## Containerized unattended runs
+
+For unattended permissive execution, prefer an isolated container environment with local-only overrides or explicit command-line permission flags.
+
+Do not enable permissive execution as the default shared project setting for all users.

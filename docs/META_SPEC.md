@@ -47,6 +47,55 @@ The repo generates reusable enrichment assets for downstream projects, including
 ### Mode 3: Self-improvement mode
 The repo improves its own templates, agents, quality gates, packaging flow, and skill-generation pipeline using the same disciplined workflow it provides to downstream repos.
 
+## Execution modes
+
+The scaffold must support at least two execution modes:
+
+### Interactive collaboration mode
+Used when a human is directly collaborating with Claude on this repository or a downstream project.
+
+Requirements:
+- conservative shared project settings
+- no assumption of permissive execution
+- minimal interference with normal repo work
+- easy direct use of Claude on the repository itself
+
+### Containerized unattended mode
+Used when the scaffold runs autonomous phase-gated work with permissive execution.
+
+Requirements:
+- isolated container environment
+- documented initialization flow
+- local-only permissive settings or command-line overrides
+- wrapper scripts able to run inside the container
+- clear warning that this mode is for trusted repositories only
+
+The scaffold should prefer interactive collaboration mode by default.
+Containerized unattended mode should be opt-in.
+
+## Containerization support
+
+The scaffold must be able to assist users in setting up a containerized execution environment suitable for unattended Claude Code runs.
+
+This support may include:
+- reference container configuration
+- initialization scripts
+- documentation for starting the container
+- wrapper scripts that operate inside the container
+- safety guidance for permissive execution
+
+The scaffold may reuse or adapt Anthropic's reference devcontainer approach, but should not require Visual Studio Code as the only way to use it.
+
+## Non-interference principle
+
+The scaffold must not make ordinary human collaboration on the repository cumbersome.
+
+Requirements:
+- project-scoped settings should remain conservative by default
+- permissive unattended behavior should live in local/container-only configuration or explicit command-line overrides
+- the repository should remain comfortable to use directly with Claude for design, implementation, and review work
+- autonomous workflow behavior should be opt-in rather than always-on
+
 ## Design principles
 
 - Audit before rewrite

@@ -11,6 +11,9 @@ If a capability already exists:
 
 Do not skip review, validation, or commit gates because code already exists.
 
+Note: Existing approved phase numbers are stable and must not be renumbered retroactively.
+New work discovered later should be appended as new phases rather than inserted before already-approved phases.
+
 ---
 
 ## Meta Phase M0 - Self-hosting foundation
@@ -120,7 +123,65 @@ Make it easy to apply scaffold capabilities to another repo.
 
 ---
 
-## Meta Phase M5 - Planner and red-team integration
+## Meta Phase M4 — Execution modes and non-interference
+
+### Goal
+Formalize interactive collaboration mode and containerized unattended mode.
+
+### Deliverables
+- docs describing execution modes
+- settings strategy for project vs local vs command-line overrides
+- wrapper updates if needed
+- non-interference guidance for working on the scaffold repo itself
+
+### Acceptance criteria
+- interactive work on the scaffold repo uses conservative defaults
+- unattended mode is opt-in
+- mode selection is documented
+- project settings do not force permissive execution for all users
+- direct collaboration with Claude on the scaffold repo remains straightforward
+
+---
+
+## Meta Phase M5 — Containerized unattended execution
+
+### Goal
+Support running the scaffold inside an isolated container for permissive unattended operation.
+
+### Deliverables
+- containerization docs and initialization flow
+- reference container configuration or integration strategy
+- wrapper scripts that can run in-container
+- safety guidance for trusted repositories
+- optional setup flow to initialize local container-specific settings
+
+### Acceptance criteria
+- a user can initialize the containerized environment from docs/scripts
+- unattended wrappers work in the container
+- permissive mode is confined to local/container-specific configuration
+- the approach is documented as opt-in
+- the approach does not require VS Code as the only usage path
+
+---
+
+## Meta Phase M6 — Reasoning profile guidance
+
+### Goal
+Define when deeper reasoning should be used for scaffold work without forcing it for all interactions.
+
+### Deliverables
+- guidance for lead/planner/reviewer roles
+- docs describing when deeper reasoning is helpful
+- non-interference guidance for lightweight interactive work
+
+### Acceptance criteria
+- deeper reasoning is recommended for complex design, architecture, and review work
+- ordinary collaboration remains lightweight by default
+- no global always-on heavy mode is required
+
+---
+
+## Meta Phase M7 - Planner and red-team integration
 
 ### Goal
 Formalize plan/adversarial review for material architectural work.
@@ -138,7 +199,7 @@ Formalize plan/adversarial review for material architectural work.
 
 ---
 
-## Meta Phase M6 - Self-application and refinement
+## Meta Phase M8 - Self-application and refinement
 
 ### Goal
 Use the scaffold to improve itself under full quality gates.
@@ -156,7 +217,7 @@ Use the scaffold to improve itself under full quality gates.
 
 ---
 
-## Meta Phase M7 - Generalization and compatibility
+## Meta Phase M9 - Generalization and compatibility
 
 ### Goal
 Broaden the scaffold beyond the original project style without losing quality.
