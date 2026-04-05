@@ -164,6 +164,30 @@ Support running the scaffold inside an isolated container for permissive unatten
 
 ---
 
+## Meta Phase M5.1 — Adopt Anthropic reference devcontainer
+
+### Goal
+Replace the custom container setup with one based on Anthropic's reference devcontainer, gaining firewall-based network isolation while preserving the existing phase-loop workflow and CLI-only usage path.
+
+### Deliverables
+- `.devcontainer/devcontainer.json` based on Anthropic's reference
+- `.devcontainer/Dockerfile` adapted from Anthropic's reference (with scaffold-specific additions: Python 3, pyyaml)
+- `.devcontainer/init-firewall.sh` from Anthropic's reference (domain-whitelisted outbound firewall)
+- updated `scripts/container-setup.sh` to build from `.devcontainer/`
+- removal or deprecation of `container/Dockerfile`
+- updated `docs/CONTAINERIZATION.md`
+- updated `capabilities/project-capabilities.yaml` manifest entries
+
+### Acceptance criteria
+- container uses Anthropic's firewall rules (default-deny + whitelisted domains)
+- `run-until-done.sh` continues to work as the entrypoint
+- `container-setup.sh build/run/shell` commands still work
+- VS Code is not required (CLI-only path preserved)
+- non-root user is preserved
+- docs updated to reflect the new setup
+
+---
+
 ## Meta Phase M5.5 — Reasoning profile guidance
 
 ### Goal

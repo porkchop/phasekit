@@ -77,14 +77,15 @@ Containerized unattended mode should be opt-in.
 
 The scaffold must be able to assist users in setting up a containerized execution environment suitable for unattended Claude Code runs.
 
-This support may include:
-- reference container configuration
+This support must include:
+- reference container configuration based on Anthropic's reference devcontainer
+- firewall rules restricting outbound network access to whitelisted domains only (default-deny policy)
 - initialization scripts
 - documentation for starting the container
 - wrapper scripts that operate inside the container
 - safety guidance for permissive execution
 
-The scaffold may reuse or adapt Anthropic's reference devcontainer approach, but should not require Visual Studio Code as the only way to use it.
+The scaffold should adopt Anthropic's reference devcontainer approach (https://github.com/anthropics/claude-code/tree/main/.devcontainer) as the basis for its container configuration, adapting it with scaffold-specific additions as needed. The approach must work without Visual Studio Code — users must be able to build and run the container via CLI tools (`docker build`, `devcontainer` CLI, or wrapper scripts).
 
 ## Non-interference principle
 
