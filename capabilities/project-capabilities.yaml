@@ -33,6 +33,8 @@ profiles:
       - run-phase
       - run-until-done
       - generate-skill
+      - validate-skill
+      - package-skill
 
   game-project:
     extends: default
@@ -159,6 +161,14 @@ scripts:
 
   generate-skill:
     path: scripts/generate-skill.py
+    required: true
+
+  validate-skill:
+    path: scripts/validate-skill.py
+    required: true
+
+  package-skill:
+    path: scripts/package-skill.py
     required: true
 
 generation:

@@ -1,17 +1,18 @@
 {
-  "phase": "meta-M2.5",
+  "phase": "meta-M3",
   "approved": true,
-  "summary": "M2.5 (Claude startup file generation): Template existed at templates/CLAUDE.template.md. Patched bootstrap and adopt scripts to render it into downstream .claude/CLAUDE.md. Documented generation flow in META_SPEC.md. Scaffold's own CLAUDE.md unchanged. Code-reviewer approved with non-blocking suggestions (sed escaping, dedup template block, OPTIONAL_REFERENCES placeholder).",
+  "summary": "M3 (Skill validation and packaging): Added scripts/validate-skill.py to validate skill folder structure (SKILL.md frontmatter, agents/openai.yaml) and scripts/package-skill.py to produce skill.zip archives. Packaging runs validation first and rejects symlinks and out-of-tree paths. Both scripts registered in manifest and default profile. Packaging flow documented in META_SPEC.md. Architecture red-team caught two blocking issues (symlink traversal, dead __pycache__ filter) — both fixed. Code-reviewer approved.",
   "changes": [
-    "Patched scripts/bootstrap-new-project.sh to render CLAUDE.template.md",
-    "Patched scripts/adopt-existing-repo.sh to render CLAUDE.template.md",
-    "Added generation flow docs to docs/META_SPEC.md",
-    "Clarified OPTIONAL_REFERENCES placeholder scope in docs"
+    "Created scripts/validate-skill.py (skill structure validation)",
+    "Created scripts/package-skill.py (skill packaging with pre-validation)",
+    "Updated capabilities/project-capabilities.yaml (added validate-skill and package-skill entries)",
+    "Updated docs/META_SPEC.md (added validation and packaging flow documentation)"
   ],
   "reviewer_notes": [
-    "Non-blocking: sed replacement not safe for special chars in PROJECT_NAME (unlikely with basename)",
-    "Non-blocking: duplicated template-rendering block across bootstrap/adopt scripts",
-    "Non-blocking: OPTIONAL_REFERENCES always blanked (profile-driven population deferred)"
+    "Red-team blocking: symlink traversal in zip creation — fixed with is_symlink() and is_relative_to() checks",
+    "Red-team blocking: __pycache__ filter was dead code — fixed to check path parts",
+    "Non-blocking: duplicated load_manifest/resolve_skill_dir across scripts (acceptable at this scale)",
+    "Non-blocking: validation is shallow (SKILL.md + openai.yaml only) — sufficient for M3, can deepen later"
   ],
-  "suggested_commit_message": "meta-M2.5: approve Claude startup file generation"
+  "suggested_commit_message": "meta-M3: add skill validation and packaging scripts"
 }

@@ -122,3 +122,39 @@ These files must be concise, project-oriented, and derived from the selected cap
 4. Output: `.claude/CLAUDE.md` in the downstream project (skipped if file already exists)
 
 The scaffold repo’s own `.claude/CLAUDE.md` should remain generic and stable.
+
+## Skill validation and packaging flow
+
+Skills declared in `capabilities/project-capabilities.yaml` can be validated and packaged using dedicated scripts.
+
+### Validation
+
+```
+python3 scripts/validate-skill.py              # validate all skills with validate=true
+python3 scripts/validate-skill.py --skill KEY  # validate a specific manifest skill
+python3 scripts/validate-skill.py --source DIR # validate any skill directory
+```
+
+Validation checks:
+- `SKILL.md` exists with YAML frontmatter containing `name` and `description`
+- `SKILL.md` has at least one markdown heading
+- `agents/openai.yaml` exists with a valid `interface` key
+
+### Packaging
+
+```
+python3 scripts/package-skill.py               # package all skills with package=true
+python3 scripts/package-skill.py --skill KEY   # package a specific skill
+python3 scripts/package-skill.py --force        # overwrite existing archives
+```
+
+Packaging behavior:
+- Runs validation before packaging; fails if validation fails
+- Writes to the `package_output` path from the manifest (e.g. `dist/skills/<name>/skill.zip`)
+- Excludes dotfiles and `__pycache__`
+- Reports file count and archive size
+
+### Output conventions
+
+- Generated skill folders: `generated/skills/<name>/` (from `generation.output_root`)
+- Packaged archives: `dist/skills/<name>/skill.zip` (from `generation.skills_output_root`)
