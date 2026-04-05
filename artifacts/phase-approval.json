@@ -1,24 +1,15 @@
 {
-  "phase": "meta-M4",
+  "phase": "meta-M4.5",
   "approved": true,
-  "summary": "M4 (Downstream enrichment flow): Created scripts/enrich-project.py — a manifest-driven enrichment script that resolves capability profiles and copies agents, docs, hooks, scripts, and a rendered .claude/CLAUDE.md to downstream projects. Refactored bootstrap-new-project.sh and adopt-existing-repo.sh to delegate to the enrichment script. Fixed duplicate M4 naming conflict in META_PHASES.md (execution modes → M4.5, containerization → M5.5). Updated USAGE_PATTERNS.md with concrete enrichment commands. Updated example READMEs with expected directory structures. Code-reviewer caught three blocking issues (force flag on CLAUDE.md, $2→$1 in shell scripts, cycle detection in profile resolution) — all fixed.",
+  "summary": "M4.5 (Execution modes and non-interference): Created docs/EXECUTION_MODES.md documenting interactive collaboration (default) vs containerized unattended (opt-in) modes, settings layering strategy (project -> local -> CLI), environment variables, override guidance, and non-interference principle. Pre-existing .claude/settings.json already provided conservative defaults; wrapper scripts already used --permission-mode bypassPermissions only when explicitly invoked. Registered EXECUTION_MODES doc in manifest and default profile. Code-reviewer approved.",
   "changes": [
-    "Created scripts/enrich-project.py (manifest-driven downstream enrichment)",
-    "Refactored scripts/bootstrap-new-project.sh to delegate to enrich-project.py",
-    "Refactored scripts/adopt-existing-repo.sh to delegate to enrich-project.py",
-    "Updated capabilities/project-capabilities.yaml (added enrich-project entry)",
-    "Updated docs/USAGE_PATTERNS.md (concrete enrichment commands for Pattern 1 and 2)",
-    "Updated docs/META_PHASES.md (fixed duplicate M4 naming, renumbered M4.5/M5.5/M5-M8)",
-    "Updated examples/game-project/README.md (expected structure and setup steps)",
-    "Updated examples/saas-project/README.md (expected structure and setup steps)"
+    "Created docs/EXECUTION_MODES.md (execution mode documentation)",
+    "Updated capabilities/project-capabilities.yaml (added EXECUTION_MODES doc entry and default profile include)"
   ],
   "reviewer_notes": [
-    "Blocking (fixed): render_claude_md did not respect --force flag",
-    "Blocking (fixed): shell scripts used $2 for profile instead of $1",
-    "Blocking (fixed): resolve_profile had no cycle detection for extends",
-    "Non-blocking: PHASES/QUALITY_GATES/USAGE_PATTERNS copied verbatim (may need downstream customization)",
-    "Non-blocking: workflow_scripts allowlist and scaffold_only_docs are hardcoded (could be manifest-driven later)",
-    "Non-blocking: template_map duplicates knowledge about which docs have templates"
+    "Non-blocking: partial duplication of execution mode prose across META_SPEC.md, EXECUTION_MODES.md, and CLAUDE.md",
+    "Non-blocking: environment variable table omits PROMPT_FILE positional arg",
+    "Non-blocking: run-phase.sh git add -A could stage unintended files (pre-existing, out of M4.5 scope)"
   ],
-  "suggested_commit_message": "meta-M4: add manifest-driven downstream enrichment flow"
+  "suggested_commit_message": "meta-M4.5: document execution modes and non-interference principle"
 }

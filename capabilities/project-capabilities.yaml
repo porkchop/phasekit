@@ -27,6 +27,7 @@ profiles:
       - META_SPEC
       - META_PHASES
       - CAPABILITY_MANIFEST
+      - EXECUTION_MODES
     include_hooks:
       - deny-dangerous-commands
     include_scripts:
@@ -144,6 +145,10 @@ docs:
 
   CAPABILITY_MANIFEST:
     path: docs/CAPABILITY_MANIFEST.md
+    required: true
+
+  EXECUTION_MODES:
+    path: docs/EXECUTION_MODES.md
     required: true
 
 hooks:
