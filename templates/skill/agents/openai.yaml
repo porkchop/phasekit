@@ -1,0 +1,3 @@
+interface:
+  display_name: "{{SKILL_DISPLAY_NAME}}"
+  short_description: "{{SKILL_PURPOSE}}"

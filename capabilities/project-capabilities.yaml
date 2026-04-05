@@ -32,6 +32,7 @@ profiles:
     include_scripts:
       - run-phase
       - run-until-done
+      - generate-skill
 
   game-project:
     extends: default
@@ -154,6 +155,10 @@ scripts:
 
   run-until-done:
     path: scripts/run-until-done.sh
+    required: true
+
+  generate-skill:
+    path: scripts/generate-skill.py
     required: true
 
 generation:

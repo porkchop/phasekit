@@ -1,0 +1,3 @@
+interface:
+  display_name: "Autonomous Product Builder"
+  short_description: "reusable workflow skill for project buildout, audit-first execution, and scaffold self-improvement"
