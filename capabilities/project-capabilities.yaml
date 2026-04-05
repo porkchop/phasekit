@@ -28,6 +28,7 @@ profiles:
       - META_PHASES
       - CAPABILITY_MANIFEST
       - EXECUTION_MODES
+      - CONTAINERIZATION
     include_hooks:
       - deny-dangerous-commands
     include_scripts:
@@ -151,6 +152,10 @@ docs:
     path: docs/EXECUTION_MODES.md
     required: true
 
+  CONTAINERIZATION:
+    path: docs/CONTAINERIZATION.md
+    required: false
+
 hooks:
   deny-dangerous-commands:
     path: .claude/hooks/deny-dangerous-commands.sh
@@ -180,6 +185,10 @@ scripts:
   enrich-project:
     path: scripts/enrich-project.py
     required: true
+
+  container-setup:
+    path: scripts/container-setup.sh
+    required: false
 
 generation:
   output_root: generated
