@@ -25,10 +25,29 @@ The container uses Anthropic's reference firewall (`init-firewall.sh`) to restri
 
 **Only use this with trusted repositories and code you are willing to have fully modified.** Do not mount sensitive directories alongside the repo.
 
+## Authentication
+
+The container authenticates with the Anthropic API via the `ANTHROPIC_API_KEY` environment variable. No interactive `claude auth login` is needed — Claude Code in print mode (`-p`) uses the API key directly.
+
+To get an API key:
+1. Go to the [Anthropic Console](https://console.anthropic.com/)
+2. Create an API key under Settings → API Keys
+3. Set it in your host shell:
+
+```bash
+# Option 1: Export for the current session
+export ANTHROPIC_API_KEY='sk-ant-...'
+
+# Option 2: Persist across sessions (add to ~/.bashrc or ~/.zshrc)
+echo 'export ANTHROPIC_API_KEY="sk-ant-..."' >> ~/.bashrc
+```
+
+The key is passed into the container at runtime via `docker run -e` and never stored in any repo file.
+
 ## Prerequisites
 
 - Docker installed and running
-- `ANTHROPIC_API_KEY` environment variable set
+- `ANTHROPIC_API_KEY` environment variable set (see above)
 - The scaffold repository cloned locally
 
 ## Quick start

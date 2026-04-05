@@ -122,3 +122,14 @@ The scaffold is designed so that unattended behavior does not interfere with nor
 For unattended permissive execution, prefer an isolated container environment with local-only overrides or explicit command-line permission flags.
 
 Do not enable permissive execution as the default shared project setting for all users.
+
+### Authentication
+
+The container authenticates via the `ANTHROPIC_API_KEY` environment variable — no interactive `claude auth login` is needed. Get an API key from the [Anthropic Console](https://console.anthropic.com/), then:
+
+```bash
+export ANTHROPIC_API_KEY='sk-ant-...'
+bash scripts/container-setup.sh run
+```
+
+The key is passed into the container at runtime and never stored in repo files. See `docs/CONTAINERIZATION.md` for full setup details.
