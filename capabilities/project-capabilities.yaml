@@ -162,6 +162,11 @@ docs:
     path: docs/ADR_TEMPLATE.md
     required: false
 
+  SELF_APPLICATION_EXAMPLE:
+    path: docs/SELF_APPLICATION_EXAMPLE.md
+    required: false
+    # scaffold-internal: describes the M7 self-improvement cycle; not included in downstream enrichment profiles
+
   CONTAINERIZATION:
     path: docs/CONTAINERIZATION.md
     required: false

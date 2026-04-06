@@ -43,6 +43,7 @@ Any change affecting:
 - settings
 - generation scripts
 - skill packaging flow
+- subagent definitions (`.claude/agents/`)
 
 must include:
 - rationale

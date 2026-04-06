@@ -1,6 +1,23 @@
 {
-  "phase": "meta-M6",
+  "phase": "meta-M7",
   "approved": true,
-  "summary": "Meta-M6 planner and red-team integration is approved. All four deliverables exist and all three acceptance criteria pass: (1) design-heavy work triggers planner + red-team — enforced in project-lead.md planning policy (five trigger conditions plus step-by-step cycle) and QUALITY_GATES.md planning gate (now six triggers, aligned); (2) decision memos are stored in docs or ADRs — QUALITY_GATES.md documents artifacts/decision-memo.md as required output, docs/ADR_TEMPLATE.md provides the template with storage location (docs/adr/) and naming convention (ADR-NNNN-short-title.md), docs/adr/ directory established; (3) implementation tasks trace back to an approved decision — QUALITY_GATES.md phase-approval artifact schema now includes decision_memo field required for planning-gated phases. Minor manifest gap fixed: ADR_TEMPLATE added to capabilities/project-capabilities.yaml and default profile. code-reviewer approved both the initial audit and the blocking-issue fixes.",
-  "suggested_commit_message": "meta-M6: formalize planner and red-team integration"
+  "summary": "M7 (Self-application and refinement): Scaffold successfully improved itself under full quality gates. All 9 agents audited with explicit dispositions. qa-playwright.md patched with Scope section (reviewed by code-reviewer, not circular). QUALITY_GATES.md control-loop gate extended to cover subagent definitions (reviewed by architecture-red-team, not circular). SELF_APPLICATION_EXAMPLE.md written as worked example. Decision memo documents planning gate, red-team critique, and circularity mitigation.",
+  "changes": [
+    "Audited all 9 agent definitions (8 approved as-is, 1 patched)",
+    "Added Scope section to .claude/agents/qa-playwright.md",
+    "Added 'subagent definitions' to control-loop change gate in docs/QUALITY_GATES.md",
+    "Created docs/SELF_APPLICATION_EXAMPLE.md (scaffold-internal worked example)",
+    "Added SELF_APPLICATION_EXAMPLE to capabilities/project-capabilities.yaml",
+    "Created artifacts/decision-memo.md with M7 planning gate output"
+  ],
+  "decision_memo": "artifacts/decision-memo.md",
+  "reviewer_notes": [
+    "Strategy-planner: Option C selected (targeted audit with minimal patches)",
+    "Red-team blocking (fixed): circular approval risk — resolved by scope restriction",
+    "Red-team scope bound: guardrail change requires named gap — satisfied",
+    "Red-team scope bound: usage example must reference real artifacts — satisfied",
+    "Code-reviewer: approved qa-playwright.md patch and SELF_APPLICATION_EXAMPLE.md",
+    "Architecture-red-team: approved QUALITY_GATES.md guardrail change"
+  ],
+  "suggested_commit_message": "meta-M7: self-application and refinement under full quality gates"
 }

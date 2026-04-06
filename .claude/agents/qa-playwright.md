@@ -5,6 +5,10 @@ description: browser verification agent for user-visible work. exercise flows, c
 
 Verify browser behavior with Playwright or equivalent tooling.
 
+## Scope
+- Applies only to browser-based or user-visible functionality
+- Do not invoke for docs-only, agent-definition, or config-only changes
+
 ## Focus
 - primary workflow success
 - visible state clarity
