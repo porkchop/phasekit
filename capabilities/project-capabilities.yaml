@@ -167,6 +167,16 @@ docs:
     required: false
     # scaffold-internal: describes the M7 self-improvement cycle; not included in downstream enrichment profiles
 
+  COMPATIBILITY:
+    path: docs/COMPATIBILITY.md
+    required: false
+    # scaffold-internal: describes versioning and compatibility policy for the scaffold itself; not included in downstream enrichment profiles
+
+  EXTENSION_PATTERNS:
+    path: docs/EXTENSION_PATTERNS.md
+    required: false
+    # scaffold-internal: describes how to extend the scaffold's manifest and profiles; not included in downstream enrichment profiles
+
   CONTAINERIZATION:
     path: docs/CONTAINERIZATION.md
     required: false

@@ -1,69 +1,99 @@
-# Decision Memo: Meta-M7 Self-Application and Refinement
+# Decision Memo: Meta-M8 Generalization and Compatibility
 
 **Date:** 2026-04-06  
-**Phase:** meta-M7  
-**Planning gate triggered by:** scaffold control flow and agent definitions affected
+**Phase:** meta-M8  
+**Planning gate triggered by:** new documentation deliverables affecting downstream adoption and extension surface
 
 ---
 
-## Summary
+## Decision Summary
 
-Meta-M7 uses the scaffold's own workflow to improve itself. The planning gate was triggered and resolved as follows: strategy-planner produced an implementation memo; architecture-red-team critiqued it and identified one blocking concern (circular approval risk) and two scope-bounding requirements. The outcome is a narrow, reviewable set of changes that satisfies all four M7 deliverables without circular approval risk or scope inflation.
+Deliver M8 as two new docs (COMPATIBILITY.md, EXTENSION_PATTERNS.md) and a small update to CAPABILITY_MANIFEST.md for versioning policy. No new scripts, no new profiles, no schema changes.
 
 ---
 
 ## Options Considered
 
-**Option A — Audit only, no changes**  
-Approve all 9 agents as-is, confirm existing guardrails are sufficient. Fails the acceptance criterion "scaffold successfully improves at least one part of itself."
+### Option A -- Docs-heavy: new guide per gap, plus new profiles
 
-**Option B — Broad agent rewrite**  
-Rewrite all 9 agent definitions with richer prompting. High regression risk; violates "prefer minimal changes" rule; circular approval risk if reviewer agent definitions change.
+Add four new documents (compatibility guide, extension patterns, profile selection matrix, adoption checklist) and two additional example profiles (e.g., `cli-tool`, `library`). Update the manifest schema with a formal semver versioning mechanism (migration scripts, version-checking logic in enrich-project.py).
 
-**Option C — Targeted audit with minimal patches and one new doc (selected)**  
-Audit all 9 agents against fitness-for-purpose criteria. Make only changes with a named, specific gap. Write the self-application example document as the primary deliverable.
+**Pros:** Comprehensive coverage. More profiles demonstrate breadth.  
+**Cons:** High scope for a scaffold that already works. New profiles without real downstream validation are aspirational. Migration scripts imply a versioning mechanism that does not yet have a second version to migrate from. The adoption checklist largely duplicates USAGE_PATTERNS.md patterns 1-2.
 
-**Option D — Add a new meta-lead agent**  
-Add a tenth agent for self-improvement orchestration. Unnecessary; project-lead already has a self-improvement mode section.
+**Verdict:** Over-engineered. Violates "practical, not aspirational" constraint.
 
----
+### Option B -- Minimal docs: two new documents, one doc update, no new code (recommended)
 
-## Recommended Approach
+Add two focused documents:
+1. `docs/COMPATIBILITY.md` -- versioning policy, compatibility promises, and upgrade guidance for downstream repos
+2. `docs/EXTENSION_PATTERNS.md` -- how to add custom profiles, agents, hooks, and skills; profile selection guidance included as a section rather than a standalone doc
 
-### Subagent audit results
+Update one existing document:
+3. `docs/CAPABILITY_MANIFEST.md` -- add a "Versioning policy" section clarifying what `version: 1` means and when it would increment
 
-| Agent | Disposition | Rationale |
-|---|---|---|
-| project-lead | approved as-is | Self-improvement mode section is present and accurate |
-| strategy-planner | approved as-is | Focus and output format align with planning gate requirements |
-| architecture-red-team | approved as-is | Adversarial focus and output format correct |
-| code-reviewer | approved as-is | Scope and verdict format are actionable |
-| qa-playwright | **minimal patch** | Missing scope clarification: no guidance on when NOT to invoke |
-| engine-builder | approved as-is | Scope is correctly narrow |
-| frontend-builder | approved as-is | Scope is correctly narrow |
-| backend-builder | approved as-is | Scope is correctly narrow |
-| release-hardening | approved as-is | Scope is correctly narrow |
+No new profiles, no new scripts, no schema changes.
 
-### Changes in scope
+**Pros:** Directly satisfies all three acceptance criteria. Keeps scope narrow. Documents what already exists rather than inventing new mechanisms. Profile selection guidance fits naturally in the extension doc rather than requiring its own file.  
+**Cons:** Does not add new example profiles. Downstream repos get guidance but not automation for upgrades.
 
-1. **`qa-playwright.md`** — add a Scope section stating the agent applies only to browser/user-visible work and must not be invoked for docs-only or agent-definition changes. Reviewed by `code-reviewer` (not circular: code-reviewer.md is unchanged).
+**Verdict:** Right-sized. Covers the gaps without speculative engineering.
 
-2. **`docs/QUALITY_GATES.md`** — add "subagent definitions (`.claude/agents/`)" to the control-loop change gate trigger list. Named gap: agents directly shape scaffold behavior but were not listed as gated triggers. Reviewed by `architecture-red-team` (not circular: architecture-red-team.md is unchanged).
+### Option C -- Update-only: fold everything into existing docs
 
-3. **`docs/SELF_APPLICATION_EXAMPLE.md`** — new document providing a worked example of the M7 self-application cycle. References real M7 artifacts (`artifacts/decision-memo.md`, `artifacts/phase-approval.json`). Reviewed by `code-reviewer`.
+Add compatibility and extension content as new sections in CAPABILITY_MANIFEST.md and USAGE_PATTERNS.md. No new files.
 
-### Changes explicitly out of scope
+**Pros:** Fewest new files.  
+**Cons:** CAPABILITY_MANIFEST.md is already long and focused on schema reference. Adding compatibility policy and extension how-tos would dilute its purpose. USAGE_PATTERNS.md is a workflow catalog, not a reference guide. Reviewers would flag the scope creep in those files.
 
-- No changes to `code-reviewer.md`, `architecture-red-team.md`, or `strategy-planner.md` — these agents approved the plan and must not be co-modified.
-- No changes to builder agents (`engine-builder`, `frontend-builder`, `backend-builder`, `release-hardening`) — no deficiency found.
-- No skill repackaging — `autonomous-product-builder` skill source is not changing.
-- No new ADR — changes are below the ADR threshold (additive, no schema/persistence/auth impact).
+**Verdict:** Too cramped. The topics deserve their own documents.
 
 ---
 
-## Circular Approval Risk Mitigation
+## Recommended Approach: Option B
 
-The red-team identified that an agent should not be the sole approver of changes to its own definition. This is addressed by the scope above: the only modified agent definition is `qa-playwright.md`, which is reviewed by `code-reviewer` (unchanged). The guardrail change in `QUALITY_GATES.md` is reviewed by `architecture-red-team` (unchanged). No circular approval path exists.
+### Deliverables
+
+**1. `docs/COMPATIBILITY.md` (new)**
+
+Contents:
+- Scaffold versioning policy: manifest `version` field is the compatibility contract; it increments only for breaking changes to schema shape or script interfaces
+- Current version: `1`. No breaking changes have occurred since initial release
+- Compatibility promise: downstream repos on version 1 will continue to work with future scaffold updates that stay on version 1
+- Upgrade guidance: when adopting a newer scaffold release, re-run `enrich-project.py --dry-run` to see what would change; review diffs before applying
+- Breaking change protocol: if version 2 is ever needed, the changelog will list every breaking change and the migration steps
+- Reference to M5.1 migration (in CONTAINERIZATION.md) as an example of a non-breaking evolution
+
+**2. `docs/EXTENSION_PATTERNS.md` (new)**
+
+Contents:
+- How to add a custom profile (add entry to `profiles:` in manifest, reference existing agent/doc/hook/script keys, optionally use `extends`)
+- How to add a custom agent (create `.md` file, add to `agents:` section, include in relevant profiles)
+- How to add a custom hook (create script, add to `hooks:` section, include in profiles)
+- How to add a custom skill (create directory, add to `skills:` section, update generation/packaging)
+- How to add a custom doc (create file, add to `docs:` section)
+- Profile selection guide: decision matrix mapping project characteristics to recommended profiles (table format)
+- Downstream adoption checklist: 5-step list referencing bootstrap/adopt scripts and pointing to USAGE_PATTERNS.md for detailed workflows
+
+**3. `docs/CAPABILITY_MANIFEST.md` update (existing)**
+
+Add a "Versioning policy" section after the existing "Extending the manifest" section:
+- `version: 1` is the current and only schema version
+- The version increments only when the schema shape changes in a backward-incompatible way (e.g., removing a required key, changing key semantics)
+- Additive changes (new optional keys, new profiles, new capability entries) do not require a version bump
+- Cross-reference to `docs/COMPATIBILITY.md` for full policy
+
+**4. Manifest updates**
+
+Add the two new docs to `capabilities/project-capabilities.yaml` under the `docs:` section and include them in the `default` profile's `include_docs` list.
+
+### What is explicitly out of scope
+
+- No new profiles (game-project and saas-project already demonstrate the extension pattern; adding more without real downstream use is speculative)
+- No new scripts or migration tooling (no second version exists to migrate from)
+- No schema changes to the manifest format
+- No changes to enrich-project.py or other scripts
+- No new example project directories
 
 ---
 
@@ -71,29 +101,25 @@ The red-team identified that an agent should not be the sole approver of changes
 
 | Risk | Mitigation |
 |---|---|
-| Prompt drift from agent changes | Patch is additive only (new Scope section); no behavior change, only clarification |
-| Scope inflation ("as needed" is unbounded) | All doc/script changes require a named deficiency from the audit |
-| Stale usage example | Example references real M7 artifacts that must exist before phase-approval |
-| Guardrail duplication | New guardrail text adds "subagent definitions" to an existing list; does not create a parallel gate |
+| Compatibility doc makes promises the scaffold cannot keep | Policy is minimal: "version 1 is stable; we will document breaking changes if they happen." No automation promises. |
+| Extension patterns doc becomes stale as scaffold evolves | Each pattern references specific manifest keys and file paths that are validated by existing scripts. Staleness would surface during enrichment runs. |
+| Profile selection guidance is too generic | Use a concrete table with project characteristics mapped to profiles. Keep it short. |
+| Downstream adoption checklist duplicates USAGE_PATTERNS.md | Checklist is a 5-item summary that cross-references patterns 1 and 2 rather than repeating them. |
 
 ---
 
 ## Rollback Path
 
-All changes are in tracked files. The M6 commit (`c6ca510`) is the rollback target. To revert:
-```
-git revert HEAD  # after M7 commit
-```
-No schema, persistence, or external API is involved; rollback is low-risk.
+All changes are additive documentation. Rollback is `git revert HEAD` after the M8 commit. No scripts, schemas, or behavior change.
 
 ---
 
-## Acceptance Criteria for This Phase
+## Acceptance Criteria
 
-1. All 9 agents audited; explicit disposition recorded for each (done in this memo).
-2. `qa-playwright.md` has a Scope section added.
-3. `docs/QUALITY_GATES.md` control-loop gate includes "subagent definitions."
-4. `docs/SELF_APPLICATION_EXAMPLE.md` exists and references M7 artifacts.
-5. `code-reviewer` approves all file changes.
-6. No modified agent is used as the sole reviewer of its own changes.
-7. `artifacts/phase-approval.json` written with `approved: true` for meta-M7.
+1. `docs/COMPATIBILITY.md` exists and covers versioning policy, upgrade guidance, and compatibility promise.
+2. `docs/EXTENSION_PATTERNS.md` exists and covers adding custom profiles, agents, hooks, skills, and docs; includes profile selection matrix and adoption checklist.
+3. `docs/CAPABILITY_MANIFEST.md` includes a "Versioning policy" section cross-referencing COMPATIBILITY.md.
+4. `capabilities/project-capabilities.yaml` includes entries for both new docs.
+5. `code-reviewer` approves all changes.
+6. `architecture-red-team` confirms no over-engineering or speculative scope.
+7. `artifacts/phase-approval.json` written with `approved: true` for meta-M8.

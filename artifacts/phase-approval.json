@@ -1,23 +1,20 @@
 {
-  "phase": "meta-M7",
+  "phase": "meta-M8",
   "approved": true,
-  "summary": "M7 (Self-application and refinement): Scaffold successfully improved itself under full quality gates. All 9 agents audited with explicit dispositions. qa-playwright.md patched with Scope section (reviewed by code-reviewer, not circular). QUALITY_GATES.md control-loop gate extended to cover subagent definitions (reviewed by architecture-red-team, not circular). SELF_APPLICATION_EXAMPLE.md written as worked example. Decision memo documents planning gate, red-team critique, and circularity mitigation.",
+  "summary": "M8 (Generalization and compatibility): Added docs/COMPATIBILITY.md (versioning policy, upgrade guidance, compatibility promise) and docs/EXTENSION_PATTERNS.md (how to add custom profiles/agents/hooks/skills/docs, profile selection matrix, adoption checklist). Updated docs/CAPABILITY_MANIFEST.md with versioning policy section. Registered both new docs as scaffold-internal in the manifest. No code, script, or schema changes.",
   "changes": [
-    "Audited all 9 agent definitions (8 approved as-is, 1 patched)",
-    "Added Scope section to .claude/agents/qa-playwright.md",
-    "Added 'subagent definitions' to control-loop change gate in docs/QUALITY_GATES.md",
-    "Created docs/SELF_APPLICATION_EXAMPLE.md (scaffold-internal worked example)",
-    "Added SELF_APPLICATION_EXAMPLE to capabilities/project-capabilities.yaml",
-    "Created artifacts/decision-memo.md with M7 planning gate output"
+    "Created docs/COMPATIBILITY.md with versioning policy, upgrade guidance, and breaking-change protocol",
+    "Created docs/EXTENSION_PATTERNS.md with extension how-tos, profile selection matrix, and adoption checklist",
+    "Added 'Versioning policy' section to docs/CAPABILITY_MANIFEST.md with cross-reference to COMPATIBILITY.md",
+    "Added cross-reference to EXTENSION_PATTERNS.md in CAPABILITY_MANIFEST.md 'Extending the manifest' section",
+    "Registered COMPATIBILITY and EXTENSION_PATTERNS as scaffold-internal docs in capabilities/project-capabilities.yaml"
   ],
   "decision_memo": "artifacts/decision-memo.md",
   "reviewer_notes": [
-    "Strategy-planner: Option C selected (targeted audit with minimal patches)",
-    "Red-team blocking (fixed): circular approval risk — resolved by scope restriction",
-    "Red-team scope bound: guardrail change requires named gap — satisfied",
-    "Red-team scope bound: usage example must reference real artifacts — satisfied",
-    "Code-reviewer: approved qa-playwright.md patch and SELF_APPLICATION_EXAMPLE.md",
-    "Architecture-red-team: approved QUALITY_GATES.md guardrail change"
+    "Strategy-planner: Option B selected (two new docs + one update, no new code)",
+    "Code-reviewer: approved all deliverables, no blocking issues",
+    "Architecture-red-team: two blocking issues raised and fixed (false preserve_existing_files claim corrected; docs removed from default profile to avoid downstream confusion)",
+    "Red-team non-blocking: softened breaking-change protocol phrasing, clarified CLI profile guidance, removed --dry-run hedge"
   ],
-  "suggested_commit_message": "meta-M7: self-application and refinement under full quality gates"
+  "suggested_commit_message": "meta-M8: generalization and compatibility docs"
 }

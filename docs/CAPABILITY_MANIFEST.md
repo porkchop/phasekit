@@ -153,3 +153,16 @@ To add a new capability type:
 2. Add `include_<type>` support in profiles
 3. Document the new section in this file
 4. Update `ARCHITECTURE.md` if the new type changes layer boundaries
+
+For step-by-step guides on adding profiles, agents, hooks, skills, and docs, see `docs/EXTENSION_PATTERNS.md`.
+
+## Versioning policy
+
+The `version` field at the top of the manifest is the schema compatibility contract.
+
+- **Current version:** `1`
+- The version increments only when the schema shape changes in a backward-incompatible way (removing a required key, changing key semantics, restructuring sections)
+- Additive changes — new optional keys, new profiles, new capability entries, new top-level sections — do **not** require a version bump
+- Downstream repos can check this field to confirm they are compatible with the current scaffold
+
+For the full versioning policy, upgrade guidance, and breaking-change protocol, see `docs/COMPATIBILITY.md`.
