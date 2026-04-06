@@ -17,10 +17,11 @@ Use a planning and adversarial review cycle before implementation when any of th
 - auth, security, or public internet exposure is involved
 - the refactor could invalidate prior assumptions
 - there are at least two plausible implementation strategies
+- scaffold control flow, capability generation, or packaging behavior is affected (self-improvement mode)
 
 Required outputs:
 - `artifacts/decision-memo.md`
-- optional ADR in `docs/adr/`
+- optional ADR in `docs/adr/` (use `docs/ADR_TEMPLATE.md`; follow naming convention `ADR-NNNN-short-title.md`)
 
 ## Meta-project gates
 For scaffold self-improvement work, a phase is not complete until:
@@ -67,6 +68,20 @@ The host-side wrapper is responsible for:
   "suggested_commit_message": "phase-4: approve browser workflow"
 }
 ```
+
+For phases that required a planning gate, include a `decision_memo` field referencing the governing artifact:
+
+```json
+{
+  "phase": "meta-M5.1",
+  "approved": true,
+  "summary": "...",
+  "decision_memo": "artifacts/decision-memo.md",
+  "suggested_commit_message": "meta-M5.1: ..."
+}
+```
+
+This field is optional for phases that did not require a planning gate, and required for those that did.
 
 ## Final completion artifact
 

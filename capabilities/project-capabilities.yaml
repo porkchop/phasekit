@@ -29,6 +29,7 @@ profiles:
       - CAPABILITY_MANIFEST
       - EXECUTION_MODES
       - REASONING_PROFILES
+      - ADR_TEMPLATE
       - CONTAINERIZATION
     include_hooks:
       - deny-dangerous-commands
@@ -156,6 +157,10 @@ docs:
   REASONING_PROFILES:
     path: docs/REASONING_PROFILES.md
     required: true
+
+  ADR_TEMPLATE:
+    path: docs/ADR_TEMPLATE.md
+    required: false
 
   CONTAINERIZATION:
     path: docs/CONTAINERIZATION.md
