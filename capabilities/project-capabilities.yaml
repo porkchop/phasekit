@@ -28,6 +28,7 @@ profiles:
       - META_PHASES
       - CAPABILITY_MANIFEST
       - EXECUTION_MODES
+      - REASONING_PROFILES
       - CONTAINERIZATION
     include_hooks:
       - deny-dangerous-commands
@@ -150,6 +151,10 @@ docs:
 
   EXECUTION_MODES:
     path: docs/EXECUTION_MODES.md
+    required: true
+
+  REASONING_PROFILES:
+    path: docs/REASONING_PROFILES.md
     required: true
 
   CONTAINERIZATION:

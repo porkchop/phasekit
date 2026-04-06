@@ -1,6 +1,6 @@
 {
-  "phase": "meta-M5.1",
+  "phase": "meta-M5.5",
   "approved": true,
-  "summary": "Meta-M5.1 adoption of Anthropic reference devcontainer with firewall isolation is approved. All six acceptance criteria pass: (1) Anthropic's firewall rules (init-firewall.sh, default-deny + whitelisted domains) are in use; (2) run-until-done.sh continues as the default CMD entrypoint; (3) container-setup.sh build/run/shell all work against .devcontainer/; (4) CLI-only path preserved via entrypoint.sh without requiring VS Code; (5) non-root node user (UID 1000) maintained with narrowly-scoped sudo for firewall only; (6) CONTAINERIZATION.md fully updated with migration notes, security model, and troubleshooting. code-reviewer approved with no blocking issues. Minor non-blocking notes: implicit wget dependency in Dockerfile (base image provides it), CLAUDE_MODE not in containerEnv (default is correct), and expected stale-DNS risk acknowledged in docs.",
-  "suggested_commit_message": "meta-M5.1: approve Anthropic reference devcontainer adoption"
+  "summary": "Meta-M5.5 reasoning profile guidance is approved. All three acceptance criteria pass: (1) deeper reasoning is explicitly recommended per-role for complex design, architecture, and review work in docs/REASONING_PROFILES.md; (2) ordinary collaboration remains lightweight by default — the document opens with this principle and enumerates a 'When deeper reasoning is not needed' section; (3) no global always-on heavy mode is required — the non-interference rule explicitly prohibits a global setting and requires task-scoped invocation. code-reviewer approved with no blocking issues. The document is registered in capabilities/project-capabilities.yaml under docs.REASONING_PROFILES (required: true) and included in the default profile's include_docs list.",
+  "suggested_commit_message": "meta-M5.5: add reasoning profile guidance"
 }
