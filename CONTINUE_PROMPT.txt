@@ -30,8 +30,10 @@ Operating rules:
 - Require qa-playwright for user-visible functionality
 - Require skill validation and packaging for skill-producing phases
 - In unattended mode, do not ask the user for confirmation merely to proceed with planning, red-team review, or internal phase decomposition
+- In unattended mode, do not ask for permission to write files — bypassPermissions is active, write directly to any file including .claude/agents/ and artifacts/
 - If new work is discovered and it is self-resolvable, update docs and phase structure as needed and continue or stop cleanly with a phase-update artifact
 - If genuine external input is required, write `artifacts/phase-blocked.json` and stop
+- CRITICAL: Never exit without writing one of the four expected artifacts (phase-approval.json, phase-update.json, phase-blocked.json, project-complete.json) — the outer loop depends on finding one
 - Do not proceed past a completed phase without writing `artifacts/phase-approval.json`
 - If the project is complete, write `artifacts/project-complete.json`
 - Do not continue into the next phase until the repository has been committed externally

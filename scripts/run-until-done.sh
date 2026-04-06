@@ -26,8 +26,11 @@ require_cmd jq
 require_cmd git
 
 cleanup_artifacts() {
+  # Remove transient signal artifacts from the previous iteration.
+  # phase-approval.json is NOT deleted — it persists as the durable
+  # record of the last approved phase so the next iteration can read it.
+  # Claude overwrites it when a new phase is approved.
   rm -f \
-    "$ARTIFACTS_DIR/phase-approval.json" \
     "$ARTIFACTS_DIR/phase-update.json" \
     "$ARTIFACTS_DIR/phase-blocked.json" \
     "$ARTIFACTS_DIR/project-complete.json"
