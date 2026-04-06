@@ -27,19 +27,41 @@ The container uses Anthropic's reference firewall (`init-firewall.sh`) to restri
 
 ## Authentication
 
-The container authenticates with the Anthropic API via the `ANTHROPIC_API_KEY` environment variable. No interactive `claude auth login` is needed — Claude Code in print mode (`-p`) uses the API key directly.
+The container supports two authentication methods. Choose whichever fits your billing preference.
 
-To get an API key:
+### Option A: Claude Code subscription (recommended for heavy workloads)
+
+Subscription plans (Pro/Max) include usage at a flat monthly rate, making them more cost-effective for autonomous loops that consume many tokens.
+
+This uses a 2-phase workflow — first log in interactively, then run headless:
+
+```bash
+# Phase 1: One-time setup — log in with your subscription
+bash scripts/container-setup.sh setup
+# Inside the container, run:
+claude login
+# A URL is displayed — open it in your browser to complete OAuth.
+# Once logged in, exit the container.
+
+# Phase 2: Run the autonomous loop using stored credentials
+bash scripts/container-setup.sh run
+```
+
+Credentials are stored in a named Docker volume (`scaffold-claude-config`) and persist between container runs. You only need to repeat the setup phase if the credentials expire or the volume is deleted.
+
+**Important:** Do NOT set `ANTHROPIC_API_KEY` when using subscription auth — if set, it takes precedence over stored credentials.
+
+### Option B: API key (pay-per-token)
+
+For pay-per-token billing via the Anthropic API:
+
 1. Go to the [Anthropic Console](https://console.anthropic.com/)
 2. Create an API key under Settings → API Keys
 3. Set it in your host shell:
 
 ```bash
-# Option 1: Export for the current session
 export ANTHROPIC_API_KEY='sk-ant-...'
-
-# Option 2: Persist across sessions (add to ~/.bashrc or ~/.zshrc)
-echo 'export ANTHROPIC_API_KEY="sk-ant-..."' >> ~/.bashrc
+bash scripts/container-setup.sh run
 ```
 
 The key is passed into the container at runtime via `docker run -e` and never stored in any repo file.
@@ -56,11 +78,18 @@ The key is passed into the container at runtime via `docker run -e` and never st
 # Build the container image
 bash scripts/container-setup.sh build
 
-# Run the autonomous phase loop (with firewall)
+# One-time setup: log in with your Claude subscription
+bash scripts/container-setup.sh setup
+# Inside the container, run: claude login
+
+# Run the autonomous phase loop (using stored subscription credentials)
+bash scripts/container-setup.sh run
+
+# Or with an API key instead:
 ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" bash scripts/container-setup.sh run
 
-# Or open an interactive shell inside the container (with firewall)
-ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" bash scripts/container-setup.sh shell
+# Open an interactive shell inside the container
+bash scripts/container-setup.sh shell
 ```
 
 All three modes (build, run, shell) initialize the firewall before executing the main command. There is no way to accidentally bypass the firewall through `container-setup.sh`.
@@ -94,10 +123,11 @@ The working directory (`/workspace`) is bind-mounted from the host, so all chang
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | (required) | Claude API key |
+| `ANTHROPIC_API_KEY` | (optional) | API key for pay-per-token auth; omit to use stored subscription credentials |
 | `MAX_ITERATIONS` | `50` | Phase loop iteration limit |
 | `CLAUDE_MODE` | `new` | Set to `continue` to resume a session |
 | `IMAGE_NAME` | `scaffold-runner` | Docker image name |
+| `CLAUDE_VOLUME` | `scaffold-claude-config` | Named Docker volume for `~/.claude` credential persistence |
 | `GIT_USER_NAME` | `Scaffold Runner` | Git author name for commits |
 | `GIT_USER_EMAIL` | `scaffold-runner@localhost` | Git author email for commits |
 

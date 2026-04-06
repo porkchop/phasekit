@@ -125,7 +125,25 @@ Do not enable permissive execution as the default shared project setting for all
 
 ### Authentication
 
-The container authenticates via the `ANTHROPIC_API_KEY` environment variable — no interactive `claude auth login` is needed. Get an API key from the [Anthropic Console](https://console.anthropic.com/), then:
+Two options — pick whichever fits your billing preference:
+
+**Option A: Claude Code subscription (recommended for heavy workloads)**
+
+Subscription plans (Pro/Max) include usage at a flat rate. Use a 2-phase workflow:
+
+```bash
+# One-time setup: log in with your subscription
+bash scripts/container-setup.sh setup
+# Inside the container, run: claude login
+# Open the displayed URL in your browser to complete auth, then exit.
+
+# Run the autonomous loop using stored credentials
+bash scripts/container-setup.sh run
+```
+
+Credentials persist in a named Docker volume between runs.
+
+**Option B: API key (pay-per-token)**
 
 ```bash
 export ANTHROPIC_API_KEY='sk-ant-...'

@@ -11,23 +11,35 @@ set -euo pipefail
 # best-effort network hygiene, not a hard security boundary.
 #
 # Usage:
-#   bash scripts/container-setup.sh [build|run|shell]
+#   bash scripts/container-setup.sh [build|setup|run|shell]
 #
 # Commands:
 #   build   Build the container image (default)
-#   run     Build and run the phase loop (with firewall)
-#   shell   Build and open an interactive shell (with firewall)
+#   setup   Build and open an interactive shell for claude login (no API key required)
+#   run     Build and run the phase loop
+#   shell   Build and open an interactive shell
+#
+# Authentication (pick one):
+#   Option A — API key (pay-per-token):
+#     ANTHROPIC_API_KEY   Set this env var before running 'run' or 'shell'
+#
+#   Option B — Claude Code subscription (flat-rate):
+#     1. Run 'setup' and execute 'claude login' inside the container
+#     2. Run 'run' or 'shell' without ANTHROPIC_API_KEY
+#     Credentials persist in a named Docker volume between runs.
 #
 # Environment:
-#   ANTHROPIC_API_KEY   Required for 'run' and 'shell' commands
+#   ANTHROPIC_API_KEY   Optional — API key for pay-per-token auth
 #   MAX_ITERATIONS      Phase loop iteration limit (default: 50)
 #   IMAGE_NAME          Docker image name (default: scaffold-runner)
+#   CLAUDE_VOLUME       Named volume for ~/.claude credentials (default: scaffold-claude-config)
 #   GIT_USER_NAME       Git author name (default: Scaffold Runner)
 #   GIT_USER_EMAIL      Git author email (default: scaffold-runner@localhost)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMAGE_NAME="${IMAGE_NAME:-scaffold-runner}"
+CLAUDE_VOLUME="${CLAUDE_VOLUME:-scaffold-claude-config}"
 COMMAND="${1:-build}"
 
 require_cmd() {
@@ -45,51 +57,80 @@ build_image() {
   echo "Image built successfully: $IMAGE_NAME"
 }
 
-check_api_key() {
-  if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-    echo "Error: ANTHROPIC_API_KEY is not set." >&2
-    echo "Export it before running: export ANTHROPIC_API_KEY='sk-...'" >&2
-    exit 1
+check_auth() {
+  # Warn if neither API key nor persisted credentials are available.
+  if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+    return 0
   fi
+
+  # Check if the named volume exists and has credentials.
+  if docker volume inspect "$CLAUDE_VOLUME" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "Warning: No authentication found." >&2
+  echo "Either set ANTHROPIC_API_KEY or run 'setup' first to log in with your Claude subscription." >&2
+  echo "Continuing anyway — Claude will fail if no credentials are available at runtime." >&2
 }
 
 run_container() {
   local cmd=("$@")
-  check_api_key
   echo "Starting container from: $ROOT_DIR"
-  docker run --rm -it \
-    --cap-drop=ALL \
-    --cap-add=NET_ADMIN \
-    --cap-add=NET_RAW \
-    --cap-add=SETUID \
-    --cap-add=SETGID \
-    -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-    -e MAX_ITERATIONS="${MAX_ITERATIONS:-50}" \
-    ${GIT_USER_NAME:+-e GIT_USER_NAME="$GIT_USER_NAME"} \
-    ${GIT_USER_EMAIL:+-e GIT_USER_EMAIL="$GIT_USER_EMAIL"} \
-    -v "$ROOT_DIR":/workspace \
-    "$IMAGE_NAME" \
-    "${cmd[@]}"
+
+  local docker_args=(
+    --rm -it
+    --cap-drop=ALL
+    --cap-add=NET_ADMIN
+    --cap-add=NET_RAW
+    --cap-add=SETUID
+    --cap-add=SETGID
+    -v "$CLAUDE_VOLUME":/home/node/.claude
+    -v "$ROOT_DIR":/workspace
+    -e MAX_ITERATIONS="${MAX_ITERATIONS:-50}"
+  )
+
+  # Pass API key only if set — omitting it lets Claude use stored subscription credentials.
+  if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+    docker_args+=(-e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY")
+  fi
+
+  if [[ -n "${GIT_USER_NAME:-}" ]]; then
+    docker_args+=(-e GIT_USER_NAME="$GIT_USER_NAME")
+  fi
+  if [[ -n "${GIT_USER_EMAIL:-}" ]]; then
+    docker_args+=(-e GIT_USER_EMAIL="$GIT_USER_EMAIL")
+  fi
+
+  docker run "${docker_args[@]}" "$IMAGE_NAME" "${cmd[@]}"
 }
 
 case "$COMMAND" in
   build)
     build_image
     ;;
+  setup)
+    build_image
+    echo ""
+    echo "=== Claude Code Login Setup ==="
+    echo "Run 'claude login' inside the container to authenticate with your subscription."
+    echo "The login flow will display a URL — open it in your browser to complete auth."
+    echo "Credentials are stored in the '$CLAUDE_VOLUME' Docker volume and persist between runs."
+    echo ""
+    run_container bash
+    ;;
   run)
     build_image
-    # Entrypoint (entrypoint.sh) runs firewall init, then executes the command.
-    # Default CMD is "bash scripts/run-until-done.sh", so no args needed.
+    check_auth
     run_container bash scripts/run-until-done.sh
     ;;
   shell)
     build_image
-    # Entrypoint runs firewall init, then drops to bash.
+    check_auth
     run_container bash
     ;;
   *)
     echo "Unknown command: $COMMAND" >&2
-    echo "Usage: $0 [build|run|shell]" >&2
+    echo "Usage: $0 [build|setup|run|shell]" >&2
     exit 1
     ;;
 esac
