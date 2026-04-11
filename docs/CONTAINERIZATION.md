@@ -103,21 +103,54 @@ The Dockerfile (`.devcontainer/Dockerfile`) is based on [Anthropic's reference d
 - Git, jq, bash, curl, and other development tools
 - iptables, ipset, iproute2, dnsutils, aggregate (for firewall)
 - Claude Code CLI installed globally
+- Playwright MCP server (`@playwright/mcp`) and Chromium for browser automation
 - Firewall initialization script (`init-firewall.sh`)
-- Entrypoint wrapper (`entrypoint.sh`) that runs firewall before the main command
+- Entrypoint wrapper (`entrypoint.sh`) that runs firewall and injects MCP config before the main command
 - Non-root `node` user (UID 1000) for execution
 
 The working directory (`/workspace`) is bind-mounted from the host, so all changes are visible on both sides.
+
+## Playwright MCP server (browser automation)
+
+The container includes Chromium and the `@playwright/mcp` server, giving the `qa-playwright` subagent direct browser tools (`browser_navigate`, `browser_snapshot`, `browser_take_screenshot`, `browser_click`, etc.) for verifying user-visible functionality during autonomous execution.
+
+### How it works
+
+1. Chromium and `@playwright/mcp` are pre-installed in the Docker image during build
+2. The entrypoint injects MCP server configuration into `.claude/settings.local.json` (gitignored) before Claude starts
+3. Claude receives the Playwright MCP tools as available tools during the session
+4. The `qa-playwright` agent uses these tools for browser verification
+
+The MCP server runs in headless mode with `--no-sandbox` (standard for Docker containers). It communicates with Claude via stdio — no network ports are opened.
+
+### Disabling
+
+To skip Playwright MCP injection (e.g., for non-browser projects):
+
+```bash
+SKIP_PLAYWRIGHT_MCP=1 bash scripts/container-setup.sh run
+```
+
+### Interactive mode setup
+
+The container's MCP injection only applies when running the container. For interactive use, register the server with a one-liner:
+
+```bash
+claude mcp add playwright -- npx @playwright/mcp@latest
+```
+
+This registers the server in your user-level Claude configuration. Add `--headless` if you don't have a display.
 
 ## How it works
 
 1. `container-setup.sh build` builds the Docker image from `.devcontainer/`
 2. `container-setup.sh run` starts the container with firewall capabilities
 3. `entrypoint.sh` runs `init-firewall.sh` (default-deny + whitelisted domains)
-4. After firewall init, the entrypoint executes `scripts/run-until-done.sh`
-5. `run-until-done.sh` calls `run-phase.sh` in a loop, each invocation using `--permission-mode bypassPermissions`
-6. Each phase writes `artifacts/phase-approval.json`, which the wrapper commits before the next iteration
-7. The loop stops when `artifacts/project-complete.json` appears, a blocker is written, or `MAX_ITERATIONS` is reached
+4. `entrypoint.sh` injects Playwright MCP server config into `.claude/settings.local.json`
+5. After firewall and MCP init, the entrypoint executes `scripts/run-until-done.sh`
+6. `run-until-done.sh` calls `run-phase.sh` in a loop, each invocation using `--permission-mode bypassPermissions`
+7. Each phase writes `artifacts/phase-approval.json`, which the wrapper commits before the next iteration
+8. The loop stops when `artifacts/project-complete.json` appears, a blocker is written, or `MAX_ITERATIONS` is reached
 
 ## Environment variables
 
@@ -130,6 +163,8 @@ The working directory (`/workspace`) is bind-mounted from the host, so all chang
 | `CLAUDE_VOLUME` | `scaffold-claude-config` | Named Docker volume for `~/.claude` credential persistence |
 | `GIT_USER_NAME` | `Scaffold Runner` | Git author name for commits |
 | `GIT_USER_EMAIL` | `scaffold-runner@localhost` | Git author email for commits |
+| `SKIP_PLAYWRIGHT_MCP` | (empty) | Set to `1` to skip Playwright MCP injection |
+| `PLAYWRIGHT_MCP_VERSION` | `0.0.70` | Override `@playwright/mcp` version at build time |
 
 ## Container capabilities
 

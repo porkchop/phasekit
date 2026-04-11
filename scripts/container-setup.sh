@@ -35,6 +35,8 @@ set -euo pipefail
 #   CLAUDE_VOLUME       Named volume for ~/.claude credentials (default: scaffold-claude-config)
 #   GIT_USER_NAME       Git author name (default: Scaffold Runner)
 #   GIT_USER_EMAIL      Git author email (default: scaffold-runner@localhost)
+#   SKIP_PLAYWRIGHT_MCP Set to 1 to skip Playwright MCP injection (default: inject)
+#   PLAYWRIGHT_MCP_VERSION  Override @playwright/mcp version for builds (default: in Dockerfile)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -53,7 +55,11 @@ require_cmd docker
 
 build_image() {
   echo "Building container image: $IMAGE_NAME"
-  docker build -t "$IMAGE_NAME" "$ROOT_DIR/.devcontainer/"
+  local build_args=()
+  if [[ -n "${PLAYWRIGHT_MCP_VERSION:-}" ]]; then
+    build_args+=(--build-arg "PLAYWRIGHT_MCP_VERSION=$PLAYWRIGHT_MCP_VERSION")
+  fi
+  docker build "${build_args[@]}" -t "$IMAGE_NAME" "$ROOT_DIR/.devcontainer/"
   echo "Image built successfully: $IMAGE_NAME"
 }
 
@@ -99,6 +105,9 @@ run_container() {
   fi
   if [[ -n "${GIT_USER_EMAIL:-}" ]]; then
     docker_args+=(-e GIT_USER_EMAIL="$GIT_USER_EMAIL")
+  fi
+  if [[ -n "${SKIP_PLAYWRIGHT_MCP:-}" ]]; then
+    docker_args+=(-e SKIP_PLAYWRIGHT_MCP="$SKIP_PLAYWRIGHT_MCP")
   fi
 
   docker run "${docker_args[@]}" "$IMAGE_NAME" "${cmd[@]}"

@@ -52,7 +52,7 @@ python3 /path/to/scaffold/scripts/enrich-project.py /path/to/project --profile d
 
 ## Quick start: autonomous mode (containerized)
 
-For unattended phase-loop execution in an isolated container with network firewall. **Opt-in only — do not use on repos you don't fully trust.**
+For unattended phase-loop execution in an isolated container with network firewall and Playwright MCP browser automation. **Opt-in only — do not use on repos you don't fully trust.**
 
 ```bash
 # Build the container image

@@ -91,6 +91,11 @@ RUN git config --global user.name "Scaffold Runner" && \
 # Install Claude Code
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
+# SCAFFOLD: Playwright MCP server + Chromium for browser automation in container
+ARG PLAYWRIGHT_MCP_VERSION=0.0.70
+RUN npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} && \
+    npx playwright install --with-deps chromium
+
 # Copy and set up firewall script
 COPY init-firewall.sh /usr/local/bin/
 # SCAFFOLD: Copy entrypoint wrapper for CLI-only firewall init

@@ -22,5 +22,23 @@ if [[ -n "${GIT_USER_EMAIL:-}" ]]; then
     git config --global user.email "$GIT_USER_EMAIL"
 fi
 
+# Inject Playwright MCP server configuration for containerized mode.
+# Writes to settings.local.json (gitignored) so it does not affect
+# the checked-in project settings or interactive users.
+if [[ "${SKIP_PLAYWRIGHT_MCP:-}" != "1" ]]; then
+    SETTINGS_LOCAL="/workspace/.claude/settings.local.json"
+    MCP_CONFIG='{"mcpServers":{"playwright":{"command":"playwright-mcp","args":["--headless","--no-sandbox"]}}}'
+
+    if [[ -f "$SETTINGS_LOCAL" ]]; then
+        # Additive merge — preserves all existing keys
+        MERGED=$(jq --argjson new "$MCP_CONFIG" '. * $new' "$SETTINGS_LOCAL")
+        echo "$MERGED" > "$SETTINGS_LOCAL"
+        echo "Playwright MCP: merged into $SETTINGS_LOCAL"
+    else
+        echo "$MCP_CONFIG" | jq '.' > "$SETTINGS_LOCAL"
+        echo "Playwright MCP: created $SETTINGS_LOCAL"
+    fi
+fi
+
 echo "Firewall active. Starting: $*"
 exec "$@"
