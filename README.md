@@ -168,6 +168,7 @@ scripts/
   generate-skill.py               # generate skill folders from templates
   validate-skill.py               # validate skill structure
   package-skill.py                # package skills as skill.zip
+  verify-container.sh             # post-build container health check
 templates/                        # templates for specs, skills, CLAUDE.md, ADRs
 CONTINUE_PROMPT.txt               # prompt used by the autonomous loop
 KICKOFF.md                        # entrypoint documentation

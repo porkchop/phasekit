@@ -215,6 +215,10 @@ scripts:
     path: scripts/container-setup.sh
     required: false
 
+  verify-container:
+    path: scripts/verify-container.sh
+    required: false
+
 generation:
   output_root: generated
   skills_output_root: dist/skills

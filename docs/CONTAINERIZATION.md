@@ -215,6 +215,20 @@ If you previously used the `container/Dockerfile` from M5:
 - `--cap-add=NET_ADMIN --cap-add=NET_RAW` are now required (added automatically by `container-setup.sh`)
 - Custom `container/Dockerfile.project` files should be updated to extend `scaffold-runner` directly
 
+## Verifying the container
+
+After building, run the verification script to check that all tools are correctly installed:
+
+```bash
+# From inside the container
+bash scripts/verify-container.sh
+
+# Or directly from the host
+docker run --rm scaffold-runner bash scripts/verify-container.sh
+```
+
+The script checks: core tools (claude, git, jq, python3+pyyaml), Playwright MCP server binary and handshake, Chromium headless launch, and MCP settings injection.
+
 ## Troubleshooting
 
 - **"ANTHROPIC_API_KEY is not set"**: Export the variable before running
