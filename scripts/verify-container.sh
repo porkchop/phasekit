@@ -7,9 +7,9 @@ set -euo pipefail
 #   bash scripts/container-setup.sh shell
 #   bash scripts/verify-container.sh
 #
-# Or from the host:
+# Or from the host (--entrypoint bypasses firewall which needs extra caps):
 #
-#   docker run --rm scaffold-runner bash scripts/verify-container.sh
+#   docker run --rm --entrypoint bash -v "$(pwd)":/workspace -w /workspace scaffold-runner scripts/verify-container.sh
 #
 # Checks: core tools, Playwright MCP server, Chromium, MCP settings injection.
 # Exit code 0 = all checks pass, non-zero = at least one failure.

@@ -220,11 +220,11 @@ If you previously used the `container/Dockerfile` from M5:
 After building, run the verification script to check that all tools are correctly installed:
 
 ```bash
-# From inside the container
+# From inside the container (e.g. after container-setup.sh shell)
 bash scripts/verify-container.sh
 
-# Or directly from the host
-docker run --rm scaffold-runner bash scripts/verify-container.sh
+# Or directly from the host (--entrypoint bypasses firewall which needs extra caps)
+docker run --rm --entrypoint bash -v "$(pwd)":/workspace -w /workspace scaffold-runner scripts/verify-container.sh
 ```
 
 The script checks: core tools (claude, git, jq, python3+pyyaml), Playwright MCP server binary and handshake, Chromium headless launch, and MCP settings injection.
