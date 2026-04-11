@@ -10,6 +10,31 @@ A phase is only complete when all of the following are true:
 - `artifacts/phase-approval.json` is written with `approved: true`
 - the outer orchestration layer creates a git commit before the next phase begins
 
+## Testing gate
+A phase is not complete unless:
+- every new module, endpoint, or public behavior has at least one test exercising its primary path
+- every bug fix includes a regression test that would fail without the fix
+- tests are written before or alongside implementation code, not retrofitted after
+- test names describe the behavior under test, not implementation details
+- edge cases and error paths are tested for any logic identified as risky in the spec or decision memo
+
+When coverage tooling is available in the target project, aim for meaningful branch coverage of new code. Do not pursue a numeric target at the expense of test quality — a focused test that catches real regressions is worth more than broad shallow coverage.
+
+"Relevant tests pass" (from the universal gate) means: tests exist that would fail if the feature were removed or the bug fix reverted.
+
+## DRY and reuse gate
+- business rules and validation logic must exist in exactly one place
+- if the same logic appears in more than one layer, extract it to a shared module or justify the duplication in a decision memo
+- builders must check for existing utilities and shared modules before creating new ones
+- code-reviewer must reject changes that introduce unjustified duplication
+
+## Drift detection gate
+Before starting a new implementation phase, the assigned builder must:
+- review code produced in prior phases for overlap with the current task
+- flag any inconsistency between the current plan and already-approved code
+- prefer extending existing modules over creating parallel implementations
+- report discovered drift as a blocking issue for project-lead to resolve before proceeding
+
 ## Planning gate
 Use a planning and adversarial review cycle before implementation when any of the following are true:
 - the change crosses multiple layers

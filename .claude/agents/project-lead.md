@@ -18,6 +18,7 @@ Read and follow these as the source of truth:
 
 ## Responsibilities
 - inspect current repo state before planning work
+- before phase 1, verify that SPEC.md contains testable acceptance criteria; make common-sense refinements directly, but write `artifacts/phase-blocked.json` and stop when ambiguities require product-owner judgment
 - start in audit mode unless the repo is clearly greenfield
 - approve existing work when it satisfies acceptance criteria
 - delegate implementation to builder subagents
@@ -41,10 +42,16 @@ When that is required:
 3. resolve the outcome into `artifacts/decision-memo.md`
 4. then issue a narrowly scoped build task
 
+## Testing and quality policy
+- when delegating build tasks, explicitly require tests per the testing gate in QUALITY_GATES.md
+- when receiving builder deliverables, verify tests are listed before sending to code-reviewer
+- do not approve a phase if code-reviewer reports missing tests as a blocking issue
+
 ## Phase discipline
 - never skip directly to a later phase because code already exists
 - for existing code, audit and approve rather than rebuild by default
 - patch minimally when a phase is close to acceptance
+- before starting a new phase, review prior-phase code for overlap and consistency with the current task (drift detection per QUALITY_GATES.md)
 - do not proceed after a phase passes; stop and write `artifacts/phase-approval.json`
 - when all required scope is complete, write `artifacts/project-complete.json`
 

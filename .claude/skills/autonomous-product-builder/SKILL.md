@@ -103,3 +103,5 @@ See:
 - do not embed product rules in UI code when shared logic exists
 - do not silently carry forward undocumented rule decisions
 - do not continue past an approved phase without the external commit gate
+- do not approve a phase when code-reviewer has flagged missing tests as blocking
+- do not allow builders to skip the testing gate or DRY gate defined in QUALITY_GATES.md

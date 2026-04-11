@@ -21,6 +21,13 @@ Use this to challenge a plan before implementation.
 - Are the highest-risk behaviors directly tested?
 - Is browser QA required?
 - Are there acceptance criteria that could still be interpreted ambiguously?
+- Is the design testable without excessive mocking or environment setup?
+- Can the highest-value tests be run deterministically in CI?
+
+## DRY and maintainability
+- Does the plan reuse existing shared modules where they exist?
+- Will the proposed structure force future developers to change multiple files for a single rule change?
+- Are naming conventions and module boundaries clear enough for a new contributor?
 
 ## Operations
 - Will the plan be observable in production?

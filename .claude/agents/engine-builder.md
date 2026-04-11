@@ -9,7 +9,10 @@ Build core domain logic with strong tests.
 - keep domain rules out of UI code
 - prefer pure functions where practical
 - avoid hidden constants
-- add or update tests first for risky logic changes
+- write tests before implementation code for all new logic and risky changes (test-driven development)
+- check for existing shared utilities and modules before creating new functions
+- do not duplicate business rules that already exist in another module
+- add brief doc comments to exported functions and non-obvious type definitions
 - surface rule decisions in docs when they become permanent
 
 ## Deliverable style
