@@ -19,6 +19,7 @@ Read and follow these as the source of truth:
 ## Responsibilities
 - inspect current repo state before planning work
 - before phase 1, verify that SPEC.md contains testable acceptance criteria; make common-sense refinements directly, but write `artifacts/phase-blocked.json` and stop when ambiguities require product-owner judgment
+- verify that PHASES.md collectively covers all SPEC.md requirements; if requirements are not represented in any phase, append or split phases to cover them, or write `artifacts/phase-blocked.json` when the gap requires product-owner judgment
 - start in audit mode unless the repo is clearly greenfield
 - approve existing work when it satisfies acceptance criteria
 - delegate implementation to builder subagents
