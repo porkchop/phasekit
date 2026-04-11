@@ -26,17 +26,22 @@ fi
 # Writes to settings.local.json (gitignored) so it does not affect
 # the checked-in project settings or interactive users.
 if [[ "${SKIP_PLAYWRIGHT_MCP:-}" != "1" ]]; then
-    SETTINGS_LOCAL="/workspace/.claude/settings.local.json"
+    SETTINGS_DIR="/workspace/.claude"
+    SETTINGS_LOCAL="$SETTINGS_DIR/settings.local.json"
     MCP_CONFIG='{"mcpServers":{"playwright":{"command":"playwright-mcp","args":["--headless","--no-sandbox"]}}}'
 
-    if [[ -f "$SETTINGS_LOCAL" ]]; then
-        # Additive merge — preserves all existing keys
-        MERGED=$(jq --argjson new "$MCP_CONFIG" '. * $new' "$SETTINGS_LOCAL")
-        echo "$MERGED" > "$SETTINGS_LOCAL"
-        echo "Playwright MCP: merged into $SETTINGS_LOCAL"
+    if [[ -d "$SETTINGS_DIR" ]]; then
+        if [[ -f "$SETTINGS_LOCAL" ]]; then
+            # Additive merge — preserves all existing keys
+            MERGED=$(jq --argjson new "$MCP_CONFIG" '. * $new' "$SETTINGS_LOCAL")
+            echo "$MERGED" > "$SETTINGS_LOCAL"
+            echo "Playwright MCP: merged into $SETTINGS_LOCAL"
+        else
+            echo "$MCP_CONFIG" | jq '.' > "$SETTINGS_LOCAL"
+            echo "Playwright MCP: created $SETTINGS_LOCAL"
+        fi
     else
-        echo "$MCP_CONFIG" | jq '.' > "$SETTINGS_LOCAL"
-        echo "Playwright MCP: created $SETTINGS_LOCAL"
+        echo "Playwright MCP: skipped ($SETTINGS_DIR not found)"
     fi
 fi
 

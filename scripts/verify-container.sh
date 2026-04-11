@@ -22,10 +22,10 @@ check() {
   shift
   if "$@" >/dev/null 2>&1; then
     echo "  ok  $label"
-    ((PASS++))
+    PASS=$((PASS + 1))
   else
     echo "  FAIL  $label"
-    ((FAIL++))
+    FAIL=$((FAIL + 1))
   fi
 }
 
@@ -35,10 +35,10 @@ check_output() {
   local output
   if output=$("$@" 2>&1); then
     echo "  ok  $label — $output"
-    ((PASS++))
+    PASS=$((PASS + 1))
   else
     echo "  FAIL  $label"
-    ((FAIL++))
+    FAIL=$((FAIL + 1))
   fi
 }
 
@@ -66,8 +66,10 @@ echo ""
 
 # --- Chromium ---
 echo "Chromium:"
-check_output "chromium version" bash -c "chromium --version 2>/dev/null || chromium-browser --version 2>/dev/null"
-check "chromium headless launch" bash -c "timeout 10 chromium --headless --no-sandbox --dump-dom about:blank 2>/dev/null | grep -q '<html>' || timeout 10 chromium-browser --headless --no-sandbox --dump-dom about:blank 2>/dev/null | grep -q '<html>'"
+# Playwright manages its own browser binaries in ~/.cache/ms-playwright/.
+# The MCP server handshake above proves the browser works end-to-end.
+# This check just confirms the cache directory exists with content.
+check "playwright browser cache exists" bash -c "ls /home/node/.cache/ms-playwright/chromium-*/chrome-linux*/chrome >/dev/null 2>&1 || ls /home/node/.cache/ms-playwright/chromium_headless_shell-*/headless_shell >/dev/null 2>&1"
 echo ""
 
 # --- MCP settings injection ---

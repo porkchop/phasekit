@@ -91,10 +91,15 @@ RUN git config --global user.name "Scaffold Runner" && \
 # Install Claude Code
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
-# SCAFFOLD: Playwright MCP server + Chromium for browser automation in container
+# SCAFFOLD: Playwright MCP server for browser automation in container.
+# Install the npm package as node user, then switch to root to install
+# Chromium's OS dependencies, then back to node for the browser binary.
 ARG PLAYWRIGHT_MCP_VERSION=0.0.70
-RUN npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} && \
-    npx playwright install --with-deps chromium
+RUN npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION}
+USER root
+RUN npx playwright-core install-deps chromium
+USER node
+RUN npx playwright-core install chromium
 
 # Copy and set up firewall script
 COPY init-firewall.sh /usr/local/bin/
