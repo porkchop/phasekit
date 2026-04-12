@@ -221,6 +221,17 @@ def main():
     else:
         skipped += 1
 
+    # Workflow root files required by run-until-done.sh
+    print("\nWorkflow root files:")
+    for filename in ["CONTINUE_PROMPT.txt"]:
+        src = REPO_ROOT / filename
+        dest = target / filename
+        if src.exists():
+            if copy_file(src, dest, force=args.force, dry_run=args.dry_run):
+                copied += 1
+            else:
+                skipped += 1
+
     # Artifacts and ADR directories
     for d in ["artifacts", "docs/adr"]:
         dir_path = target / d
