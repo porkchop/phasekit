@@ -232,6 +232,27 @@ def main():
             else:
                 skipped += 1
 
+    # Container files for autonomous unattended execution (opt-in to use,
+    # but included by default since CONTAINERIZATION.md is also included
+    # and users without Docker simply do not run them).
+    print("\nContainer files:")
+    container_files = [
+        "scripts/container-setup.sh",
+        "scripts/verify-container.sh",
+        ".devcontainer/devcontainer.json",
+        ".devcontainer/Dockerfile",
+        ".devcontainer/entrypoint.sh",
+        ".devcontainer/init-firewall.sh",
+    ]
+    for filename in container_files:
+        src = REPO_ROOT / filename
+        dest = target / filename
+        if src.exists():
+            if copy_file(src, dest, force=args.force, dry_run=args.dry_run):
+                copied += 1
+            else:
+                skipped += 1
+
     # Artifacts and ADR directories
     for d in ["artifacts", "docs/adr"]:
         dir_path = target / d
