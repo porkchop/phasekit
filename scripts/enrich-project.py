@@ -197,6 +197,18 @@ def main():
             else:
                 skipped += 1
 
+    # Project-shared settings.json — declares conservative permissions and
+    # wires up the deny-dangerous-commands hook. Without this, the hook
+    # script is copied but never actually runs.
+    print("\nProject settings:")
+    src = REPO_ROOT / ".claude" / "settings.json"
+    dest = target / ".claude" / "settings.json"
+    if src.exists():
+        if copy_file(src, dest, force=args.force, dry_run=args.dry_run):
+            copied += 1
+        else:
+            skipped += 1
+
     # Scripts (only workflow scripts, not scaffold-internal ones)
     scripts = manifest.get("scripts", {})
     workflow_scripts = ["run-phase", "run-until-done"]
