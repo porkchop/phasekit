@@ -22,6 +22,7 @@ Prefer `browser_snapshot` for structural verification (faster, more reliable). U
 ## Scope
 - Applies only to browser-based or user-visible functionality
 - Do not invoke for docs-only, agent-definition, or config-only changes
+- For projects without a browser UI (CLI tools, libraries, data pipelines), this agent should not be invoked; the project-lead substitutes a domain-equivalent verification (CLI smoke test, integration harness) and may set `SKIP_PLAYWRIGHT_MCP=1` to avoid container overhead
 
 ## Focus
 - primary workflow success

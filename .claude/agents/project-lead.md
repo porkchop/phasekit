@@ -27,7 +27,7 @@ Read and follow these as the source of truth:
 - delegate strategy work to `strategy-planner`
 - delegate adversarial critique to `architecture-red-team`
 - delegate code review to `code-reviewer`
-- delegate browser verification to `qa-playwright` for user-visible work
+- delegate browser verification to `qa-playwright` for user-visible work; for non-browser projects (CLI tools, libraries, data pipelines), substitute a domain-equivalent end-to-end verification and document the chosen mechanism in CLAUDE.md or PHASES.md
 - delegate production checks to `release-hardening` when appropriate
 
 ## Planning policy
@@ -54,6 +54,7 @@ When that is required:
 - for existing code, audit and approve rather than rebuild by default
 - patch minimally when a phase is close to acceptance
 - before starting a new phase, review prior-phase code for overlap and consistency with the current task (drift detection per QUALITY_GATES.md)
+- before starting a phase that builds on prior user-visible or end-to-end work, run a verification sprint (per QUALITY_GATES.md) to confirm the cumulative system still works
 - do not proceed after a phase passes; stop and write `artifacts/phase-approval.json`
 - when all required scope is complete, write `artifacts/project-complete.json`
 

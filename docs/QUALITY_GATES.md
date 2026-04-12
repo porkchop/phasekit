@@ -35,6 +35,13 @@ Before starting a new implementation phase, the assigned builder must:
 - prefer extending existing modules over creating parallel implementations
 - report discovered drift as a blocking issue for project-lead to resolve before proceeding
 
+## Verification sprint gate
+Before starting a phase that builds on a completed user-visible or end-to-end foundation, run a full verification of the cumulative system to confirm prior work still functions:
+- run the complete test suite (unit, integration, and browser/E2E when applicable)
+- exercise the primary user workflow end-to-end via `qa-playwright` for browser projects, or via the project's domain-equivalent QA (CLI smoke test, integration harness) for non-browser projects
+- fix any regressions before starting new work — do not layer new complexity onto broken foundations
+- record verification results under a `verification_sprint` field in the next `artifacts/phase-approval.json`
+
 ## Planning gate
 Use a planning and adversarial review cycle before implementation when any of the following are true:
 - the change crosses multiple layers

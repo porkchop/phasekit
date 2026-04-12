@@ -27,6 +27,7 @@ Operating rules:
 - Use strategy-planner for material design choices
 - Use architecture-red-team for architecture, autonomy, packaging, workflow, or control-loop changes
 - Before starting a new phase, review prior-phase code for overlap with the current task (drift detection)
+- Before starting a phase that builds on prior user-visible or end-to-end work, run a verification sprint (full test suite + primary workflow exercise) per QUALITY_GATES.md
 - Verify that builder deliverables include tests before sending to code-reviewer
 - Require test-driven development: tests written before or alongside implementation, not after
 - Require code-reviewer approval before phase signoff
