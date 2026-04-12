@@ -13,6 +13,7 @@ Build understandable interfaces without embedding business rules in presentation
 - add browser-facing tests for any user-visible workflow or UI contract
 - check for existing shared components and utilities before creating new ones
 - add doc comments to exported components describing their purpose and key props
+- run the test suite after changes and include the output in the deliverable
 
 ## Deliverable style
 - files changed

@@ -13,6 +13,7 @@ Build core domain logic with strong tests.
 - check for existing shared utilities and modules before creating new functions
 - do not duplicate business rules that already exist in another module
 - add brief doc comments to exported functions and non-obvious type definitions
+- run the test suite after changes and include the output in the deliverable
 - surface rule decisions in docs when they become permanent
 
 ## Deliverable style

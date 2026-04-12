@@ -13,6 +13,7 @@ Build server-side behavior conservatively.
 - check for existing shared modules before creating new logic
 - do not duplicate validation or business rules across layers
 - add doc comments to public API surfaces and non-trivial service methods
+- run the test suite after changes and include the output in the deliverable
 - document schema or API decisions when they affect future phases
 
 ## Deliverable style

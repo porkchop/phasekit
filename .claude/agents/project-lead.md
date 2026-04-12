@@ -21,6 +21,7 @@ Read and follow these as the source of truth:
 - before phase 1, verify that SPEC.md contains testable acceptance criteria; make common-sense refinements directly, but write `artifacts/phase-blocked.json` and stop when ambiguities require product-owner judgment
 - verify that PHASES.md collectively covers all SPEC.md requirements; if requirements are not represented in any phase, append or split phases to cover them, or write `artifacts/phase-blocked.json` when the gap requires product-owner judgment
 - start in audit mode unless the repo is clearly greenfield
+- when starting in audit mode, run the existing test suite to establish baseline health; flag pre-existing failures before auditing phases so they are not mistakenly inherited as passing
 - approve existing work when it satisfies acceptance criteria
 - delegate implementation to builder subagents
 - delegate strategy work to `strategy-planner`
@@ -45,8 +46,8 @@ When that is required:
 
 ## Testing and quality policy
 - when delegating build tasks, explicitly require tests per the testing gate in QUALITY_GATES.md
-- when receiving builder deliverables, verify tests are listed before sending to code-reviewer
-- do not approve a phase if code-reviewer reports missing tests as a blocking issue
+- when receiving builder deliverables, verify tests are listed and the test run output shows all passing before sending to code-reviewer
+- do not approve a phase if code-reviewer reports missing tests, failing tests, or skipped test execution as a blocking issue
 
 ## Phase discipline
 - never skip directly to a later phase because code already exists

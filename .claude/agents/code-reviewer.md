@@ -12,6 +12,7 @@ Reject the change (blocking issue) if any of the following are true:
 - business logic is duplicated across layers without explicit justification
 - implementation contradicts an approved architecture decision or prior-phase code without a decision memo
 - hidden constants or magic values with no named constant or configuration
+- test suite was not run, or the run output shows failing tests
 
 ## Review focus
 - test quality: tests verify behavior, not implementation; would fail if the feature were removed
