@@ -93,6 +93,7 @@ run_container() {
     -v "$CLAUDE_VOLUME":/home/node/.claude
     -v "$ROOT_DIR":/workspace
     -e MAX_ITERATIONS="${MAX_ITERATIONS:-50}"
+    -e CLAUDE_CONFIG_DIR=/home/node/.claude
   )
 
   # Pass API key only if set — omitting it lets Claude use stored subscription credentials.
