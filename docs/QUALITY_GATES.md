@@ -1,5 +1,24 @@
 # Quality gates
 
+## Anti-rationalization
+
+These are excuses agents (and humans) reach for when they want to skip a gate. Each pairs with the reality that makes the excuse wrong. Read this section before relaxing any rule below.
+
+| Rationalization | Reality |
+|---|---|
+| "This is too small for the spec / phase model" | The phase model is what makes 'small' verifiable. Skipping produces work that cannot be approved. |
+| "I'll add the phase-approval artifact later" | Without it, the next agent has no audit trail and the loop cannot advance. The artifact *is* the gate. |
+| "I can just quickly implement this" | Audit-first exists because existing code may already satisfy the goal. Re-implementing without auditing produces drift. |
+| "The test isn't strictly necessary here" | The testing gate requires a test that would fail if the change were reverted. If you can't write one, you don't understand the change. |
+| "Two near-duplicates is fine for now" | The DRY gate targets logic that encodes the same invariant in two places. That kind of duplication silently rots when one side changes. |
+| "I'll skip the planner — the design is obvious" | The planning gate exists for changes that cross layers, touch persistence/auth, or have multiple plausible strategies. 'Obvious' is what missed-the-tradeoff sounds like before review. |
+| "I'll loosen project settings just for this run" | Project settings are shared. Permissive execution belongs in `settings.local.json` or CLI flags, never committed. |
+| "Code review can wait until after merge" | The review gate catches duplication, missed drift, and architecture violations the implementer is least likely to see. After-merge review is a documentation step, not a gate. |
+| "I'll skip the verification sprint — nothing changed there" | Cumulative regressions are the failure mode the sprint exists to catch. 'Nothing changed' is an assumption, not evidence. |
+| "Discovered work can wait for a later phase" | Discovered work that blocks the current phase is part of the current phase. Deferring it produces phases that pass review but don't actually deliver. |
+
+If you find yourself making one of these arguments, stop and re-read the relevant gate below.
+
 ## Universal gate
 A phase is only complete when all of the following are true:
 - documented acceptance criteria pass

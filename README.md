@@ -2,6 +2,17 @@
 
 A reusable Claude Code project scaffold for methodical, phase-gated software delivery. Works in two modes: **interactive collaboration** (default) where you work directly with Claude, and **autonomous containerized execution** where a wrapper script drives Claude through phases unattended.
 
+```
+  AUDIT          PLAN           BUILD          VERIFY         REVIEW         APPROVE
+ ┌──────┐      ┌──────┐      ┌──────┐      ┌──────┐      ┌──────┐      ┌──────┐
+ │ Read │ ───▶ │ Memo │ ───▶ │ Code │ ───▶ │ Test │ ───▶ │  QA  │ ───▶ │ Gate │
+ │Phase │      │  +   │      │ Diff │      │  +   │      │ Gate │      │ JSON │
+ │Goal  │      │ Risk │      │      │      │ Lint │      │      │      │+Commit│
+ └──────┘      └──────┘      └──────┘      └──────┘      └──────┘      └──────┘
+```
+
+Each phase ends with `artifacts/phase-approval.json` and an external commit. The next phase does not begin until the commit lands.
+
 ## What it provides
 
 - **Phase-gated workflow** — work progresses through defined phases with explicit approval artifacts and git commits between each
