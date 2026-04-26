@@ -27,6 +27,27 @@ except ImportError:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = REPO_ROOT / "capabilities" / "project-capabilities.yaml"
 
+# Files that describe THIS scaffold repo and must never be installed into a
+# downstream project. Any code path attempting to copy one of these will fail.
+# Phase M9 will move this list into capabilities/project-capabilities.yaml as
+# part of the formal ownership-class taxonomy. Until then, this set is the
+# authoritative explicit deny-list.
+SCAFFOLD_INTERNAL_FILES = frozenset({
+    "LICENSE",
+    "CONTRIBUTING.md",
+    "README.md",
+    "AGENTS.md",
+})
+
+
+def assert_not_scaffold_internal(rel_path):
+    """Refuse to install scaffold-internal files into downstream projects."""
+    if str(rel_path) in SCAFFOLD_INTERNAL_FILES:
+        raise RuntimeError(
+            f"Refusing to install scaffold-internal file '{rel_path}' into a "
+            "downstream project. This file describes the scaffold repo itself."
+        )
+
 
 def load_manifest():
     with open(MANIFEST_PATH) as f:
@@ -72,6 +93,11 @@ def resolve_profile(profiles, profile_name, _seen=None):
 
 def copy_file(src, dest, force=False, dry_run=False):
     """Copy a file, creating parent dirs as needed. Returns True if copied."""
+    try:
+        rel_src = src.relative_to(REPO_ROOT)
+        assert_not_scaffold_internal(rel_src)
+    except ValueError:
+        pass
     if dest.exists() and not force:
         print(f"  Skip (exists): {dest}")
         return False
