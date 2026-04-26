@@ -259,6 +259,70 @@ Broaden the scaffold beyond the original project style without losing quality.
 
 ---
 
+## Meta Phase M9 — Install lifecycle and provenance
+
+### Goal
+Establish a provenance, upgrade, and uninstall contract for downstream projects enriched by the scaffold, so that scaffold-owned and project-owned files can be distinguished, scaffold versions can be tracked, and scaffold capabilities can be surgically upgraded or removed without coupling to or silently overwriting project work.
+
+### Background
+The current `enrich-project.py` engine copies scaffold assets into shared directories (`.claude/`, `docs/`, `scripts/`, `.devcontainer/`) without writing any provenance record. Downstream projects therefore cannot:
+- identify which files came from the scaffold vs. local authorship
+- know which scaffold version they were enriched from
+- detect drift between scaffold canonical and local state
+- be upgraded to a newer scaffold release without manual reconciliation
+- be uninstalled cleanly
+
+Several copy lists are also hardcoded in the engine (workflow scripts filtered to 2 of 8, container files, root workflow files, doc class filters) instead of declared in the capability manifest. This splits source of truth between data and code, and an implicit deny-list for meta-only files (`LICENSE`, `CONTRIBUTING.md`, root `README.md`, root `AGENTS.md`) only works because no copy path enumerates root files broadly — it is not robust to future contributions.
+
+### Ownership classes
+This phase formalizes three classes for every scaffold-installed file:
+- **`scaffold`** — canonically owned by the scaffold; re-enrichment overwrites unless local content has drifted from manifest sha (then surfaces a diff and requires acknowledgement)
+- **`scaffold-generated-once`** — installed once at bootstrap, then becomes project-owned; re-enrichment does not overwrite (e.g. `.claude/CLAUDE.md`, downstream `AGENTS.md`, the rendered SPEC/ARCHITECTURE/PROD_REQUIREMENTS templates)
+- **`scaffold-internal`** — never copied to downstream projects under any code path (e.g. META_SPEC, META_PHASES, LICENSE, CONTRIBUTING.md, the scaffold's own root `AGENTS.md` and `README.md`)
+
+### Deliverables
+- `.scaffold/manifest.json` schema and example written into the docs
+- Ownership classes declared in `capabilities/project-capabilities.yaml` for every installable asset (replaces hardcoded filters in `enrich-project.py`)
+- `enrich-project.py` extended with:
+  - `--upgrade` — 3-way reconciliation (manifest sha, scaffold-new sha, project-current sha) producing a planned diff before applying
+  - `--uninstall` — removes only files marked `scaffold` and `scaffold-generated-once`
+  - `--check` — drift detection; non-zero exit when scaffold-owned files diverge from manifest sha
+  - `--reconcile` — one-time retrofit for projects enriched before M9; walks the project, computes shas, writes a retroactive manifest at the current scaffold version
+- Explicit, declared deny-list of `scaffold-internal` files; any attempt to install one fails with a clear error
+- `templates/AGENTS.template.md` for downstream projects (parameterized like `CLAUDE.template.md`), installed as `scaffold-generated-once`
+- `docs/INSTALL_LIFECYCLE.md` documenting install / upgrade / uninstall / drift / reconciliation flows with a worked example
+- Migration of hardcoded copy lists (workflow scripts, container files, root workflow files) from `enrich-project.py` into the capability manifest
+- Updated `docs/CAPABILITY_MANIFEST.md` to document ownership classes and provenance fields
+- Scaffold version field declared in `capabilities/project-capabilities.yaml` (or derived from git for unreleased states)
+
+### Acceptance criteria
+- Every successful enrichment writes or updates `.scaffold/manifest.json` recording scaffold version/commit, profile, timestamp, and the list of installed files with their ownership class and content sha256
+- Re-running enrichment against a project with no local hand-modifications produces no diff to any scaffold-owned file (idempotent)
+- Re-running enrichment against a project where a scaffold-owned file has drifted surfaces the drift and requires explicit acknowledgement before overwriting
+- `--upgrade` produces a planned diff (added / removed / changed / locally-modified) and applies it only after user confirmation
+- `--uninstall` removes files marked `scaffold` and `scaffold-generated-once` (with appropriate user acknowledgement for the once-generated class) and leaves files marked `project` untouched
+- `--check` exits non-zero when scaffold-owned files have drifted from manifest sha
+- `--reconcile` produces a valid manifest for an existing enriched project that did not previously have one
+- `scaffold-internal` files cannot be installed by any code path; the engine refuses with a clear error
+- `templates/AGENTS.template.md` is installed once, then becomes project-owned (re-enrichment does not overwrite)
+- `docs/INSTALL_LIFECYCLE.md` is concise, has a worked example, and is referenced from `README.md` and `AGENTS.md`
+- All copy lists previously hardcoded in `enrich-project.py` are now declared in `capabilities/project-capabilities.yaml`
+
+### Required reviews
+This phase changes the install / upgrade / uninstall contract and is subject to the planning gate and the control-loop change gate (see `docs/QUALITY_GATES.md`):
+- `strategy-planner` for the manifest schema and CLI command surface
+- `architecture-red-team` for failure modes (corrupt manifest, partial enrichment, schema migration over time, concurrent enrichment, hand-edits during upgrade, scaffold-uninstall recovery)
+- `code-reviewer` for engine changes
+- `artifacts/decision-memo.md` written before implementation
+- ADR under `docs/adr/` capturing the ownership-class taxonomy and manifest schema
+
+### Out of scope (consider as future sub-phases)
+- M9.1 — moving existing scaffold-canonical docs under a namespaced path (e.g. `docs/scaffold/`) for additional human-readable separation
+- M9.2 — semantic versioning + changelog for the scaffold itself, enabling `--upgrade --to vX.Y.Z`
+- M9.3 — distribution as a Claude Code plugin (`.claude-plugin/marketplace.json`) as an alternative to clone-and-run
+
+---
+
 ## Meta Phase completion rule
 
 A meta-phase is not complete until:
