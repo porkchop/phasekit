@@ -280,6 +280,9 @@ This phase formalizes three classes for every scaffold-installed file:
 - **`scaffold-generated-once`** — installed once at bootstrap, then becomes project-owned; re-enrichment does not overwrite (e.g. `.claude/CLAUDE.md`, downstream `AGENTS.md`, the rendered SPEC/ARCHITECTURE/PROD_REQUIREMENTS templates)
 - **`scaffold-internal`** — never copied to downstream projects under any code path (e.g. META_SPEC, META_PHASES, LICENSE, CONTRIBUTING.md, the scaffold's own root `AGENTS.md` and `README.md`)
 
+### Self-application
+The capability manifest must be expressive enough to classify every tracked file in this scaffold repo itself, not just files destined for downstream projects. This is the self-test of the schema: if it cannot describe its own contents cleanly, it is not yet sound. The `--self-check` command (see deliverables) walks the scaffold repo, classifies every tracked file against the manifest, and fails when any file is unclassified or mis-classified. This is the recursive self-application — the scaffold's process governs the scaffold's own contents — without inventing a circular `.scaffold/manifest.json` for the scaffold repo (which would not carry useful provenance, since the scaffold sources are the canonical originals, not copies).
+
 ### Deliverables
 - `.scaffold/manifest.json` schema and example written into the docs
 - Ownership classes declared in `capabilities/project-capabilities.yaml` for every installable asset (replaces hardcoded filters in `enrich-project.py`)
@@ -288,6 +291,7 @@ This phase formalizes three classes for every scaffold-installed file:
   - `--uninstall` — removes only files marked `scaffold` and `scaffold-generated-once`
   - `--check` — drift detection; non-zero exit when scaffold-owned files diverge from manifest sha
   - `--reconcile` — one-time retrofit for projects enriched before M9; walks the project, computes shas, writes a retroactive manifest at the current scaffold version
+  - `--self-check` — walks the scaffold repo itself, classifies every tracked file against the capability manifest's ownership taxonomy, and fails when any file is unclassified or mis-classified
 - Explicit, declared deny-list of `scaffold-internal` files; any attempt to install one fails with a clear error
 - `templates/AGENTS.template.md` for downstream projects (parameterized like `CLAUDE.template.md`), installed as `scaffold-generated-once`
 - `docs/INSTALL_LIFECYCLE.md` documenting install / upgrade / uninstall / drift / reconciliation flows with a worked example
@@ -303,6 +307,7 @@ This phase formalizes three classes for every scaffold-installed file:
 - `--uninstall` removes files marked `scaffold` and `scaffold-generated-once` (with appropriate user acknowledgement for the once-generated class) and leaves files marked `project` untouched
 - `--check` exits non-zero when scaffold-owned files have drifted from manifest sha
 - `--reconcile` produces a valid manifest for an existing enriched project that did not previously have one
+- `--self-check` succeeds against the scaffold repo with every tracked file classified by the manifest, and fails (non-zero exit) when a tracked file is unclassified, mis-classified, or matches more than one class
 - `scaffold-internal` files cannot be installed by any code path; the engine refuses with a clear error
 - `templates/AGENTS.template.md` is installed once, then becomes project-owned (re-enrichment does not overwrite)
 - `docs/INSTALL_LIFECYCLE.md` is concise, has a worked example, and is referenced from `README.md` and `AGENTS.md`
