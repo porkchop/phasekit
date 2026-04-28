@@ -321,10 +321,267 @@ This phase changes the install / upgrade / uninstall contract and is subject to 
 - `artifacts/decision-memo.md` written before implementation
 - ADR under `docs/adr/` capturing the ownership-class taxonomy and manifest schema
 
-### Out of scope (consider as future sub-phases)
-- M9.1 — moving existing scaffold-canonical docs under a namespaced path (e.g. `docs/scaffold/`) for additional human-readable separation
-- M9.2 — semantic versioning + changelog for the scaffold itself, enabling `--upgrade --to vX.Y.Z`
-- M9.3 — distribution as a Claude Code plugin (`.claude-plugin/marketplace.json`) as an alternative to clone-and-run
+### Out of scope (see sub-phases below)
+M9 ships the install/upgrade/uninstall contract. Eight follow-on sub-phases are articulated below. None gate M9 approval; each is independently plannable.
+
+---
+
+## Meta Phase M9.1 — Namespaced scaffold docs path
+
+### Goal
+Move scaffold-canonical docs (`QUALITY_GATES.md`, `USAGE_PATTERNS.md`, `EXECUTION_MODES.md`, `REASONING_PROFILES.md`, `ADR_TEMPLATE.md`, `CONTAINERIZATION.md`, `INSTALL_LIFECYCLE.md`) under `docs/scaffold/` so human readers can tell scaffold-territory from project-territory at a glance.
+
+### Background
+Today scaffold-canonical docs live alongside project-owned docs in the same `docs/` directory. The manifest distinguishes them by ownership class, but a human reading `ls docs/` cannot. M9.1 adds the directory-level discipline that complements the manifest's machine-readable taxonomy.
+
+### Deliverables
+- Move scaffold-canonical docs to `docs/scaffold/`
+- Update `docs.<KEY>.path` entries in `capabilities/project-capabilities.yaml`
+- Add a v1 → v2 manifest migration rewriting downstream entries' paths (with a fallback that detects pre-namespace `.scaffold/manifest.json` entries and migrates them)
+- Update cross-references in all docs that link to scaffold-canonical paths
+- Update `templates/CLAUDE.template.md` and `templates/AGENTS.template.md` to reference the new paths
+
+### Acceptance criteria
+- After running `--upgrade` against a downstream project enriched at v1, the manifest's `schema_version` is 2 and entries point at `docs/scaffold/<file>.md`; the actual files have been moved.
+- Re-running `--check` reports clean.
+- Project-original docs (e.g. `docs/SPEC.md`, `docs/RUNBOOK.md`) are untouched.
+- `--self-check` passes against the new paths.
+
+### Required reviews
+Touch the install lifecycle and schema. Planning gate applies; ADR amendment to `ADR-0001` capturing the path-namespace decision.
+
+### Out of scope
+- Renaming or relocating non-doc scaffold paths (`scripts/`, `.claude/agents/`, etc.). Those serve Claude Code conventions and stay where they are.
+
+---
+
+## Meta Phase M9.2 — Scaffold versioning and changelog
+
+### Goal
+Replace the current `0.0.0+git.<commit>` development version with semantic versioning, a `CHANGELOG.md`, and `--upgrade --to vX.Y.Z` so downstream projects can pin to specific scaffold versions.
+
+### Background
+M9 records `scaffold_version` in `.scaffold/manifest.json` but the value is just a short commit hash. There's no notion of "release," no breaking-change signal, and no way to upgrade against a known target other than "whatever git checkout the scaffold is on right now." Real consumers need predictable upgrade UX.
+
+### Deliverables
+- Adopt semver scheme (`MAJOR.MINOR.PATCH`); document policy in `docs/COMPATIBILITY.md`
+- Tag releases on master branch (e.g. `v1.0.0`)
+- `CHANGELOG.md` at scaffold root, classified `scaffold-internal`
+- `scripts/release.sh` (or equivalent) automating tag + changelog entry creation
+- `--upgrade --to vX.Y.Z` flag: checks out the named scaffold tag in a temp clone, runs the upgrade against that version
+- `enrich-project.py` derives `scaffold_version` from `git describe --tags --always` instead of just commit hash
+- Link from downstream `INSTALL_LIFECYCLE.md` to the changelog
+
+### Acceptance criteria
+- A tagged scaffold release writes `scaffold_version: v1.2.3+git.<commit>` (or just `v1.2.3` if exactly on tag).
+- `--upgrade --to v1.0.0` against a project on v1.2.0 produces a downgrade plan; `--upgrade --to v1.3.0` produces an upgrade plan; both are dry-runnable and require explicit confirmation.
+- `CHANGELOG.md` is committed and updated as part of the release script.
+- Manifest schema migrations are tied to MAJOR version bumps (a v2.x scaffold can ship migrations from v1.y manifests).
+
+### Required reviews
+Versioning policy is a control-loop change. Planning gate; red-team scrutiny for migration backwards-compatibility; updated `docs/COMPATIBILITY.md`.
+
+### Out of scope
+- Any release distribution beyond git tags (PyPI, npm, etc.) — those are M9.3 territory
+- Backporting fixes to old MAJOR versions (single supported MAJOR for now)
+
+---
+
+## Meta Phase M9.3 — Plugin distribution (hybrid)
+
+### Goal
+Distribute the scaffold's reusable agents and skills as a Claude Code plugin (`.claude-plugin/plugin.json` + a marketplace) so users can install them into any existing project via `/plugin install`, while keeping the full scaffold (containerization, phase gates, lifecycle, capability profiles) as the bootstrap path for new projects.
+
+### Background
+The scaffold today has two distinct value propositions: (a) a *library* of subagents and skills (project-lead, strategy-planner, architecture-red-team, code-reviewer, autonomous-product-builder, etc.) and (b) an *operating system* (phase gates, container, provenance, profiles). The library is reusable in any project; the operating system is opinionated and needs the full scaffold layout. Plugin distribution gives users a low-friction path to (a) without forcing (b).
+
+### Deliverables
+- `.claude-plugin/plugin.json` declaring the plugin's metadata, agents, skills, and (optional) hooks
+- `.claude-plugin/marketplace.json` if hosting our own marketplace, OR a PR to a community marketplace
+- A subset of agents/skills selected for plugin distribution (default: all `scaffold` ownership class agents + `autonomous-product-builder` skill; never `bootstrap-*` files)
+- Plugin install instructions in `README.md` ("install into any project via `/plugin install ...`") alongside the scaffold instructions
+- A test that verifies the plugin manifest references files that actually exist
+- Classification in `capabilities/project-capabilities.yaml`: `.claude-plugin/*.json` as `scaffold` (shipped to plugin marketplace; not installed into downstream projects via enrich-project.py)
+
+### Acceptance criteria
+- `/plugin marketplace add <github-url>` followed by `/plugin install <name>@<marketplace>` installs the plugin into a fresh project, exposing the agents.
+- The plugin can be uninstalled via the plugin manager without affecting the scaffold's `enrich-project.py` engine (the two distribution paths are independent).
+- A user enriched with the scaffold AND the plugin doesn't end up with duplicate agents — document the precedence (project-local `.claude/agents/<name>.md` from enrich wins; plugin agents are inert when a same-name file exists locally; or vice versa, decide explicitly).
+- Plugin manifest is mechanically validated against the actual filesystem in CI (no broken references).
+
+### Required reviews
+Plugin distribution adds a second product surface; planning gate applies. Specific red-team concerns: precedence between scaffold-installed and plugin-installed agents, version skew (plugin version vs scaffold version), and security (the plugin distributes executable hooks).
+
+### Out of scope
+- Replacing the scaffold with the plugin. The scaffold remains the canonical bootstrap path.
+- Distribution to non–Claude-Code targets (e.g., Cursor's extension marketplace). Possible in a future M9.3.x.
+- Auto-updating downstream `.claude/agents/` from the plugin's newer version. Plugins manage their own files; the scaffold's `--upgrade` manages enrich-installed files. They don't cross-update.
+
+---
+
+## Meta Phase M9.4 — Subagent overlay mechanism
+
+### Goal
+Allow downstream projects to extend scaffold-installed subagent files (e.g. add project-specific test flows to `qa-playwright.md`) without permanently freezing the file under `--keep-local`. M9 reserves the schema (`overlays: []` per file entry, `*.project.md` ignored convention) but does not implement concat or conflict semantics.
+
+### Background
+The meewar2 retrofit (April 2026) revealed that 5 of 9 subagent files had project-specific append-only extensions. Today these surface as drift; `--keep-local` preserves them but also opts the file out of all future scaffold improvements. The result is permanent stranding: the team gets neither scaffold updates nor a way to keep their additions clean.
+
+The M9 schema reserves the design space:
+- `overlays: []` field is on every manifest file entry from `schema_version: 1`
+- `*.project.md` files alongside `<name>.md` are skipped by `--check` and `--upgrade` in M9 (intended for M9.4 overlays)
+
+### Deliverables
+- Concat semantics: when an overlay file (e.g. `.claude/agents/code-reviewer.project.md`) exists, the agent at runtime sees the concatenation of the canonical file + overlay content
+- `overlays: []` populated with overlay metadata (path, sha256) per manifest entry
+- `--upgrade` updates the canonical file from scaffold-new while preserving overlay file unchanged
+- `--check` flags drift in the canonical file and the overlay separately
+- Conflict resolution policy: what happens when an overlay's parent file is removed across scaffold versions, what happens when an overlay introduces invalid content, etc.
+- Documentation in `INSTALL_LIFECYCLE.md` and a worked example in the meewar2 history showing customization → upgrade preserving customization
+
+### Acceptance criteria
+- A downstream project with `.claude/agents/code-reviewer.md` (scaffold canonical) and `.claude/agents/code-reviewer.project.md` (project additions) can run `--upgrade` to update the canonical without touching the overlay; the agent at runtime sees both.
+- `--keep-local` is documented as a stop-gap retired by M9.4; existing meewar2-shaped projects can migrate from `--keep-local` to overlays via a one-shot migration command.
+- Overlay introduction does not require a `schema_version` bump (the field is reserved from v1).
+- An overlay whose parent file no longer exists in scaffold produces a clear error during `--upgrade`, not silent acceptance.
+
+### Required reviews
+Highest priority per real-world evidence. Planning gate (concat semantics, conflict resolution); red-team scrutiny for runtime concat correctness (does Claude Code actually read concatenated files? if not, the design fails); ADR documenting the overlay model.
+
+### Out of scope
+- Free-form patching (substring replace, line edits). Overlays are append-only.
+- Overlays for non-agent files (hooks, settings.json, docs). Possibly a future M9.4.x once the agent overlay model is proven.
+
+---
+
+## Meta Phase M9.5 — Manifest signing / tamper detection
+
+### Goal
+Add optional HMAC over `.scaffold/manifest.json` body so a downstream project can detect tampering or accidental corruption. Useful for environments with strict audit/compliance requirements.
+
+### Background
+Today the manifest is a plain JSON file. Anyone with write access can edit shas to mask drift or hide a hand-edit. For most teams this is fine (the manifest is a workflow artifact, not a security boundary). For regulated environments, an integrity check matters.
+
+### Deliverables
+- Optional `signature` field in the manifest, populated when a `SCAFFOLD_HMAC_KEY` env var is present
+- HMAC-SHA256 over the canonical-form manifest body (sorted keys, no signature field)
+- `--check` verifies signature when present, exits non-zero on mismatch
+- `--migrate-only` adds the signature retroactively when the env var is set
+- Documentation: when to use signing, key management responsibility (downstream owns the key; scaffold only provides the algorithm)
+
+### Acceptance criteria
+- A signed manifest with the wrong sha for any file is detected by `--check`.
+- A manifest with a tampered `signature` field is detected.
+- An unsigned manifest is accepted normally (signing is opt-in).
+- The HMAC algorithm is documented (canonicalization rules, hash algorithm) so an independent script can verify.
+
+### Required reviews
+Cryptographic boundary; red-team scrutiny on canonicalization (subtle bugs here let attackers craft signature-equivalent manifests); ADR with algorithm spec.
+
+### Out of scope
+- Public-key signing (X.509, GPG). HMAC is sufficient and avoids key infrastructure.
+- Signing the scaffold-side `capabilities/project-capabilities.yaml`. Scaffold integrity is a different threat model (git history is the audit trail).
+
+---
+
+## Meta Phase M9.6 — Multi-profile additive installs
+
+### Goal
+Let a downstream project enriched with profile A (e.g. `default`) add profile B's agents (e.g. `game-project`'s `engine-builder`, `frontend-builder`, `backend-builder`) without re-enriching everything or losing the existing manifest.
+
+### Background
+M9 supports a single profile per project (`profile` is a top-level field in the manifest). The meewar2 retrofit surfaced that the project actually has agents from multiple profiles' worth (5 drifted agents the audit found, but the `default` profile only tracks 2 of them). Today the only workaround is to switch profile entirely (which would track all of meewar2's agents but rewrite the whole install set).
+
+### Deliverables
+- `--enrich-profile <name>` flag: additive install of a named profile's incremental agents/docs/etc., merging with the existing manifest
+- Manifest schema: `profile` becomes `profiles: [list]` (with v2 → v3 migration adding the wrapping); behavior: each profile's contributions are tracked, removal of a profile cleanly removes its files via `--remove-profile <name>`
+- Conflict resolution: if profile A and profile B both declare the same path with different ownership, refuse with clear error
+- Update `bootstrap-new-project.sh` and `adopt-existing-repo.sh` to support multi-profile install
+- Documentation: when to use multi-profile vs. just switching profiles
+
+### Acceptance criteria
+- A project enriched with `default` can be incrementally enriched with `game-project`, adding `engine-builder` etc. without touching files from `default` that didn't change.
+- Manifest reflects both profiles in `profiles: [default, game-project]` after schema v3 migration.
+- `--remove-profile game-project` cleanly removes only that profile's exclusive files; shared files (those in both profiles) remain.
+- `--upgrade` correctly handles multi-profile state.
+
+### Required reviews
+Schema change (v2 → v3 migration); planning gate applies; red-team scrutiny on conflict resolution (what happens when two profiles disagree on the same path).
+
+### Out of scope
+- Custom profile definitions per downstream project. Profiles still come from the scaffold's `capabilities/project-capabilities.yaml`. (A future M9.6.x might allow downstream profile overlays.)
+
+---
+
+## Meta Phase M9.7 — Settings template sync lint
+
+### Goal
+Mechanically enforce that the scaffold's own `.claude/settings.json` and `templates/settings.template.json` stay byte-identical, eliminating the documented invariant currently maintained by hand.
+
+### Background
+M9 introduced `templates/settings.template.json` to make `.claude/settings.json`'s `bootstrap-with-template-tracking` class honest (manifest's `template_sha` points at a real file). Today the two files are identical; `templates/settings.template.json` is essentially a copy. The scaffold's YAML comment admits "must stay in sync (enforced by future M9.x lint)." This phase implements that lint.
+
+### Deliverables
+- Extension to `--self-check`: assert byte-equality between `.claude/settings.json` and `templates/settings.template.json`
+- Failure surfaces a diff and names both paths
+- `Makefile` (or pre-commit hook in `.claude/hooks/`) running `--self-check` to catch the divergence at commit time
+- Update `CONTRIBUTING.md` documenting the invariant and how the lint enforces it
+
+### Acceptance criteria
+- Editing one file but not the other causes `--self-check` to exit 1 with both paths and a diff.
+- The lint passes today (the two files are byte-identical).
+- The pre-commit hook (if installed) prevents committing a divergent state.
+
+### Required reviews
+Light. Lint is a non-mutating check; only `--self-check` semantics change. Code review only.
+
+### Out of scope
+- Generalizing to "every `.claude/X` should have a `templates/X.template`" — too aggressive. This phase narrowly enforces the existing invariant.
+
+---
+
+## Meta Phase M9.8 — Partial-failure manifest write polish
+
+### Goal
+When `--upgrade` is interrupted mid-flight (some files copied, then one fails), write a partial manifest reflecting the files that did succeed before returning. Currently the manifest is left at pre-upgrade state, so successful copies appear as drift on the next `--check` until the user re-runs.
+
+### Background
+M9 §5 documents recovery via re-run, and the engine handles it correctly: orphan tmps are swept, succeeded copies are seen as clean on rerun. But the period between the failure and the re-run is confusing — `--check` reports drift on files that are actually correct. Code-review F7 flagged this; M9 documented the recovery path (`INSTALL_LIFECYCLE.md` Troubleshooting section). This phase replaces documentation with mechanical correctness.
+
+### Deliverables
+- Wrap `apply_upgrade_plan` in a try/finally that writes a partial manifest reflecting whatever did succeed before propagating the exception
+- Manifest carries a `partial: true` field plus `failed_at: <timestamp>` and `failed_path: <path>` when the partial state is recorded
+- `--check` against a partial manifest prints a hint ("manifest is from a partial upgrade; re-run --upgrade to complete") and still verifies all listed entries
+- `--upgrade` against a partial manifest resumes from the failure point (skips the files already recorded as canonical)
+- Test: monkeypatch the third file copy to raise, verify the manifest after the exception reflects the first two as canonical and lists the failed file under `failed_path`
+
+### Acceptance criteria
+- A simulated failure during `--upgrade` produces a partial manifest with successful copies marked clean.
+- `--check` against the partial manifest exits 0 for the succeeded files (no false drift).
+- A subsequent `--upgrade` resumes correctly: failed file is retried, partial flag clears on full success.
+
+### Required reviews
+Touches the engine's atomic-write semantics. Code-reviewer pass; updated `INSTALL_LIFECYCLE.md` Troubleshooting section.
+
+### Out of scope
+- True transactional rollback (revert succeeded copies on failure). The current best-effort + recovery model is sufficient for the use case.
+
+---
+
+## Sub-phase priority (informal)
+
+Real-world evidence and value-per-effort suggest this order:
+
+1. **M9.4 — Subagent overlays** — meewar2 evidence shows 5 stranded agents; --keep-local is a real stop-gap that's actively biting users
+2. **M9.3 — Plugin distribution** — broadens reach significantly with low effort; additive (no breaking changes)
+3. **M9.6 — Multi-profile additive installs** — also surfaced by meewar2; medium effort; unlocks richer projects
+4. **M9.2 — Scaffold versioning + changelog** — essential for predictable upgrade UX once external consumers exist
+5. **M9.7 — Settings template sync lint** — small, removes a hand-maintained invariant
+6. **M9.8 — Partial-failure manifest write polish** — small, improves UX after a failure
+7. **M9.1 — Namespaced scaffold docs path** — cosmetic; nice-to-have
+8. **M9.5 — Manifest signing** — only matters in regulated/hostile environments
+
+This is informal; the project lead picks the actual next phase based on user pull and current bandwidth.
 
 ---
 
