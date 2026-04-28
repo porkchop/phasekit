@@ -760,7 +760,14 @@ def compute_upgrade_plan(
                     and scaffold_new_sha != manifest_sha
                 ):
                     state = "update-available"
-                    action = ACTION_TAKE_NEW
+                    # Default action is to take the scaffold-new version, but
+                    # `--keep-local` overrides — the user intent ("preserve
+                    # my version even though scaffold has a newer canonical")
+                    # applies symmetrically to drifted and update-available.
+                    if path in keep_local:
+                        action = ACTION_KEEP_LOCAL
+                    else:
+                        action = ACTION_TAKE_NEW
                 else:
                     state = "clean"
                     action = ACTION_NOOP

@@ -606,6 +606,55 @@ class TemplateSourceAdvisoryDrift(unittest.TestCase):
             fixture.cleanup()
 
 
+class UpgradeKeepLocalAppliesToUpdateAvailable(unittest.TestCase):
+    """Regression: when `--reconcile` snapshotted a project-customized version
+    of an agent file, subsequent `--upgrade` will see current_sha == manifest_sha
+    (clean) but scaffold_new_sha != manifest_sha (update-available). Without
+    this regression test, a default --upgrade would silently overwrite the
+    project's customizations because --keep-local was only honored in the
+    `drifted` branch.
+    """
+
+    def test_keep_local_honored_in_update_available(self):
+        fixture = _GreenfieldFixture()
+        try:
+            target = fixture.target
+            module = _load_module()
+
+            # Modify a scaffold-class agent file in the project, then
+            # reconcile so the manifest snapshots the modified version.
+            project_path = target / ".claude" / "agents" / "code-reviewer.md"
+            project_path.write_text("PROJECT-CUSTOMIZED VERSION\n")
+            subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "--reconcile", "--force",
+                 str(target)],
+                check=True, capture_output=True,
+            )
+
+            # Compute the upgrade plan with --keep-local for the customized file
+            existing = module.load_downstream_manifest(target)
+            scaffold_manifest = module.load_manifest()
+            resolved = module.resolve_profile(scaffold_manifest["profiles"], "default")
+            plans = module.compute_upgrade_plan(
+                target, scaffold_manifest, existing, resolved,
+                keep_local=(".claude/agents/code-reviewer.md",),
+            )
+            entry = next(p for p in plans
+                         if p["path"] == ".claude/agents/code-reviewer.md")
+            self.assertEqual(entry["state"], "update-available",
+                             "expected update-available state")
+            self.assertEqual(entry["action"], module.ACTION_KEEP_LOCAL,
+                             "--keep-local must be honored even when state is update-available")
+
+            # Apply and verify content untouched
+            rc = module.apply_upgrade_plan(target, scaffold_manifest, plans, "default")
+            self.assertEqual(rc, 0)
+            self.assertEqual(project_path.read_text(), "PROJECT-CUSTOMIZED VERSION\n",
+                             "project customization must be preserved")
+        finally:
+            fixture.cleanup()
+
+
 class UpgradeActionPositivePaths(unittest.TestCase):
     """F10 review F6 — exercise --adopt, --rename-local, --accept-removal,
     --interactive on the positive path. Each action must produce the
