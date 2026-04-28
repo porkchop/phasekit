@@ -474,6 +474,76 @@ class UpgradeCollisionNovelRefuses(unittest.TestCase):
             fixture.cleanup()
 
 
+class UninstallIncludeOnceRoundTrip(unittest.TestCase):
+    """F10 #7 — --uninstall --include-once removes all `scaffold` and `bootstrap-*`
+    files; non-manifest files are byte-identical before and after."""
+
+    def test_uninstall_default_keeps_bootstrap(self):
+        fixture = _GreenfieldFixture()
+        try:
+            target = fixture.target
+            (target / "docs" / "QUALITY_GATES.md").exists()  # sanity
+            project_path = target / "docs" / "PROJECT_README.md"
+            project_path.write_text("project content\n")
+
+            # Default uninstall removes only `scaffold` class
+            r = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "--uninstall", "--yes", str(target)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 0, f"--uninstall failed:\n{r.stderr}")
+
+            self.assertFalse((target / "docs" / "QUALITY_GATES.md").exists(),
+                             "scaffold-class file should have been removed")
+            self.assertTrue((target / "docs" / "SPEC.md").exists(),
+                            "bootstrap-frozen should remain without --include-once")
+            self.assertTrue(project_path.exists(),
+                            "project-original file must not be touched")
+            self.assertEqual(project_path.read_text(), "project content\n")
+            # Recovery log must exist
+            self.assertTrue((target / ".scaffold" / "uninstall.log").exists())
+        finally:
+            fixture.cleanup()
+
+    def test_uninstall_include_once_removes_all_classes(self):
+        fixture = _GreenfieldFixture()
+        try:
+            target = fixture.target
+            project_path = target / "docs" / "PROJECT_README.md"
+            project_content = "project file untouched\n"
+            project_path.write_text(project_content)
+
+            r = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "--uninstall", "--include-once",
+                 "--yes", str(target)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 0,
+                             f"--uninstall --include-once failed:\n{r.stderr}")
+
+            # Both classes gone
+            self.assertFalse((target / "docs" / "QUALITY_GATES.md").exists(),
+                             "scaffold file should be gone")
+            self.assertFalse((target / "docs" / "SPEC.md").exists(),
+                             "bootstrap-frozen file should be gone (--include-once)")
+            self.assertFalse((target / ".claude" / "settings.json").exists(),
+                             "bootstrap-with-template-tracking file should be gone")
+            self.assertFalse((target / ".claude" / "CLAUDE.md").exists(),
+                             "bootstrap-with-template-tracking should be gone")
+
+            # Project file byte-identical
+            self.assertTrue(project_path.exists())
+            self.assertEqual(project_path.read_text(), project_content)
+
+            # Manifest removed (no scaffold files remain)
+            self.assertFalse((target / ".scaffold" / "manifest.json").exists())
+
+            # Recovery log retained
+            self.assertTrue((target / ".scaffold" / "uninstall.log").exists())
+        finally:
+            fixture.cleanup()
+
+
 class ScaffoldInternalDenyFromManifest(unittest.TestCase):
     """The deny-list for scaffold-internal files now derives from the
     capability manifest (M9 retired the SCAFFOLD_INTERNAL_FILES constant)."""

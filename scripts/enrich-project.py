@@ -851,6 +851,115 @@ def cmd_upgrade(target_dir, profile=None, dry_run=False, yes=False, no_lock=Fals
         return apply_upgrade_plan(target, scaffold_manifest, plans, profile)
 
 
+# === --uninstall (M9 §5) ===================================================
+
+def cmd_uninstall(target_dir, include_once=False, yes=False, no_lock=False, dry_run=False):
+    """Remove scaffold-owned files from the downstream project.
+
+    Default: removes only `scaffold` class files (canonical scaffold-installed).
+    With `--include-once`: also removes `bootstrap-frozen` and
+    `bootstrap-with-template-tracking` (project-owned content; requires
+    explicit acknowledgment).
+
+    Writes `.scaffold/uninstall.log` before deletion (recovery aid).
+    Files not tracked by the manifest are never touched.
+
+    Returns 0 on success, 1 on error.
+    """
+    target = Path(target_dir).resolve()
+    if not target.is_dir():
+        print(f"Error: target does not exist: {target}", file=sys.stderr)
+        return 1
+
+    sweep_orphan_tmpfiles(target)
+
+    existing = load_downstream_manifest(target)
+    if existing is None:
+        print(f"No .scaffold/manifest.json in {target}; nothing to uninstall.",
+              file=sys.stderr)
+        return 1
+    try:
+        existing = migrate_manifest(existing)
+    except RuntimeError as e:
+        print(f"--uninstall: {e}", file=sys.stderr)
+        return 1
+
+    classes_to_remove = {"scaffold", "scaffold-orphan"}
+    if include_once:
+        classes_to_remove.add("bootstrap-frozen")
+        classes_to_remove.add("bootstrap-with-template-tracking")
+
+    files = existing.get("files", [])
+    to_remove = [f for f in files if f.get("ownership") in classes_to_remove]
+    to_keep = [f for f in files if f.get("ownership") not in classes_to_remove]
+
+    print(f"--uninstall: removing {len(to_remove)} files "
+          f"({'scaffold + bootstrap-*' if include_once else 'scaffold class only'})")
+    for entry in to_remove:
+        print(f"  {entry['path']}  ({entry['ownership']})")
+    if to_keep:
+        print(f"\nWill keep {len(to_keep)} files (use --include-once for bootstrap-* removal):")
+        for entry in to_keep:
+            print(f"  {entry['path']}  ({entry['ownership']})")
+
+    if dry_run:
+        print("\n(dry-run; no changes written)")
+        return 0
+
+    if not yes:
+        if include_once:
+            print("\nWARNING: --include-once will remove project-owned bootstrap-* files")
+            print("(SPEC.md, ARCHITECTURE.md, .claude/CLAUDE.md, etc.).")
+        try:
+            answer = input("\nProceed with uninstall? [y/N]: ").strip().lower()
+        except EOFError:
+            answer = "n"
+        if answer not in ("y", "yes"):
+            print("Aborted.", file=sys.stderr)
+            return 1
+
+    with target_lock(target, no_lock=no_lock):
+        # Write recovery log BEFORE deletion (M9 §5 partial-failure semantics).
+        log_path = target / ".scaffold" / "uninstall.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_data = {
+            "uninstalled_at": utc_now_iso(),
+            "include_once": include_once,
+            "scaffold_version": existing.get("scaffold_version"),
+            "files": to_remove,
+        }
+        log_tmp = log_path.parent / (log_path.name + TMP_SUFFIX)
+        log_tmp.write_text(json.dumps(log_data, indent=2) + "\n")
+        os.replace(log_tmp, log_path)
+
+        # Now perform deletions.
+        deleted = 0
+        for entry in to_remove:
+            p = target / entry["path"]
+            try:
+                p.unlink()
+                deleted += 1
+            except FileNotFoundError:
+                pass
+
+        # Update or remove the manifest.
+        manifest_path = target / ".scaffold" / "manifest.json"
+        if not to_keep:
+            try:
+                manifest_path.unlink()
+            except FileNotFoundError:
+                pass
+            print(f"\nRemoved manifest (no scaffold files remain).")
+        else:
+            existing["files"] = to_keep
+            tmp = manifest_path.parent / (manifest_path.name + TMP_SUFFIX)
+            tmp.write_text(json.dumps(existing, indent=2) + "\n")
+            os.replace(tmp, manifest_path)
+
+    print(f"Uninstalled {deleted} file(s). Recovery log: {log_path}")
+    return 0
+
+
 def cmd_migrate_only(target_dir, no_lock=False):
     """Rewrite the on-disk manifest forward to SCHEMA_VERSION_CURRENT.
 
@@ -1521,6 +1630,10 @@ def main():
                         help="Migrate the manifest's schema_version forward without other side effects")
     parser.add_argument("--upgrade", action="store_true",
                         help="Plan-then-confirm upgrade of a downstream project against the current scaffold")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="Remove scaffold-owned files (scaffold class). Use --include-once to also remove bootstrap-* files.")
+    parser.add_argument("--include-once", dest="include_once", action="store_true",
+                        help="With --uninstall: also remove bootstrap-frozen and bootstrap-with-template-tracking files")
     parser.add_argument("--strict", action="store_true",
                         help="Use byte-exact hashing instead of normalized (skips bootstrap-frozen)")
     parser.add_argument("--yes", action="store_true",
@@ -1561,6 +1674,17 @@ def main():
         if not args.target_dir:
             parser.error("--migrate-only requires target_dir")
         sys.exit(cmd_migrate_only(args.target_dir, no_lock=args.no_lock))
+
+    if args.uninstall:
+        if not args.target_dir:
+            parser.error("--uninstall requires target_dir")
+        sys.exit(cmd_uninstall(
+            args.target_dir,
+            include_once=args.include_once,
+            yes=args.yes,
+            no_lock=args.no_lock,
+            dry_run=args.dry_run,
+        ))
 
     if args.upgrade:
         if not args.target_dir:
