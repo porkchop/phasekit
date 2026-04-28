@@ -1400,6 +1400,7 @@ DOC_TEMPLATE_MAP = {
     "SPEC": "templates/spec.template.md",
     "ARCHITECTURE": "templates/architecture.template.md",
     "PROD_REQUIREMENTS": "templates/prod-requirements.template.md",
+    "DESIGN": "templates/design.template.md",  # M10 — opt-in via with-design profile
 }
 
 # Docs that exist in the scaffold but never install downstream (matches

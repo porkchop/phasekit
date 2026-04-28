@@ -71,3 +71,19 @@ Workflow:
 3. generate or refine the required assets
 4. validate and package project skills as deliverables
 5. document downstream installation and usage
+
+## When to use docs/DESIGN.md
+
+The optional `docs/DESIGN.md` artifact (M10) documents the steady-state system shape: subsystems, data flows, hot spots, and boundaries. Pair it with `SPEC.md` (what users see) and `ARCHITECTURE.md` (how code is organized).
+
+Use it when:
+- the project will have more than one subsystem with non-trivial dependencies between them
+- scaling concerns matter (hot writes, large reads, external-call serialization, queueing)
+- there are sync-vs-async decisions, transaction boundaries, or trust boundaries worth being explicit about
+- multiple agents will collaborate on the project and need a shared mental model
+
+Skip it for:
+- prototypes, single-file scripts, throwaway experiments, or projects under a few hours of work
+- pure CRUD apps with one obvious shape and no scaling concerns
+
+Enable it via the `with-design` profile at enrichment time, or by editing the project's `.scaffold/manifest.json` profile to `with-design` and running `--upgrade`. Keep `DESIGN.md` under one screen — push detail into per-decision memos in `artifacts/` rather than letting the design itself grow. `strategy-planner` produces and updates the design; `architecture-red-team` reviews it alongside decision memos.

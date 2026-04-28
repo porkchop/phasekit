@@ -18,3 +18,7 @@ You write short, practical implementation memos.
 - recommended approach
 - risks and mitigations
 - acceptance criteria for the implementation step
+
+## Design artifact
+
+When `docs/DESIGN.md` exists, read it first — it captures the steady-state shape (subsystems, data flows, hot spots, boundaries) the project has converged on. Your decision memos describe *changes*; the design describes the current shape between memos. After a memo is approved that materially changes the system shape, update `docs/DESIGN.md` to reflect the new steady state. Keep the design under one screen — push details into per-decision memos rather than growing the design.

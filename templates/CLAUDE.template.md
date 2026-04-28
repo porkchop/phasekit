@@ -16,4 +16,7 @@ This repository uses the competent developer workflow.
 - @docs/QUALITY_GATES.md
 - @docs/PROD_REQUIREMENTS.md
 
+## Optional references
+- @docs/DESIGN.md — steady-state system design (subsystems, data flows, hot spots, boundaries). Read first if present; not every project has one.
+
 {{OPTIONAL_REFERENCES}}

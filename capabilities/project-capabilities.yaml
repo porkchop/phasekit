@@ -75,6 +75,14 @@ profiles:
       - backend-builder
       - release-hardening
 
+  # Opt-in profile that adds the DESIGN.md design artifact (M10).
+  # Use when a project's complexity benefits from a one-page steady-state
+  # design — not for trivial projects.
+  with-design:
+    extends: default
+    include_docs:
+      - DESIGN
+
 agents:
   project-lead:
     enabled: true
@@ -229,6 +237,14 @@ docs:
     required: false
     ownership: scaffold
 
+  DESIGN:
+    path: docs/DESIGN.md
+    required: false
+    ownership: bootstrap-frozen
+    # M10 — opt-in design artifact rendered from templates/design.template.md.
+    # NOT in default profile's include_docs; use the `with-design` profile
+    # or pass --profile with-design when enriching.
+
 hooks:
   deny-dangerous-commands:
     path: .claude/hooks/deny-dangerous-commands.sh
@@ -355,6 +371,11 @@ files:
     ownership: scaffold-template
     # Materialized in M9 Slice B; rendered into downstream AGENTS.md as
     # `bootstrap-with-template-tracking`.
+
+  templates/design.template.md:
+    ownership: scaffold-template
+    # M10 — rendered into downstream docs/DESIGN.md when the with-design
+    # profile is selected.
 
   templates/adr.template.md:
     ownership: scaffold-template

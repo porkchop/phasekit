@@ -35,6 +35,7 @@ Before non-trivial work, read:
 
 - `docs/SPEC.md` — what {{PROJECT_NAME}} is supposed to do
 - `docs/ARCHITECTURE.md` — technical architecture
+- `docs/DESIGN.md` (if present) — steady-state system design: subsystems, data flows, hot spots, boundaries
 - `docs/PHASES.md` — phase plan for this project
 - `docs/QUALITY_GATES.md` — universal/testing/DRY/drift/planning/control-loop/commit gates
 - `docs/PROD_REQUIREMENTS.md` — production/deployment requirements

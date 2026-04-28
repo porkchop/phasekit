@@ -863,5 +863,63 @@ class ScaffoldInternalDenyFromManifest(unittest.TestCase):
         module.assert_not_scaffold_internal("docs/QUALITY_GATES.md")  # no raise
 
 
+class M10DesignArtifact(unittest.TestCase):
+    """M10 — opt-in `docs/DESIGN.md` artifact via the `with-design` profile.
+
+    Acceptance:
+    - default profile produces a project WITHOUT DESIGN.md (opt-in, no
+      regression for existing users)
+    - with-design profile produces a project WITH DESIGN.md rendered from
+      templates/design.template.md
+    - the rendered template fits under 60 lines (one-screen constraint)
+    - manifest entry has ownership: bootstrap-frozen
+    """
+
+    def test_default_profile_does_not_install_design(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "project"
+            target.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=target, check=True)
+            r = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), str(target)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertFalse(
+                (target / "docs" / "DESIGN.md").exists(),
+                "default profile must NOT install docs/DESIGN.md",
+            )
+
+    def test_with_design_profile_installs_rendered_design(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "project"
+            target.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=target, check=True)
+            r = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH),
+                 "--profile", "with-design", str(target)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            design_path = target / "docs" / "DESIGN.md"
+            self.assertTrue(design_path.exists(),
+                            "with-design profile must install docs/DESIGN.md")
+            # Project name substituted
+            self.assertIn(target.name, design_path.read_text(),
+                          "project name should be substituted in rendered DESIGN.md")
+            # Under 60 lines (one-screen)
+            line_count = len(design_path.read_text().splitlines())
+            self.assertLess(line_count, 60,
+                            f"DESIGN.md should fit on one screen; got {line_count} lines")
+            # Manifest reflects bootstrap-frozen ownership
+            with open(target / ".scaffold" / "manifest.json") as f:
+                manifest = json.load(f)
+            entry = next((e for e in manifest["files"] if e["path"] == "docs/DESIGN.md"),
+                         None)
+            self.assertIsNotNone(entry, "manifest must list docs/DESIGN.md")
+            self.assertEqual(entry["ownership"], "bootstrap-frozen",
+                             "DESIGN.md should be bootstrap-frozen")
+
+
 if __name__ == "__main__":
     unittest.main()
