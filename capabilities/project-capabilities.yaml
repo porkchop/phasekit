@@ -47,6 +47,7 @@ profiles:
       - REASONING_PROFILES
       - ADR_TEMPLATE
       - CONTAINERIZATION
+      - INSTALL_LIFECYCLE
     include_hooks:
       - deny-dangerous-commands
     include_scripts:
@@ -220,6 +221,11 @@ docs:
 
   CONTAINERIZATION:
     path: docs/CONTAINERIZATION.md
+    required: false
+    ownership: scaffold
+
+  INSTALL_LIFECYCLE:
+    path: docs/INSTALL_LIFECYCLE.md
     required: false
     ownership: scaffold
 

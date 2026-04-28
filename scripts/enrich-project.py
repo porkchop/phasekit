@@ -401,6 +401,93 @@ def load_downstream_manifest(target_dir):
         return json.load(f)
 
 
+# === Schema migrations (M9 §3, F4) =========================================
+# Linear-chain only. Each migration is a pure function (no I/O) keyed by
+# (from_version, to_version) and adds the schema deltas required to bring a
+# manifest one version forward. Engine composes them in order.
+
+def _migrate_v0_to_v1(manifest):
+    """v0 was the unreleased pre-M9 in-memory shape (no normalization block,
+    no per-entry overlays). v1 adds both. Pure function — no I/O.
+
+    This migration exists primarily to test the migration mechanism (M9
+    acceptance criterion #9). Real v0 manifests do not exist in the wild;
+    pre-M9 projects had no manifest at all and use --reconcile instead.
+    """
+    manifest = json.loads(json.dumps(manifest))  # deep copy via JSON
+
+    if "normalization" not in manifest:
+        manifest["normalization"] = {
+            "recipe": NORMALIZATION_RECIPE,
+            "version": NORMALIZATION_VERSION,
+        }
+
+    for entry in manifest.get("files", []):
+        if "overlays" not in entry:
+            entry["overlays"] = []
+
+    manifest["schema_version"] = 1
+    return manifest
+
+
+# Registry of migrations keyed by (from_version, to_version). Linear chain:
+# adding (1, 2) is sufficient for a v2 release; engine composes (0,1) ∘ (1,2).
+MIGRATIONS = {
+    (0, 1): _migrate_v0_to_v1,
+}
+
+
+def migrate_manifest(manifest):
+    """Apply linear-chain migrations from manifest's schema_version up to
+    SCHEMA_VERSION_CURRENT. Returns the migrated manifest. Idempotent: a
+    manifest already at SCHEMA_VERSION_CURRENT is returned unchanged.
+    """
+    current = manifest.get("schema_version", 0)
+    while current < SCHEMA_VERSION_CURRENT:
+        next_version = current + 1
+        migrate_fn = MIGRATIONS.get((current, next_version))
+        if migrate_fn is None:
+            raise RuntimeError(
+                f"No migration from schema v{current} to v{next_version} "
+                f"(target schema v{SCHEMA_VERSION_CURRENT})"
+            )
+        manifest = migrate_fn(manifest)
+        current = manifest.get("schema_version", next_version)
+    return manifest
+
+
+def cmd_migrate_only(target_dir, no_lock=False):
+    """Rewrite the on-disk manifest forward to SCHEMA_VERSION_CURRENT.
+
+    No-op (exit 0) if the manifest is already current.
+    """
+    target = Path(target_dir).resolve()
+    manifest = load_downstream_manifest(target)
+    if manifest is None:
+        print(f"No .scaffold/manifest.json in {target}", file=sys.stderr)
+        return 1
+
+    current_version = manifest.get("schema_version", 0)
+    if current_version == SCHEMA_VERSION_CURRENT:
+        print(f"Manifest already at schema_version {SCHEMA_VERSION_CURRENT}.")
+        return 0
+
+    try:
+        migrated = migrate_manifest(manifest)
+    except RuntimeError as e:
+        print(f"Migration failed: {e}", file=sys.stderr)
+        return 1
+
+    with target_lock(target, no_lock=no_lock):
+        manifest_path = target / ".scaffold" / "manifest.json"
+        tmp_path = target / ".scaffold" / "manifest.json.scaffold-tmp"
+        tmp_path.write_text(json.dumps(migrated, indent=2) + "\n")
+        os.replace(tmp_path, manifest_path)
+
+    print(f"Migrated manifest from schema v{current_version} to v{migrated['schema_version']}.")
+    return 0
+
+
 # === Manifest writer (M9 §3, F8) ===========================================
 
 # Latest schema version this engine writes. Older manifests are migrated
@@ -771,7 +858,15 @@ def cmd_check(target_dir, strict=False):
     manifest = load_downstream_manifest(target)
     if manifest is None:
         print(f"No .scaffold/manifest.json in {target}.", file=sys.stderr)
-        print("Run `enrich-project.py --reconcile` first (Slice B feature).", file=sys.stderr)
+        print("Run `enrich-project.py --reconcile` first.", file=sys.stderr)
+        return 1
+
+    # Older manifests are upgraded in-memory before any read. The on-disk
+    # manifest is only rewritten by mutating commands (use --migrate-only).
+    try:
+        manifest = migrate_manifest(manifest)
+    except RuntimeError as e:
+        print(f"--check: {e}", file=sys.stderr)
         return 1
 
     drift = []
@@ -1023,6 +1118,8 @@ def main():
                         help="Compare downstream project against its .scaffold/manifest.json")
     parser.add_argument("--reconcile", action="store_true",
                         help="Build a retroactive .scaffold/manifest.json for a project enriched before M9")
+    parser.add_argument("--migrate-only", dest="migrate_only", action="store_true",
+                        help="Migrate the manifest's schema_version forward without other side effects")
     parser.add_argument("--strict", action="store_true",
                         help="Use byte-exact hashing instead of normalized (skips bootstrap-frozen)")
     parser.add_argument("--no-lock", dest="no_lock", action="store_true",
@@ -1046,6 +1143,11 @@ def main():
             no_lock=args.no_lock,
             force=args.force,
         ))
+
+    if args.migrate_only:
+        if not args.target_dir:
+            parser.error("--migrate-only requires target_dir")
+        sys.exit(cmd_migrate_only(args.target_dir, no_lock=args.no_lock))
 
     # Default: enrich
     if not args.target_dir:

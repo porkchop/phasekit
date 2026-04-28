@@ -201,6 +201,94 @@ class ConcurrentEnrichLockContention(unittest.TestCase):
             fixture.cleanup()
 
 
+class MigrationFixture(unittest.TestCase):
+    """F10 #9 — synthetic v0 manifest run through engine at v1 should produce
+    a valid v1 manifest with content equivalent. Round-trip and idempotency
+    assertions both pass."""
+
+    SYNTHETIC_V0 = {
+        "schema_version": 0,
+        "scaffold_version": "0.0.0+git.synthetic",
+        "scaffold_commit": "synthetic",
+        "profile": "default",
+        "enriched_at": "2026-04-25T00:00:00Z",
+        "files": [
+            {
+                "path": "docs/QUALITY_GATES.md",
+                "ownership": "scaffold",
+                "text": True,
+                "sha256": "deadbeef",
+                "sha256_strict": "deadbeef",
+                "installed_at": "2026-04-25T00:00:00Z",
+                # NOTE: no `overlays` field — v1 adds it
+            },
+        ],
+        # NOTE: no `normalization` block — v1 adds it
+    }
+
+    def test_v0_to_v1_migration_adds_required_fields(self):
+        module = _load_module()
+        migrated = module.migrate_manifest(self.SYNTHETIC_V0)
+        self.assertEqual(migrated["schema_version"], 1)
+        self.assertEqual(
+            migrated["normalization"]["recipe"],
+            "lf-trim-trailing-ws-single-final-newline",
+        )
+        self.assertEqual(migrated["normalization"]["version"], 1)
+        for entry in migrated["files"]:
+            self.assertIn("overlays", entry)
+            self.assertEqual(entry["overlays"], [])
+
+    def test_migration_is_idempotent(self):
+        module = _load_module()
+        once = module.migrate_manifest(self.SYNTHETIC_V0)
+        twice = module.migrate_manifest(once)
+        self.assertEqual(once, twice, "migrate(migrate(v0)) must equal migrate(v0)")
+
+    def test_migration_preserves_existing_data(self):
+        module = _load_module()
+        migrated = module.migrate_manifest(self.SYNTHETIC_V0)
+        # Original v0 fields should survive
+        self.assertEqual(migrated["scaffold_version"], "0.0.0+git.synthetic")
+        self.assertEqual(migrated["profile"], "default")
+        self.assertEqual(len(migrated["files"]), 1)
+        self.assertEqual(migrated["files"][0]["path"], "docs/QUALITY_GATES.md")
+        self.assertEqual(migrated["files"][0]["sha256"], "deadbeef")
+
+    def test_already_current_returns_unchanged(self):
+        module = _load_module()
+        already_v1 = {
+            "schema_version": 1,
+            "files": [],
+            "normalization": {
+                "recipe": "lf-trim-trailing-ws-single-final-newline",
+                "version": 1,
+            },
+        }
+        migrated = module.migrate_manifest(already_v1)
+        self.assertEqual(migrated, already_v1)
+
+    def test_migrate_only_command_rewrites_manifest(self):
+        """End-to-end: synthetic v0 written to disk → --migrate-only → v1."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "project"
+            (target / ".scaffold").mkdir(parents=True)
+            (target / ".scaffold" / "manifest.json").write_text(
+                json.dumps(self.SYNTHETIC_V0, indent=2)
+            )
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "--migrate-only", str(target)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0,
+                             f"--migrate-only failed:\n{result.stderr}")
+            with open(target / ".scaffold" / "manifest.json") as f:
+                migrated = json.load(f)
+            self.assertEqual(migrated["schema_version"], 1)
+            self.assertIn("normalization", migrated)
+            self.assertEqual(migrated["files"][0]["overlays"], [])
+
+
 class ManifestSchema(unittest.TestCase):
     """Sanity: manifest written by the engine has the documented top-level shape."""
 
