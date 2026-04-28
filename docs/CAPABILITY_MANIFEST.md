@@ -15,6 +15,7 @@ Every file enumerated by the manifest carries one of these classes:
 | `bootstrap-with-template-tracking` | downstream only, write-once | never auto-overwritten; the manifest stores a `template_sha`; an advisory drift surfaces when the source template changes |
 | `scaffold-template` | scaffold only (`templates/`) | rendered into downstream files; never copied verbatim |
 | `scaffold-internal` | scaffold only | never installable; `--self-check` enforces |
+| `scaffold-orphan` | downstream only (after `--upgrade`) | left in place when the new scaffold no longer declares the path; `--uninstall` will remove. Never appears in scaffold-side classification. |
 
 Notes:
 

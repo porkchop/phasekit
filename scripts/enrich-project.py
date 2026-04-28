@@ -303,13 +303,28 @@ NORMALIZATION_RECIPE = "lf-trim-trailing-ws-single-final-newline"
 NORMALIZATION_VERSION = 1
 
 # Valid ownership classes (M9 §2).
-OWNERSHIP_CLASSES = frozenset({
+#
+# `scaffold` and `scaffold-internal` describe scaffold-side classification
+# (used by `--self-check`). `bootstrap-frozen` and
+# `bootstrap-with-template-tracking` describe downstream classification.
+# `scaffold-template` is scaffold-only.
+#
+# `scaffold-orphan` (added in Slice C.5) appears only in downstream manifests
+# after `--upgrade` finds a previously-tracked file the new scaffold no
+# longer declares. It's never produced scaffold-side; `--self-check` will
+# never see it.
+OWNERSHIP_CLASSES_SCAFFOLD_SIDE = frozenset({
     "scaffold",
     "bootstrap-frozen",
     "bootstrap-with-template-tracking",
     "scaffold-template",
     "scaffold-internal",
 })
+OWNERSHIP_CLASSES_DOWNSTREAM_ONLY = frozenset({
+    "scaffold-orphan",
+})
+OWNERSHIP_CLASSES = OWNERSHIP_CLASSES_SCAFFOLD_SIDE  # backward-compat alias
+OWNERSHIP_CLASS_ORPHAN = "scaffold-orphan"
 
 # Path prefixes that the constrained `ignore:` policy forbids any glob from
 # matching (M9 §8). If `ignore: ["docs/**"]` is added and a path under
@@ -871,7 +886,7 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
             print(f"  orphan: {path}  (left in place; scaffold no longer declares it)")
             # Re-record under a downgraded class so subsequent --check stays sane
             file_specs_for_manifest.append({
-                "path": path, "ownership": "scaffold-orphan",
+                "path": path, "ownership": OWNERSHIP_CLASS_ORPHAN,
                 "text": p["text"], "rendered_from": p["rendered_from"],
             })
 
@@ -1039,7 +1054,7 @@ def cmd_uninstall(target_dir, include_once=False, yes=False, no_lock=False, dry_
         print(f"--uninstall: {e}", file=sys.stderr)
         return 1
 
-    classes_to_remove = {"scaffold", "scaffold-orphan"}
+    classes_to_remove = {"scaffold", OWNERSHIP_CLASS_ORPHAN}
     if include_once:
         classes_to_remove.add("bootstrap-frozen")
         classes_to_remove.add("bootstrap-with-template-tracking")

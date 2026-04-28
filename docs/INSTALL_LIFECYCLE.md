@@ -48,6 +48,7 @@ The manifest records:
 | `bootstrap-with-template-tracking` | Never auto-overwritten; manifest stores `template_sha`; advisory drift when source template changes |
 | `scaffold-template` | Lives only in the scaffold (`templates/`); rendered into downstream files |
 | `scaffold-internal` | Lives only in the scaffold; never installable |
+| `scaffold-orphan` | Downstream-only; assigned by `--upgrade` when the new scaffold no longer declares a previously-tracked path. Left on disk; `--uninstall` removes. |
 
 See `docs/CAPABILITY_MANIFEST.md` for the full schema and per-class semantics.
 
