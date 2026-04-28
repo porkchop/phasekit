@@ -72,6 +72,31 @@ Workflow:
 4. validate and package project skills as deliverables
 5. document downstream installation and usage
 
+## Pattern 8 - Concept-to-spec ideation
+Use *before* Pattern 1, when you have a fuzzy idea and need to land on a SPEC, an architecture, and a phase plan good enough to start building. Pattern 1 assumes the SPEC already exists; this pattern gets you there.
+
+The scaffold deliberately doesn't build its own ideation tool — conversation with Claude *is* the powerful core. The optimization is structuring the conversation and combining it with the right external tools.
+
+Workflow:
+1. **Set up a structured Claude session.** Open a [claude.ai Project](https://claude.ai) and pin your scaffold's templates as project knowledge: `templates/spec.template.md`, `templates/architecture.template.md`, `templates/design.template.md` (optional), and the four scaffold-canonical docs (`QUALITY_GATES.md`, `USAGE_PATTERNS.md`, `EXECUTION_MODES.md`, `REASONING_PROFILES.md`). Every conversation in that project starts with the templates in context.
+2. **Walk the spec sections in order.** Prompt Claude with: "I want to build X. Walk me through `docs/SPEC.md` section by section — ask one question at a time and update the spec as we go." If you have the [agent-skills plugin](https://github.com/addyosmani/agent-skills) installed (see "Companion plugins" below), invoke its `idea-refine` and `spec-driven-development` skills here — they walk a deterministic question order with anti-rationalization tables that catch scope creep early.
+3. **Mock the UI if it matters.** For UI-heavy products, generate top 2–3 screens using:
+   - **[v0](https://v0.dev)** for fast React mockups (lower fidelity, fastest iteration)
+   - **Figma + Figma AI / Galileo AI / Builder.io's Figma plugin** for high-fidelity designs
+   - **Whimsical AI / Excalidraw / Eraser.io** for sketch-style flow diagrams
+   Drop screenshots or links into `docs/SPEC.md` rather than committing the design tool itself. Skip this step entirely for CLIs, libraries, or services without a UI.
+4. **Architecture pass.** Once SPEC is converging, ask `strategy-planner` (in scaffold mode, not the project mode) to compare 2–4 plausible architectures and recommend one. Output: a draft `docs/ARCHITECTURE.md` with the chosen layering, technology choices, and the rejected options.
+5. **(Optional) Design pass.** If the project's complexity warrants — multiple subsystems, scaling concerns, async/sync decisions worth being explicit about — opt into the M10 design artifact via the `with-design` profile. `strategy-planner` produces the initial `docs/DESIGN.md`; `architecture-red-team` reviews it. See "When to use docs/DESIGN.md" above.
+6. **Phase plan.** Ask `strategy-planner` to break the SPEC into phases such that each phase ends in a verifiable, deployable, reviewable increment. Output: `docs/PHASES.md`.
+7. **Adversarial review.** Run `architecture-red-team` against SPEC + ARCHITECTURE (+ DESIGN if present) + PHASES. Address blocking concerns; record non-blocking ones as `Open questions` in DESIGN.md if used, or in a planning memo. The red-team should flag scaling concerns, missing non-goals, weak phase acceptance criteria, and integration risks.
+8. **Initialize the project.** Now run Pattern 1 (`bootstrap-new-project.sh`). The SPEC, ARCHITECTURE, PHASES, and PROD_REQUIREMENTS.md you've drafted slot in directly — the scaffold's templates are *defaults*, not *requirements*. Override the rendered files with what you've already written.
+
+Notes:
+- Steps 1–3 happen outside any specific repo (the project doesn't exist yet). Use claude.ai Projects, an external Figma file, and your favorite scratch notes.
+- Steps 4–7 can also happen pre-bootstrap, in the same claude.ai Project, with the agent personas referenced by name. They produce text you'll paste into the eventual `docs/`. Alternatively, run `bootstrap-new-project.sh` first, then iterate inside the actual repo with the real agents.
+- If the concept genuinely fits in 30 minutes of conversation, skip the formal walk-through entirely. This pattern is for ideas worth at least a half-day of work.
+- For ongoing ideation on an existing project, prefer `decision-memo.md` artifacts under `artifacts/` rather than reopening SPEC. SPEC describes the steady-state product; decision memos describe each material change.
+
 ## When to use docs/DESIGN.md
 
 The optional `docs/DESIGN.md` artifact (M10) documents the steady-state system shape: subsystems, data flows, hot spots, and boundaries. Pair it with `SPEC.md` (what users see) and `ARCHITECTURE.md` (how code is organized).
