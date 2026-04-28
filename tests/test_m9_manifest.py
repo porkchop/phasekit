@@ -308,5 +308,85 @@ class ManifestSchema(unittest.TestCase):
             fixture.cleanup()
 
 
+class AtomicCopyAndOrphanSweep(unittest.TestCase):
+    """F10 #5 — interruption between file copies leaves no `*.scaffold-tmp`
+    after a clean re-run, and the manifest reflects the post-rerun state.
+
+    We simulate interruption by monkey-patching `os.replace` to raise after
+    a few successful copies; then we run again normally and assert recovery.
+    """
+
+    def test_partial_copy_recovers_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "project"
+            target.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=target, check=True)
+
+            module = _load_module()
+            real_replace = module.os.replace
+
+            calls = {"n": 0}
+
+            def boom_after_three(src, dst):
+                calls["n"] += 1
+                if calls["n"] > 3:
+                    raise OSError("simulated interruption")
+                return real_replace(src, dst)
+
+            # Run enrich with the broken os.replace; should fail mid-way.
+            module.os.replace = boom_after_three
+            try:
+                with self.assertRaises(OSError):
+                    args = type("Args", (), {
+                        "target_dir": str(target),
+                        "profile": "default",
+                        "force": False,
+                        "dry_run": False,
+                        "no_lock": True,  # avoid lock interactions in test
+                    })()
+                    module.cmd_enrich(args)
+            finally:
+                module.os.replace = real_replace
+
+            # At least one orphan .scaffold-tmp must exist (the one that was
+            # being replaced when we exploded).
+            tmps_before = list(target.rglob("*" + module.TMP_SUFFIX))
+            self.assertGreater(len(tmps_before), 0, "expected at least one orphan tmp")
+
+            # Re-run from a fresh subprocess; should sweep the orphans, complete,
+            # and leave the project in a consistent state with a manifest.
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), str(target), "--no-lock"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0,
+                             f"recovery rerun failed:\n{result.stderr}")
+            tmps_after = list(target.rglob("*" + module.TMP_SUFFIX))
+            self.assertEqual(tmps_after, [],
+                             f"orphan tmp files remain after recovery: {tmps_after}")
+            self.assertTrue((target / ".scaffold" / "manifest.json").exists(),
+                            "manifest must exist after successful recovery rerun")
+            # Sweep message must have been printed during recovery
+            self.assertIn("Swept orphan", result.stderr,
+                          f"expected sweep log in stderr:\n{result.stderr}")
+
+
+class ScaffoldInternalDenyFromManifest(unittest.TestCase):
+    """The deny-list for scaffold-internal files now derives from the
+    capability manifest (M9 retired the SCAFFOLD_INTERNAL_FILES constant)."""
+
+    def test_assert_blocks_classified_scaffold_internal(self):
+        module = _load_module()
+        # LICENSE is classified scaffold-internal in the manifest's files: map
+        with self.assertRaises(RuntimeError) as ctx:
+            module.assert_not_scaffold_internal("LICENSE")
+        self.assertIn("scaffold-internal", str(ctx.exception))
+
+    def test_assert_allows_scaffold_class(self):
+        module = _load_module()
+        # docs/QUALITY_GATES.md is `scaffold`, not internal — should pass.
+        module.assert_not_scaffold_internal("docs/QUALITY_GATES.md")  # no raise
+
+
 if __name__ == "__main__":
     unittest.main()

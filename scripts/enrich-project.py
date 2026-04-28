@@ -51,25 +51,34 @@ except ImportError:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = REPO_ROOT / "capabilities" / "project-capabilities.yaml"
 
-# Files that describe THIS scaffold repo and must never be installed into a
-# downstream project. Any code path attempting to copy one of these will fail.
-# Phase M9 will move this list into capabilities/project-capabilities.yaml as
-# part of the formal ownership-class taxonomy. Until then, this set is the
-# authoritative explicit deny-list.
-SCAFFOLD_INTERNAL_FILES = frozenset({
-    "LICENSE",
-    "CONTRIBUTING.md",
-    "README.md",
-    "AGENTS.md",
-})
+# Suffix used for atomic per-file write: copy goes to <dest>.scaffold-tmp,
+# then os.replace promotes it. Orphan .scaffold-tmp files are swept at
+# engine startup (M9 §5, F8).
+TMP_SUFFIX = ".scaffold-tmp"
+
+
+def get_scaffold_internal_paths():
+    """Return the set of paths classified as `scaffold-internal` in the manifest.
+
+    Replaces the M9-pre SCAFFOLD_INTERNAL_FILES constant. The manifest is
+    now the single source of truth.
+    """
+    manifest = load_manifest()
+    classified = collect_classified_paths(manifest)
+    return frozenset(p for p, (cls, _) in classified.items() if cls == "scaffold-internal")
 
 
 def assert_not_scaffold_internal(rel_path):
-    """Refuse to install scaffold-internal files into downstream projects."""
-    if str(rel_path) in SCAFFOLD_INTERNAL_FILES:
+    """Refuse to install scaffold-internal files into downstream projects.
+
+    M9: deny-list is derived from `capabilities/project-capabilities.yaml`.
+    """
+    internal = get_scaffold_internal_paths()
+    if str(rel_path) in internal:
         raise RuntimeError(
             f"Refusing to install scaffold-internal file '{rel_path}' into a "
-            "downstream project. This file describes the scaffold repo itself."
+            "downstream project. This file is classified `scaffold-internal` "
+            "in capabilities/project-capabilities.yaml."
         )
 
 
@@ -115,6 +124,43 @@ def resolve_profile(profiles, profile_name, _seen=None):
     return result
 
 
+def atomic_copy(src, dest):
+    """Atomic per-file copy: write to <dest>.scaffold-tmp, then os.replace.
+
+    SIGKILL/disk-full mid-write leaves only the tmp file (which the next
+    engine startup sweeps via `sweep_orphan_tmpfiles`). Never leaves a
+    partial `dest`. We deliberately do NOT clean up tmp on Python
+    exceptions either — orphan sweep is the single recovery path, so
+    a transient error and a hard kill recover identically.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.parent / (dest.name + TMP_SUFFIX)
+    shutil.copy2(src, tmp)
+    os.replace(tmp, dest)
+
+
+def sweep_orphan_tmpfiles(target_dir):
+    """Walk target_dir, log and remove any orphan `*.scaffold-tmp` files.
+
+    Called at the start of mutating commands (M9 §5, F8). A SIGKILL during
+    a previous run may have left these behind.
+    """
+    target_dir = Path(target_dir)
+    if not target_dir.exists():
+        return 0
+    swept = 0
+    for path in target_dir.rglob("*" + TMP_SUFFIX):
+        # Skip the manifest's own tmp; it's owned by the lock holder
+        # (which, if absent, means the previous run died — same recovery).
+        try:
+            path.unlink()
+            print(f"  Swept orphan tmp file: {path}", file=sys.stderr)
+            swept += 1
+        except FileNotFoundError:
+            pass
+    return swept
+
+
 def copy_file(src, dest, force=False, dry_run=False):
     """Copy a file, creating parent dirs as needed. Returns True if copied."""
     try:
@@ -128,8 +174,7 @@ def copy_file(src, dest, force=False, dry_run=False):
     if dry_run:
         print(f"  Would copy: {src} -> {dest}")
         return True
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dest)
+    atomic_copy(src, dest)
     print(f"  Copied: {dest}")
     return True
 
@@ -153,7 +198,9 @@ def render_claude_md(target_dir, project_name, force=False, dry_run=False):
     template_text = template_path.read_text()
     rendered = re.sub(r"\{\{PROJECT_NAME\}\}", project_name, template_text)
     rendered = re.sub(r"\{\{OPTIONAL_REFERENCES\}\}", "", rendered)
-    dest.write_text(rendered)
+    tmp = dest.parent / (dest.name + TMP_SUFFIX)
+    tmp.write_text(rendered)
+    os.replace(tmp, dest)
     print(f"  Rendered: {dest}")
     return True
 
@@ -808,6 +855,8 @@ def cmd_reconcile(target_dir, profile=None, no_lock=False, force=False):
         print(f"Error: target directory does not exist: {target}", file=sys.stderr)
         return 1
 
+    sweep_orphan_tmpfiles(target)
+
     existing = load_downstream_manifest(target)
     if existing is not None and not force:
         print(
@@ -936,6 +985,8 @@ def cmd_enrich(args):
     if not target.is_dir():
         print(f"Error: target directory does not exist: {target}", file=sys.stderr)
         sys.exit(1)
+
+    sweep_orphan_tmpfiles(target)
 
     manifest = load_manifest()
     profiles = manifest.get("profiles", {})
