@@ -137,6 +137,8 @@ These are deferred to later sub-phases:
 
 **Manifest is committed but `git status` shows it changed after every enrich** — Expected. The `enriched_at` and per-file `installed_at` timestamps update on every run. If this churn is undesirable in your workflow, `--check` is the read-only alternative.
 
+**`--upgrade` interrupted partway (disk full, SIGTERM, etc.)** — Files that were successfully copied are scaffold-canonical on disk; the manifest, written last, may still record pre-upgrade shas for them. A subsequent `--check` will report drift on those files even though they match the scaffold. Recovery: re-run `--upgrade --yes` (or with the same per-file flags). The second pass sees clean files and is a no-op for them; any tmp files from the interrupt are swept by the orphan sweep at engine startup.
+
 ## See also
 
 - `docs/CAPABILITY_MANIFEST.md` — manifest schema and ownership taxonomy

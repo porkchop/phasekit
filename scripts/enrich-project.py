@@ -257,40 +257,86 @@ def copy_file(src, dest, force=False, dry_run=False, target_root=None):
     return True
 
 
-def render_claude_md(target_dir, project_name, force=False, dry_run=False):
-    """Generate .claude/CLAUDE.md from template if it doesn't exist."""
-    template_path = REPO_ROOT / "templates" / "CLAUDE.template.md"
-    dest = target_dir / ".claude" / "CLAUDE.md"
+def render_template_text(template_path, project_name):
+    """Render a scaffold template's text by substituting placeholders.
+
+    Currently supports `{{PROJECT_NAME}}` and `{{OPTIONAL_REFERENCES}}`.
+    Idempotent (substitutions on a fully-rendered file are no-ops).
+    """
+    text = Path(template_path).read_text()
+    text = re.sub(r"\{\{PROJECT_NAME\}\}", project_name, text)
+    text = re.sub(r"\{\{OPTIONAL_REFERENCES\}\}", "", text)
+    return text
+
+
+def install_from_spec(spec, target, project_name, force=False, dry_run=False):
+    """Install one file (rendered or direct-copy) per its install spec.
+
+    Spec keys:
+      path           — destination path relative to `target`
+      rendered_from  — optional template path (relative to scaffold REPO_ROOT)
+      ownership      — informational; not used for routing here
+      text           — informational; not used for routing here
+
+    Returns True if a file was installed (or would be under --dry-run);
+    False if skipped (existed and not force).
+    """
+    rel_path = spec["path"]
+    rendered_from = spec.get("rendered_from")
+    dest = Path(target) / rel_path
+
+    src = REPO_ROOT / (rendered_from or rel_path)
+    if not src.exists():
+        print(f"  Warning: scaffold source missing: {src}", file=sys.stderr)
+        return False
 
     if dest.exists() and not force:
         print(f"  Skip (exists): {dest}")
         return False
-    if not template_path.exists():
-        print(f"  Warning: template not found at {template_path}", file=sys.stderr)
-        return False
     if dry_run:
-        print(f"  Would render: {dest}")
+        print(f"  Would install: {dest}")
         return True
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    template_text = template_path.read_text()
-    rendered = re.sub(r"\{\{PROJECT_NAME\}\}", project_name, template_text)
-    rendered = re.sub(r"\{\{OPTIONAL_REFERENCES\}\}", "", rendered)
-    tmp = dest.parent / (dest.name + TMP_SUFFIX)
-    tmp.write_text(rendered)
-    # Pre-promote safety: scan the rendered output for secret-shaped strings,
-    # and refuse if a parent symlink escapes the target.
-    findings = scan_for_secrets(tmp)
-    if findings:
-        tmp.unlink()
-        labels = ", ".join(f"{label} ({snippet!r})" for label, snippet in findings)
-        raise RuntimeError(
-            f"Refusing to render {dest.name}: secret-shaped strings in output: {labels}"
-        )
-    assert_no_symlink_escape(target_dir, dest)
-    os.replace(tmp, dest)
-    print(f"  Rendered: {dest}")
+    if rendered_from:
+        rendered = render_template_text(src, project_name)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.parent / (dest.name + TMP_SUFFIX)
+        tmp.write_text(rendered)
+        findings = scan_for_secrets(tmp)
+        if findings:
+            tmp.unlink()
+            labels = ", ".join(f"{label} ({snippet!r})" for label, snippet in findings)
+            raise RuntimeError(
+                f"Refusing to render {dest.name}: secret-shaped strings in output: {labels}"
+            )
+        assert_no_symlink_escape(Path(target), dest)
+        os.replace(tmp, dest)
+        print(f"  Rendered: {dest}")
+    else:
+        # Direct copy goes through the scaffold-internal deny-list and the
+        # secrets scan + symlink check.
+        try:
+            rel_src = src.relative_to(REPO_ROOT)
+            assert_not_scaffold_internal(rel_src)
+        except ValueError:
+            pass
+        safe_install(src, dest, Path(target))
+        print(f"  Copied: {dest}")
     return True
+
+
+# Retained as a thin wrapper for any callers that haven't migrated to
+# install_from_spec yet. Subsumed by install_from_spec and slated for
+# removal once external callers (if any) update.
+def render_claude_md(target_dir, project_name, force=False, dry_run=False):
+    """Generate .claude/CLAUDE.md from template. Subsumed by install_from_spec."""
+    spec = {
+        "path": ".claude/CLAUDE.md",
+        "rendered_from": "templates/CLAUDE.template.md",
+        "ownership": "bootstrap-with-template-tracking",
+        "text": True,
+    }
+    return install_from_spec(spec, target_dir, project_name, force=force, dry_run=dry_run)
 
 
 # ============================================================================
@@ -702,16 +748,19 @@ def compute_upgrade_plan(
                 state = "missing"
                 action = ACTION_INSTALL
             elif current_sha == manifest_sha:
-                # local == manifest (clean)
-                if scaffold_new_sha is not None and scaffold_new_sha != manifest_sha:
-                    # update available
-                    if ownership == "scaffold":
-                        state = "update-available"
-                        action = ACTION_TAKE_NEW
-                    else:
-                        # bootstrap-* never auto-update
-                        state = "update-available-advisory"
-                        action = ACTION_NOOP
+                # local == manifest. For `scaffold` class, also compare
+                # scaffold-new sha to surface an "update available". For
+                # bootstrap-* classes, content-tracking is the manifest sha
+                # only; template-source drift surfaces via
+                # `--check --include-templates`, not via the upgrade plan
+                # (M9 review F5 fix).
+                if (
+                    ownership == "scaffold"
+                    and scaffold_new_sha is not None
+                    and scaffold_new_sha != manifest_sha
+                ):
+                    state = "update-available"
+                    action = ACTION_TAKE_NEW
                 else:
                     state = "clean"
                     action = ACTION_NOOP
@@ -831,12 +880,8 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
         elif action == ACTION_TAKE_NEW or action == ACTION_INSTALL:
             spec = {"path": path, "ownership": p["ownership"], "text": p["text"],
                     "rendered_from": p["rendered_from"]}
-            src = _scaffold_source_for_spec(spec)
-            if not src.exists():
-                print(f"  ERROR: scaffold source missing: {src}", file=sys.stderr)
-                return 1
             try:
-                safe_install(src, dest, target)
+                install_from_spec(spec, target, target.name, force=True)
             except RuntimeError as e:
                 print(f"  REFUSE: {e}", file=sys.stderr)
                 return 1
@@ -867,9 +912,8 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
             os.replace(dest, new_dest)
             spec = {"path": path, "ownership": p["ownership"], "text": p["text"],
                     "rendered_from": p["rendered_from"]}
-            src = _scaffold_source_for_spec(spec)
             try:
-                safe_install(src, dest, target)
+                install_from_spec(spec, target, target.name, force=True)
             except RuntimeError as e:
                 print(f"  REFUSE: {e}", file=sys.stderr)
                 return 1
@@ -1454,6 +1498,17 @@ def enumerate_install_targets(scaffold_manifest, resolved_profile):
         "rendered_from": "templates/CLAUDE.template.md",
     })
 
+    # Downstream AGENTS.md (rendered from templates/AGENTS.template.md).
+    # Same scaffold-vs-downstream class asymmetry as CLAUDE.md — the
+    # scaffold's own AGENTS.md is scaffold-internal; downstream's is a
+    # rendered, project-owned bootstrap-with-template-tracking file.
+    specs.append({
+        "path": "AGENTS.md",
+        "ownership": "bootstrap-with-template-tracking",
+        "text": True,
+        "rendered_from": "templates/AGENTS.template.md",
+    })
+
     # Always-installed flat files
     for path in ALWAYS_INSTALLED_FILE_PATHS:
         f_entry = files_section.get(path, {})
@@ -1640,7 +1695,13 @@ def cmd_check(target_dir, strict=False, include_templates=False):
 
 
 def cmd_enrich(args):
-    """Enrich a downstream project from a manifest profile (existing behavior)."""
+    """Enrich a downstream project from a manifest profile.
+
+    Single source of truth: `enumerate_install_targets(manifest, resolved)`.
+    Each spec is rendered (if `rendered_from`) or copied; secrets/symlink
+    safety is enforced; `.scaffold/manifest.json` is written with shas
+    matching everything that landed.
+    """
     target = Path(args.target_dir).resolve()
     if not target.is_dir():
         print(f"Error: target directory does not exist: {target}", file=sys.stderr)
@@ -1653,146 +1714,26 @@ def cmd_enrich(args):
     resolved = resolve_profile(profiles, args.profile)
 
     project_name = target.name
+    install_specs = enumerate_install_targets(manifest, resolved)
+
+    print(f"\nInstalling {len(install_specs)} target(s) from profile '{args.profile}':")
     copied = 0
     skipped = 0
-
-    # Agents
-    agents = manifest.get("agents", {})
-    if resolved["include_agents"]:
-        print(f"\nAgents ({len(resolved['include_agents'])}):")
-        for key in resolved["include_agents"]:
-            if key not in agents:
-                print(f"  Warning: agent '{key}' not found in manifest", file=sys.stderr)
-                continue
-            src = REPO_ROOT / agents[key]["source"]
-            dest = target / agents[key]["source"]
-            if copy_file(src, dest, force=args.force, dry_run=args.dry_run, target_root=target):
-                copied += 1
-            else:
-                skipped += 1
-
-    # Docs (copy templates, not the scaffold's own docs)
-    docs = manifest.get("docs", {})
-    template_map = {
-        "SPEC": "spec.template.md",
-        "ARCHITECTURE": "architecture.template.md",
-        "PROD_REQUIREMENTS": "prod-requirements.template.md",
-    }
-    # Scaffold-internal docs that should not be copied downstream
-    scaffold_only_docs = {"META_SPEC", "META_PHASES", "CAPABILITY_MANIFEST"}
-    downstream_docs = [k for k in resolved["include_docs"] if k not in scaffold_only_docs]
-    if downstream_docs:
-        print(f"\nDocs ({len(downstream_docs)}):")
-        for key in downstream_docs:
-            if key not in docs:
-                print(f"  Warning: doc '{key}' not found in manifest", file=sys.stderr)
-                continue
-            doc_path = docs[key]["path"]
-            dest = target / doc_path
-
-            # Use template if available, otherwise copy the scaffold doc
-            if key in template_map:
-                template_src = REPO_ROOT / "templates" / template_map[key]
-                if template_src.exists():
-                    if copy_file(template_src, dest, force=args.force, dry_run=args.dry_run, target_root=target):
-                        copied += 1
-                    else:
-                        skipped += 1
-                    continue
-
-            # For docs without templates (PHASES, QUALITY_GATES, USAGE_PATTERNS),
-            # copy from scaffold directly
-            src = REPO_ROOT / doc_path
-            if src.exists():
-                if copy_file(src, dest, force=args.force, dry_run=args.dry_run, target_root=target):
-                    copied += 1
-                else:
-                    skipped += 1
-
-    # Hooks
-    hooks = manifest.get("hooks", {})
-    if resolved["include_hooks"]:
-        print(f"\nHooks ({len(resolved['include_hooks'])}):")
-        for key in resolved["include_hooks"]:
-            if key not in hooks:
-                print(f"  Warning: hook '{key}' not found in manifest", file=sys.stderr)
-                continue
-            src = REPO_ROOT / hooks[key]["path"]
-            dest = target / hooks[key]["path"]
-            if copy_file(src, dest, force=args.force, dry_run=args.dry_run, target_root=target):
-                copied += 1
-            else:
-                skipped += 1
-
-    # Project-shared settings.json — declares conservative permissions and
-    # wires up the deny-dangerous-commands hook. Without this, the hook
-    # script is copied but never actually runs.
-    print("\nProject settings:")
-    src = REPO_ROOT / ".claude" / "settings.json"
-    dest = target / ".claude" / "settings.json"
-    if src.exists():
-        if copy_file(src, dest, force=args.force, dry_run=args.dry_run, target_root=target):
+    for spec in install_specs:
+        try:
+            installed = install_from_spec(
+                spec, target, project_name,
+                force=args.force, dry_run=args.dry_run,
+            )
+        except RuntimeError as e:
+            print(f"  REFUSE: {e}", file=sys.stderr)
+            sys.exit(1)
+        if installed:
             copied += 1
         else:
             skipped += 1
 
-    # Scripts (only workflow scripts, not scaffold-internal ones)
-    scripts = manifest.get("scripts", {})
-    workflow_scripts = ["run-phase", "run-until-done"]
-    included_scripts = [s for s in resolved.get("include_scripts", []) if s in workflow_scripts]
-    if included_scripts:
-        print(f"\nScripts ({len(included_scripts)}):")
-        for key in included_scripts:
-            if key not in scripts:
-                print(f"  Warning: script '{key}' not found in manifest", file=sys.stderr)
-                continue
-            src = REPO_ROOT / scripts[key]["path"]
-            dest = target / scripts[key]["path"]
-            if copy_file(src, dest, force=args.force, dry_run=args.dry_run, target_root=target):
-                copied += 1
-            else:
-                skipped += 1
-
-    # .claude/CLAUDE.md
-    print("\nClaude startup file:")
-    if render_claude_md(target, project_name, force=args.force, dry_run=args.dry_run):
-        copied += 1
-    else:
-        skipped += 1
-
-    # Workflow root files required by run-until-done.sh
-    print("\nWorkflow root files:")
-    for filename in ["CONTINUE_PROMPT.txt"]:
-        src = REPO_ROOT / filename
-        dest = target / filename
-        if src.exists():
-            if copy_file(src, dest, force=args.force, dry_run=args.dry_run, target_root=target):
-                copied += 1
-            else:
-                skipped += 1
-
-    # Container files for autonomous unattended execution (opt-in to use,
-    # but included by default since CONTAINERIZATION.md is also included
-    # and users without Docker simply do not run them).
-    print("\nContainer files:")
-    container_files = [
-        "scripts/container-setup.sh",
-        "scripts/verify-container.sh",
-        ".devcontainer/devcontainer.json",
-        ".devcontainer/Dockerfile",
-        ".devcontainer/entrypoint.sh",
-        ".devcontainer/init-firewall.sh",
-    ]
-    for filename in container_files:
-        src = REPO_ROOT / filename
-        dest = target / filename
-        if src.exists():
-            if copy_file(src, dest, force=args.force, dry_run=args.dry_run, target_root=target):
-                copied += 1
-            else:
-                skipped += 1
-
-    # Artifacts and ADR directories
+    # Empty workflow directories (per existing convention).
     for d in ["artifacts", "docs/adr"]:
         dir_path = target / d
         if not dir_path.exists():
@@ -1802,17 +1743,15 @@ def cmd_enrich(args):
                 dir_path.mkdir(parents=True, exist_ok=True)
                 print(f"  Created dir: {dir_path}")
 
-    # Provenance manifest (M9). Writes `.scaffold/manifest.json` with a sha
-    # for every file just installed, so subsequent `--check` / `--upgrade`
-    # can detect drift. Skipped under --dry-run.
+    # Provenance manifest (M9). Records sha for every file that ended up on
+    # disk under one of our install specs.
     if not args.dry_run:
-        targets = enumerate_install_targets(manifest, resolved)
-        on_disk = [s for s in targets if (target / s["path"]).exists()]
+        on_disk = [s for s in install_specs if (target / s["path"]).exists()]
         with target_lock(target, no_lock=getattr(args, "no_lock", False)):
             mpath = write_downstream_manifest(target, manifest, args.profile, on_disk)
         print(f"\nManifest: {mpath}  ({len(on_disk)} entries)")
 
-    print(f"\nDone. {copied} file(s) copied, {skipped} skipped (already exist).")
+    print(f"\nDone. {copied} installed, {skipped} skipped (already exist).")
     if args.dry_run:
         print("(dry-run mode — no files were actually written)")
 
