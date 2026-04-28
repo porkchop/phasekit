@@ -345,6 +345,11 @@ files:
   templates/CLAUDE.template.md:
     ownership: scaffold-template
 
+  templates/AGENTS.template.md:
+    ownership: scaffold-template
+    # Materialized in M9 Slice B; rendered into downstream AGENTS.md as
+    # `bootstrap-with-template-tracking`.
+
   templates/adr.template.md:
     ownership: scaffold-template
 
@@ -353,6 +358,13 @@ files:
 
   templates/prod-requirements.template.md:
     ownership: scaffold-template
+
+  templates/settings.template.json:
+    ownership: scaffold-template
+    text: false
+    # Materialized in M9 Slice B. Source of truth for downstream
+    # `.claude/settings.json`; the scaffold's own `.claude/settings.json`
+    # must stay in sync (enforced by future M9.x lint).
 
   templates/skill/SKILL.template.md:
     ownership: scaffold-template
