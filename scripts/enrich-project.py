@@ -21,6 +21,8 @@ If --profile is omitted, uses 'default'.
 """
 
 import argparse
+import contextlib
+import errno
 import fnmatch
 import hashlib
 import json
@@ -29,7 +31,16 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import fcntl
+    _HAS_FLOCK = True
+except ImportError:
+    # fcntl is POSIX-only; on Windows we'll warn-and-proceed under --no-lock
+    fcntl = None
+    _HAS_FLOCK = False
 
 try:
     import yaml
@@ -390,6 +401,362 @@ def load_downstream_manifest(target_dir):
         return json.load(f)
 
 
+# === Manifest writer (M9 §3, F8) ===========================================
+
+# Latest schema version this engine writes. Older manifests are migrated
+# in-memory before any operation; the on-disk manifest is rewritten only by
+# mutating commands. Linear-chain migrations live in scripts/migrations/.
+SCHEMA_VERSION_CURRENT = 1
+
+
+def utc_now_iso():
+    """ISO-8601 UTC timestamp with second precision and a trailing Z."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def get_scaffold_version():
+    """Compute scaffold version (semver-with-git or fallback) and short commit.
+
+    Returns (version_string, commit_string).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short=7", "HEAD"],
+            cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+        )
+        commit = result.stdout.strip()
+        return f"0.0.0+git.{commit}", commit
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "0.0.0+git.unknown", "unknown"
+
+
+def compute_file_shas(file_path, is_text):
+    """Compute (normalized, strict) sha256 pair for a file.
+
+    For binary files (`is_text=False`), normalized == strict.
+    """
+    strict = sha256_strict(file_path)
+    normalized = sha256_normalized(file_path) if is_text else strict
+    return normalized, strict
+
+
+@contextlib.contextmanager
+def target_lock(target_dir, no_lock=False):
+    """Per-target advisory lock via fcntl.flock on .scaffold/manifest.json.lock.
+
+    On filesystems without flock support, or when `no_lock=True`, warn and proceed.
+    Lock is released automatically on context exit (process exit also releases).
+    """
+    target_dir = Path(target_dir).resolve()
+    if no_lock or not _HAS_FLOCK:
+        if no_lock:
+            print("  Warning: --no-lock requested; concurrent runs may corrupt manifest", file=sys.stderr)
+        else:
+            print("  Warning: flock unavailable on this platform; concurrent runs may corrupt manifest", file=sys.stderr)
+        yield
+        return
+
+    lock_dir = target_dir / ".scaffold"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "manifest.json.lock"
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                print(
+                    f"Error: another enrich-project.py process is operating on {target_dir}",
+                    file=sys.stderr,
+                )
+                print("  (use --no-lock if you have your own mutex)", file=sys.stderr)
+                sys.exit(2)
+            raise
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def lookup_template_info(scaffold_manifest, downstream_path):
+    """For `bootstrap-with-template-tracking`, look up rendered_from + template_sha.
+
+    Returns (rendered_from, template_sha) or (None, None).
+    """
+    files_section = scaffold_manifest.get("files", {}) or {}
+    entry = files_section.get(downstream_path)
+    if not entry:
+        return None, None
+    rendered_from = entry.get("rendered_from")
+    if not rendered_from:
+        return None, None
+    template_path = REPO_ROOT / rendered_from
+    if not template_path.exists():
+        return rendered_from, None
+    return rendered_from, sha256_strict(template_path)
+
+
+def build_manifest_entry(downstream_path, ownership, target_dir,
+                          scaffold_manifest, is_text=True, rendered_from_override=None):
+    """Build one entry for the downstream `.scaffold/manifest.json`."""
+    file_path = Path(target_dir) / downstream_path
+    if not file_path.exists():
+        return None  # Caller decides how to surface missing files
+
+    sha_norm, sha_strict_val = compute_file_shas(file_path, is_text)
+
+    entry = {
+        "path": downstream_path,
+        "ownership": ownership,
+        "text": is_text,
+        "sha256": sha_norm,
+        "sha256_strict": sha_strict_val,
+        "overlays": [],
+        "installed_at": utc_now_iso(),
+    }
+
+    if ownership == "bootstrap-with-template-tracking":
+        rendered_from, template_sha = lookup_template_info(
+            scaffold_manifest, downstream_path
+        )
+        if rendered_from_override:
+            rendered_from = rendered_from_override
+            tmpl = REPO_ROOT / rendered_from_override
+            template_sha = sha256_strict(tmpl) if tmpl.exists() else None
+        if rendered_from:
+            entry["rendered_from"] = rendered_from
+        if template_sha:
+            entry["template_sha"] = template_sha
+
+    return entry
+
+
+def write_downstream_manifest(target_dir, scaffold_manifest, profile, file_specs):
+    """Write `.scaffold/manifest.json` atomically via tmp + os.replace.
+
+    file_specs: list of dicts with keys {path, ownership, text, rendered_from?}.
+    Returns the manifest path on success.
+    """
+    target = Path(target_dir).resolve()
+    scaffold_dir = target / ".scaffold"
+    scaffold_dir.mkdir(parents=True, exist_ok=True)
+
+    version, commit = get_scaffold_version()
+
+    entries = []
+    for spec in file_specs:
+        entry = build_manifest_entry(
+            spec["path"],
+            spec["ownership"],
+            target,
+            scaffold_manifest,
+            is_text=spec.get("text", True),
+            rendered_from_override=spec.get("rendered_from"),
+        )
+        if entry is not None:
+            entries.append(entry)
+
+    manifest = {
+        "schema_version": SCHEMA_VERSION_CURRENT,
+        "scaffold_version": version,
+        "scaffold_commit": commit,
+        "profile": profile,
+        "enriched_at": utc_now_iso(),
+        "normalization": {
+            "recipe": NORMALIZATION_RECIPE,
+            "version": NORMALIZATION_VERSION,
+        },
+        "files": entries,
+    }
+
+    manifest_path = scaffold_dir / "manifest.json"
+    tmp_path = scaffold_dir / "manifest.json.scaffold-tmp"
+    tmp_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    os.replace(tmp_path, manifest_path)
+    return manifest_path
+
+
+# === Install-target enumeration ============================================
+# What the scaffold installs into a downstream project for a given profile.
+# Used by both `cmd_enrich` (after copies) and `cmd_reconcile` (read-only).
+
+# Docs whose downstream output is rendered from a template rather than copied
+# from the scaffold's own doc. Keep this in sync with cmd_enrich's template_map.
+DOC_TEMPLATE_MAP = {
+    "SPEC": "templates/spec.template.md",
+    "ARCHITECTURE": "templates/architecture.template.md",
+    "PROD_REQUIREMENTS": "templates/prod-requirements.template.md",
+}
+
+# Docs that exist in the scaffold but never install downstream (matches
+# the existing cmd_enrich filter).
+SCAFFOLD_ONLY_DOCS = {"META_SPEC", "META_PHASES", "CAPABILITY_MANIFEST"}
+
+# Scripts in the manifest's `scripts:` section that are workflow-relevant
+# downstream (not all scaffold scripts; matches cmd_enrich's filter).
+WORKFLOW_SCRIPTS = ("run-phase", "run-until-done")
+
+# Always-installed files that aren't enumerated by the typed sections of the
+# scaffold manifest (scaffold root + container files).
+ALWAYS_INSTALLED_FILE_PATHS = (
+    "CONTINUE_PROMPT.txt",
+    "scripts/container-setup.sh",
+    "scripts/verify-container.sh",
+    ".devcontainer/devcontainer.json",
+    ".devcontainer/Dockerfile",
+    ".devcontainer/entrypoint.sh",
+    ".devcontainer/init-firewall.sh",
+)
+
+
+def enumerate_install_targets(scaffold_manifest, resolved_profile):
+    """Return list of {path, ownership, text, rendered_from?} specs the scaffold
+    installs for this profile. Caller filters to paths actually on disk.
+
+    Mirrors cmd_enrich's copy logic so the manifest reflects what was installed.
+    """
+    specs = []
+    files_section = scaffold_manifest.get("files", {}) or {}
+
+    # Agents
+    agents = scaffold_manifest.get("agents", {})
+    for key in resolved_profile.get("include_agents", []):
+        entry = agents.get(key)
+        if entry:
+            specs.append({
+                "path": entry["source"],
+                "ownership": entry.get("ownership", "scaffold"),
+                "text": True,
+            })
+
+    # Docs (filter scaffold-only; map template-rendered docs)
+    docs = scaffold_manifest.get("docs", {})
+    for key in resolved_profile.get("include_docs", []):
+        if key in SCAFFOLD_ONLY_DOCS:
+            continue
+        entry = docs.get(key)
+        if not entry:
+            continue
+        spec = {
+            "path": entry["path"],
+            "ownership": entry.get("ownership", "scaffold"),
+            "text": True,
+        }
+        rendered_from = DOC_TEMPLATE_MAP.get(key)
+        if rendered_from:
+            spec["rendered_from"] = rendered_from
+        specs.append(spec)
+
+    # Hooks
+    hooks = scaffold_manifest.get("hooks", {})
+    for key in resolved_profile.get("include_hooks", []):
+        entry = hooks.get(key)
+        if entry:
+            specs.append({
+                "path": entry["path"],
+                "ownership": entry.get("ownership", "scaffold"),
+                "text": True,
+            })
+
+    # Workflow scripts (subset of scripts section)
+    scripts = scaffold_manifest.get("scripts", {})
+    included_scripts = set(resolved_profile.get("include_scripts", []))
+    for key in WORKFLOW_SCRIPTS:
+        if key in included_scripts:
+            entry = scripts.get(key)
+            if entry:
+                specs.append({
+                    "path": entry["path"],
+                    "ownership": entry.get("ownership", "scaffold"),
+                    "text": True,
+                })
+
+    # .claude/settings.json (always installed; class from manifest)
+    settings_entry = files_section.get(".claude/settings.json", {})
+    specs.append({
+        "path": ".claude/settings.json",
+        "ownership": settings_entry.get("ownership", "bootstrap-with-template-tracking"),
+        "text": True,
+        "rendered_from": settings_entry.get("rendered_from"),
+    })
+
+    # .claude/CLAUDE.md (rendered from template; downstream class is
+    # bootstrap-with-template-tracking even though the scaffold's own copy
+    # is scaffold-internal — see CAPABILITY_MANIFEST.md "Notes" on classes
+    # describing downstream behavior).
+    specs.append({
+        "path": ".claude/CLAUDE.md",
+        "ownership": "bootstrap-with-template-tracking",
+        "text": True,
+        "rendered_from": "templates/CLAUDE.template.md",
+    })
+
+    # Always-installed flat files
+    for path in ALWAYS_INSTALLED_FILE_PATHS:
+        f_entry = files_section.get(path, {})
+        specs.append({
+            "path": path,
+            "ownership": f_entry.get("ownership", "scaffold"),
+            "text": f_entry.get("text", True),
+        })
+
+    return specs
+
+
+# === --reconcile (M9 §5) ===================================================
+
+def cmd_reconcile(target_dir, profile=None, no_lock=False, force=False):
+    """Build a `.scaffold/manifest.json` for a project enriched before M9.
+
+    Walks the scaffold's profile-resolved install targets, hashes whatever is
+    on disk in `target_dir`, and writes a retroactive manifest. If a manifest
+    already exists and force=False, refuses (use --force to overwrite).
+
+    Returns 0 on success, 1 on error.
+    """
+    target = Path(target_dir).resolve()
+    if not target.is_dir():
+        print(f"Error: target directory does not exist: {target}", file=sys.stderr)
+        return 1
+
+    existing = load_downstream_manifest(target)
+    if existing is not None and not force:
+        print(
+            f"A .scaffold/manifest.json already exists in {target}.\n"
+            "  Use --force to overwrite (rare; usually you want --check or --upgrade).",
+            file=sys.stderr,
+        )
+        return 1
+
+    scaffold_manifest = load_manifest()
+    profiles = scaffold_manifest.get("profiles", {})
+
+    # Pick a profile: explicit > existing manifest's > "default"
+    if profile is None:
+        if existing is not None and existing.get("profile"):
+            profile = existing["profile"]
+        else:
+            profile = "default"
+
+    resolved = resolve_profile(profiles, profile)
+    targets = enumerate_install_targets(scaffold_manifest, resolved)
+    on_disk = [s for s in targets if (target / s["path"]).exists()]
+    missing = [s["path"] for s in targets if not (target / s["path"]).exists()]
+
+    print(f"--reconcile: {len(on_disk)} files found on disk, {len(missing)} missing")
+    for path in missing:
+        print(f"  MISSING: {path}")
+
+    with target_lock(target, no_lock=no_lock):
+        manifest_path = write_downstream_manifest(
+            target, scaffold_manifest, profile, on_disk
+        )
+    print(f"Manifest written: {manifest_path}")
+    return 0
+
+
 def cmd_check(target_dir, strict=False):
     """Compare on-disk files against the downstream manifest's recorded shas.
 
@@ -629,6 +996,16 @@ def cmd_enrich(args):
                 dir_path.mkdir(parents=True, exist_ok=True)
                 print(f"  Created dir: {dir_path}")
 
+    # Provenance manifest (M9). Writes `.scaffold/manifest.json` with a sha
+    # for every file just installed, so subsequent `--check` / `--upgrade`
+    # can detect drift. Skipped under --dry-run.
+    if not args.dry_run:
+        targets = enumerate_install_targets(manifest, resolved)
+        on_disk = [s for s in targets if (target / s["path"]).exists()]
+        with target_lock(target, no_lock=getattr(args, "no_lock", False)):
+            mpath = write_downstream_manifest(target, manifest, args.profile, on_disk)
+        print(f"\nManifest: {mpath}  ({len(on_disk)} entries)")
+
     print(f"\nDone. {copied} file(s) copied, {skipped} skipped (already exist).")
     if args.dry_run:
         print("(dry-run mode — no files were actually written)")
@@ -636,16 +1013,20 @@ def cmd_enrich(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Enrich a downstream project from scaffold manifest, or audit scaffold ownership.")
-    parser.add_argument("target_dir", nargs="?", help="Path to the downstream project directory (required for enrich and --check)")
-    parser.add_argument("--profile", default="default", help="Manifest profile to use (default: 'default')")
-    parser.add_argument("--force", action="store_true", help="Overwrite existing files")
+    parser.add_argument("target_dir", nargs="?", help="Path to the downstream project directory (required for enrich, --check, --reconcile)")
+    parser.add_argument("--profile", default=None, help="Manifest profile to use (default: 'default'; for --reconcile, defaults to existing manifest's profile)")
+    parser.add_argument("--force", action="store_true", help="Overwrite existing files (enrich) or existing manifest (--reconcile)")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be copied without doing it")
     parser.add_argument("--self-check", dest="self_check", action="store_true",
                         help="Audit scaffold-side ownership taxonomy (M9 §8); ignores target_dir")
     parser.add_argument("--check", action="store_true",
                         help="Compare downstream project against its .scaffold/manifest.json")
+    parser.add_argument("--reconcile", action="store_true",
+                        help="Build a retroactive .scaffold/manifest.json for a project enriched before M9")
     parser.add_argument("--strict", action="store_true",
                         help="Use byte-exact hashing instead of normalized (skips bootstrap-frozen)")
+    parser.add_argument("--no-lock", dest="no_lock", action="store_true",
+                        help="Skip per-target fcntl.flock (for CI with its own mutexes)")
     args = parser.parse_args()
 
     if args.self_check:
@@ -656,8 +1037,21 @@ def main():
             parser.error("--check requires target_dir")
         sys.exit(cmd_check(args.target_dir, strict=args.strict))
 
+    if args.reconcile:
+        if not args.target_dir:
+            parser.error("--reconcile requires target_dir")
+        sys.exit(cmd_reconcile(
+            args.target_dir,
+            profile=args.profile,
+            no_lock=args.no_lock,
+            force=args.force,
+        ))
+
+    # Default: enrich
     if not args.target_dir:
         parser.error("target_dir is required for enrichment (or use --self-check)")
+    if args.profile is None:
+        args.profile = "default"
     cmd_enrich(args)
 
 
