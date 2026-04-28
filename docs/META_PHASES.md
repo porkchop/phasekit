@@ -568,18 +568,63 @@ Touches the engine's atomic-write semantics. Code-reviewer pass; updated `INSTAL
 
 ---
 
+## Meta Phase M10 — Design artifact
+
+### Goal
+Add an opt-in `docs/DESIGN.md` artifact that documents the current system shape (subsystems, data flows, hot spots, boundaries) between formal decision memos. The aim is to catch scaling and integration concerns at design time rather than in QA or production, *without* forcing heavy design ceremony on small projects.
+
+### Background
+The scaffold ships four planning docs: `SPEC.md` (what users see), `ARCHITECTURE.md` (how code is organized), `PHASES.md` (when things land), `PROD_REQUIREMENTS.md` (what production needs). The gap: which subsystems exist, what data flows where, and where bottlenecks are expected. Without that artifact, scaling concerns surface as afterthoughts (N+1 queries in QA, synchronous coupling discovered under load, schema choices that make later features hard).
+
+A heavy design phase would contradict the scaffold's audit-first ethos. The right shape is *one page, opt-in, complementary to existing artifacts.* `strategy-planner` and `architecture-red-team` already do design work via decision memos; M10 gives them a stable artifact to capture the steady-state shape between memos.
+
+### Deliverables
+- `templates/design.template.md` — one-page template with four sections, fitting on one screen:
+  - **System sketch** — one ASCII or Mermaid diagram of subsystems and dependencies
+  - **Data flows** — for the top 2–3 user actions, what touches what in what order (3–7 lines each)
+  - **Hot spots** — where bottlenecks are expected (hot writes, large reads, external-call serializations)
+  - **Boundaries** — async-vs-sync decisions, transaction boundaries, deploy-unit ownership
+- `DESIGN` entry in `capabilities/project-capabilities.yaml` `docs:` section, classified `bootstrap-frozen`, NOT in `default` profile's `include_docs` (opt-in only)
+- New `with-design` profile in `capabilities/project-capabilities.yaml` that `extends: default` and adds `DESIGN` to `include_docs`; alternatively a `--with-design` flag on `enrich-project.py` for ad-hoc opt-in
+- One-line reference to `docs/DESIGN.md` in `templates/CLAUDE.template.md` and `templates/AGENTS.template.md`, conditional on the file existing locally
+- New "When to use DESIGN.md" section in `docs/USAGE_PATTERNS.md` (one paragraph, with explicit "skip this for projects under N hours of work" guidance)
+- `strategy-planner` agent description updated to include "produces or updates `docs/DESIGN.md` when one exists"
+- `architecture-red-team` agent description updated to include "reviews the steady-state design in `docs/DESIGN.md` alongside decision memos"
+
+### Acceptance criteria
+- Fresh enrichment with `default` profile produces a project WITHOUT `docs/DESIGN.md` (no behavior change for existing users; M10 is purely additive).
+- Fresh enrichment with `with-design` profile (or `--with-design`) produces a project WITH `docs/DESIGN.md` rendered from the template.
+- The rendered template is under 60 lines and fits on one screen at 80-column width.
+- An existing project can opt in by editing its `.scaffold/manifest.json` profile to `with-design` and running `--upgrade`; the new file installs and shows up in the manifest with `bootstrap-frozen` ownership.
+- `docs/USAGE_PATTERNS.md` has a one-paragraph "When to use DESIGN.md" section that explicitly discourages design ceremony for trivial projects.
+- `--self-check` passes after the manifest changes.
+- 28 (or more) M9 tests still green.
+
+### Required reviews
+Light. Adding a template + profile + manifest entries; no engine changes; no install/upgrade contract changes. Code review only; planning gate does NOT apply (M10 is purely additive).
+
+### Out of scope
+- Replacing or reorganizing existing planning docs (`SPEC`, `ARCHITECTURE`, `PHASES`, `PROD_REQUIREMENTS`). M10 is additive.
+- Making DESIGN.md required by default. The whole value is *opt-in* — small projects don't carry the weight.
+- Mechanical enforcement that `DESIGN.md` stays consistent with implementation. Future M10.x if needed.
+- A separate "scaling-design" doc. Scaling concerns belong in DESIGN.md's "Hot spots" section; splitting dilutes value.
+- A new agent for design review. `architecture-red-team` already does this; it just needs an artifact to review.
+
+---
+
 ## Sub-phase priority (informal)
 
-Real-world evidence and value-per-effort suggest this order:
+Real-world evidence and value-per-effort suggest this order. M10 slots above the polish/cosmetic M9.x sub-phases per user direction (raises quality ceiling without forcing ceremony).
 
-1. **M9.4 — Subagent overlays** — meewar2 evidence shows 5 stranded agents; --keep-local is a real stop-gap that's actively biting users
+1. **M9.4 — Subagent overlays** — meewar2 evidence shows 5 stranded agents; `--keep-local` is a real stop-gap that's actively biting users
 2. **M9.3 — Plugin distribution** — broadens reach significantly with low effort; additive (no breaking changes)
 3. **M9.6 — Multi-profile additive installs** — also surfaced by meewar2; medium effort; unlocks richer projects
-4. **M9.2 — Scaffold versioning + changelog** — essential for predictable upgrade UX once external consumers exist
-5. **M9.7 — Settings template sync lint** — small, removes a hand-maintained invariant
-6. **M9.8 — Partial-failure manifest write polish** — small, improves UX after a failure
-7. **M9.1 — Namespaced scaffold docs path** — cosmetic; nice-to-have
-8. **M9.5 — Manifest signing** — only matters in regulated/hostile environments
+4. **M10 — Design artifact** — raises the ceiling on project quality at design time; opt-in keeps small projects unencumbered; one-page artifact pairs naturally with existing strategy-planner and architecture-red-team agents
+5. **M9.2 — Scaffold versioning + changelog** — essential for predictable upgrade UX once external consumers exist
+6. **M9.7 — Settings template sync lint** — small, removes a hand-maintained invariant
+7. **M9.8 — Partial-failure manifest write polish** — small, improves UX after a failure
+8. **M9.1 — Namespaced scaffold docs path** — cosmetic; nice-to-have
+9. **M9.5 — Manifest signing** — only matters in regulated/hostile environments
 
 This is informal; the project lead picks the actual next phase based on user pull and current bandwidth.
 
