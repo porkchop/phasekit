@@ -614,12 +614,12 @@ Light. Adding a template + profile + manifest entries; no engine changes; no ins
 
 ## Sub-phase priority (informal)
 
-Real-world evidence and value-per-effort suggest this order. M10 slots above the polish/cosmetic M9.x sub-phases per user direction (raises quality ceiling without forcing ceremony).
+M10 leads. Rationale: M10 raises quality for *every* project enriched by the scaffold (not just those that hit the meewar2-shaped pain points the M9.x sub-phases address). It's also small (additive, opt-in, no engine changes) and unblocks better intake from `strategy-planner` and `architecture-red-team` immediately. Catching scaling concerns at design time has more leverage than fixing any individual lifecycle gap. The M9.x sub-phases follow in evidence-driven order.
 
-1. **M9.4 — Subagent overlays** — meewar2 evidence shows 5 stranded agents; `--keep-local` is a real stop-gap that's actively biting users
-2. **M9.3 — Plugin distribution** — broadens reach significantly with low effort; additive (no breaking changes)
-3. **M9.6 — Multi-profile additive installs** — also surfaced by meewar2; medium effort; unlocks richer projects
-4. **M10 — Design artifact** — raises the ceiling on project quality at design time; opt-in keeps small projects unencumbered; one-page artifact pairs naturally with existing strategy-planner and architecture-red-team agents
+1. **M10 — Design artifact** — raises the ceiling on project quality at design time; opt-in keeps small projects unencumbered; one-page artifact pairs naturally with existing strategy-planner and architecture-red-team agents
+2. **M9.4 — Subagent overlays** — meewar2 evidence shows 5 stranded agents; `--keep-local` is a real stop-gap that's actively biting users
+3. **M9.3 — Plugin distribution** — broadens reach significantly with low effort; additive (no breaking changes)
+4. **M9.6 — Multi-profile additive installs** — also surfaced by meewar2; medium effort; unlocks richer projects
 5. **M9.2 — Scaffold versioning + changelog** — essential for predictable upgrade UX once external consumers exist
 6. **M9.7 — Settings template sync lint** — small, removes a hand-maintained invariant
 7. **M9.8 — Partial-failure manifest write polish** — small, improves UX after a failure
