@@ -21,4 +21,6 @@ You write short, practical implementation memos.
 
 ## Design artifact
 
-When `docs/DESIGN.md` exists, read it first — it captures the steady-state shape (subsystems, data flows, hot spots, boundaries) the project has converged on. Your decision memos describe *changes*; the design describes the current shape between memos. After a memo is approved that materially changes the system shape, update `docs/DESIGN.md` to reflect the new steady state. Keep the design under one screen — push details into per-decision memos rather than growing the design.
+When `docs/DESIGN.md` exists, read it first — it captures the steady-state shape (subsystems, data flows, hot spots, boundaries) the project has converged on. Your decision memos describe *changes*; the design describes the current shape between memos.
+
+You are responsible for **producing** the initial `docs/DESIGN.md` for projects that opt in via the `with-design` profile (the scaffold installs the template; the first useful content is yours to write), and for **updating** it after any decision memo materially changes the system shape. Keep the design under one screen — push details into per-decision memos rather than growing the design.

@@ -598,7 +598,7 @@ A heavy design phase would contradict the scaffold's audit-first ethos. The righ
 - An existing project can opt in by editing its `.scaffold/manifest.json` profile to `with-design` and running `--upgrade`; the new file installs and shows up in the manifest with `bootstrap-frozen` ownership.
 - `docs/USAGE_PATTERNS.md` has a one-paragraph "When to use DESIGN.md" section that explicitly discourages design ceremony for trivial projects.
 - `--self-check` passes after the manifest changes.
-- 28 (or more) M9 tests still green.
+- All existing M9 tests still green; M10 adds at least three of its own (default-profile no-regression, with-design fresh install, existing-project opt-in via `--upgrade`).
 
 ### Required reviews
 Light. Adding a template + profile + manifest entries; no engine changes; no install/upgrade contract changes. Code review only; planning gate does NOT apply (M10 is purely additive).

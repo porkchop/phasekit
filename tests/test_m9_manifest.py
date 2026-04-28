@@ -907,10 +907,18 @@ class M10DesignArtifact(unittest.TestCase):
             # Project name substituted
             self.assertIn(target.name, design_path.read_text(),
                           "project name should be substituted in rendered DESIGN.md")
-            # Under 60 lines (one-screen)
-            line_count = len(design_path.read_text().splitlines())
+            # Under 60 lines (one-screen proxy)
+            text = design_path.read_text()
+            line_count = len(text.splitlines())
             self.assertLess(line_count, 60,
                             f"DESIGN.md should fit on one screen; got {line_count} lines")
+            # Width sanity: no plain-prose line exceeds 100 cols (box-drawing
+            # characters in the system-sketch diagram are allowed up to that).
+            for n, line in enumerate(text.splitlines(), start=1):
+                self.assertLessEqual(
+                    len(line), 100,
+                    f"DESIGN.md line {n} is {len(line)} cols; exceeds 100",
+                )
             # Manifest reflects bootstrap-frozen ownership
             with open(target / ".scaffold" / "manifest.json") as f:
                 manifest = json.load(f)
@@ -919,6 +927,59 @@ class M10DesignArtifact(unittest.TestCase):
             self.assertIsNotNone(entry, "manifest must list docs/DESIGN.md")
             self.assertEqual(entry["ownership"], "bootstrap-frozen",
                              "DESIGN.md should be bootstrap-frozen")
+
+    def test_existing_project_can_opt_in_via_upgrade(self):
+        """The acceptance criterion the M10 spec explicitly demands:
+        a project enriched with `default` can adopt `docs/DESIGN.md` by
+        editing its manifest's profile to `with-design` and running --upgrade."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "project"
+            target.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=target, check=True)
+
+            # Step 1: enrich with default profile; assert no DESIGN.md
+            r = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), str(target)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertFalse((target / "docs" / "DESIGN.md").exists())
+
+            # Step 2: edit the on-disk manifest's profile to with-design
+            manifest_path = target / ".scaffold" / "manifest.json"
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+            self.assertEqual(manifest["profile"], "default")
+            manifest["profile"] = "with-design"
+            with open(manifest_path, "w") as f:
+                json.dump(manifest, f, indent=2)
+
+            # Step 3: run --upgrade --yes; expect DESIGN.md to be installed
+            r = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH),
+                 "--upgrade", "--yes", str(target)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 0,
+                             f"--upgrade after profile switch failed:\n{r.stderr}")
+
+            # Step 4: assert DESIGN.md exists, manifest entry is bootstrap-frozen
+            self.assertTrue((target / "docs" / "DESIGN.md").exists(),
+                            "DESIGN.md must be installed after profile switch + upgrade")
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+            entry = next((e for e in manifest["files"] if e["path"] == "docs/DESIGN.md"),
+                         None)
+            self.assertIsNotNone(entry, "manifest must list docs/DESIGN.md after upgrade")
+            self.assertEqual(entry["ownership"], "bootstrap-frozen")
+
+            # Step 5: --check is clean
+            r = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "--check", str(target)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(r.returncode, 0,
+                             f"--check should be clean after opt-in upgrade:\n{r.stdout}")
 
 
 if __name__ == "__main__":

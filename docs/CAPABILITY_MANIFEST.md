@@ -11,7 +11,7 @@ Every file enumerated by the manifest carries one of these classes:
 | Class | Where it lives | Behavior on downstream upgrade |
 |---|---|---|
 | `scaffold` | scaffold repo + downstream | re-enrichment overwrites after acknowledged drift; default upgrade target |
-| `bootstrap-frozen` | downstream only, write-once | never re-rendered, never re-checked under `--check --strict` |
+| `bootstrap-frozen` | downstream only, write-once | never re-rendered, never re-checked under `--check --strict`. Examples: `docs/SPEC.md`, `docs/ARCHITECTURE.md`, `docs/PHASES.md`, `docs/PROD_REQUIREMENTS.md`, and (when the `with-design` profile is selected) `docs/DESIGN.md`. |
 | `bootstrap-with-template-tracking` | downstream only, write-once | never auto-overwritten; the manifest stores a `template_sha`; an advisory drift surfaces when the source template changes |
 | `scaffold-template` | scaffold only (`templates/`) | rendered into downstream files; never copied verbatim |
 | `scaffold-internal` | scaffold only | never installable; `--self-check` enforces |
@@ -76,6 +76,15 @@ profiles:
 
 - `extends` merges the parent profile's includes before applying the current profile's includes.
 - Each `include_*` list references keys defined in the corresponding top-level section.
+
+Built-in profiles:
+
+| Profile | Extends | Adds |
+|---|---|---|
+| `default` | (none) | the standard agent set, hooks, and the core docs minus DESIGN |
+| `game-project` | `default` | `engine-builder`, `frontend-builder`, `backend-builder`, `release-hardening` |
+| `saas-project` | `default` | `frontend-builder`, `backend-builder`, `release-hardening` |
+| `with-design` | `default` | the optional `DESIGN` doc (M10). Opt-in only. Combine with another profile by setting `extends: with-design` on a custom profile, or run `--upgrade` after editing the manifest's `profile` field. |
 
 ### `agents`
 
