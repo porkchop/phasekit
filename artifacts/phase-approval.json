@@ -1,20 +1,64 @@
 {
-  "phase": "meta-M8",
+  "phase": "meta-M9",
   "approved": true,
-  "summary": "M8 (Generalization and compatibility): Added docs/COMPATIBILITY.md (versioning policy, upgrade guidance, compatibility promise) and docs/EXTENSION_PATTERNS.md (how to add custom profiles/agents/hooks/skills/docs, profile selection matrix, adoption checklist). Updated docs/CAPABILITY_MANIFEST.md with versioning policy section. Registered both new docs as scaffold-internal in the manifest. No code, script, or schema changes.",
-  "changes": [
-    "Created docs/COMPATIBILITY.md with versioning policy, upgrade guidance, and breaking-change protocol",
-    "Created docs/EXTENSION_PATTERNS.md with extension how-tos, profile selection matrix, and adoption checklist",
-    "Added 'Versioning policy' section to docs/CAPABILITY_MANIFEST.md with cross-reference to COMPATIBILITY.md",
-    "Added cross-reference to EXTENSION_PATTERNS.md in CAPABILITY_MANIFEST.md 'Extending the manifest' section",
-    "Registered COMPATIBILITY and EXTENSION_PATTERNS as scaffold-internal docs in capabilities/project-capabilities.yaml"
-  ],
+  "summary": "Install lifecycle and provenance landed across Slices A (taxonomy + --self-check), B (manifest writer + --reconcile + fcntl.flock + migrations + INSTALL_LIFECYCLE.md), and C (per-file atomic copy, --upgrade, --uninstall, --check --include-templates, pre-install secrets scan, symlink refusal, --interactive, ADR). All 11 F10 acceptance criteria from the planning gate have falsifiable acceptance tests; 27 M9 tests green. Gate sign-offs: strategy-planner (decision-memo.md v2.1), architecture-red-team (review v1 + v2; v2 GREEN-LIGHT WITH CONDITIONS, all conditions shipped), code-reviewer (review-m9.md GREEN-LIGHT WITH CONDITIONS; 3 BLOCKERs and 4 MAJORs addressed in commits b9cbeb7 and 7055218).",
   "decision_memo": "artifacts/decision-memo.md",
+  "suggested_commit_message": "meta-M9: approve install lifecycle and provenance",
   "reviewer_notes": [
-    "Strategy-planner: Option B selected (two new docs + one update, no new code)",
-    "Code-reviewer: approved all deliverables, no blocking issues",
-    "Architecture-red-team: two blocking issues raised and fixed (false preserve_existing_files claim corrected; docs removed from default profile to avoid downstream confusion)",
-    "Red-team non-blocking: softened breaking-change protocol phrasing, clarified CLI profile guidance, removed --dry-run hedge"
+    "Strategy-planner: decision-memo.md v2.1 — 5-class ownership taxonomy, integer schema_version with linear-chain migrations, plan-then-confirm upgrade, allowlist semantics, atomic-copy with orphan sweep, fcntl.flock per target",
+    "Architecture-red-team v1: 4 BLOCKERs (F1/F2/F3/F7) + 7 MAJORs surfaced; reject-and-replan with narrowly-scoped fix",
+    "Architecture-red-team v2: GREEN-LIGHT WITH CONDITIONS (NI-1, NI-2, Q2, NI-3); all four conditions shipped in v2.1 closeout commit",
+    "Code-reviewer (review-m9.md): GREEN-LIGHT WITH CONDITIONS — 3 BLOCKERs (scaffold-orphan undeclared; cmd_enrich DRY duplication; templates not actually used) and 4 MAJORs",
+    "Code-reviewer BLOCKERs all shipped in commits b9cbeb7 and 7055218",
+    "Code-reviewer MAJORs F4 and F5 addressed during the F2 consolidation",
+    "Code-reviewer MAJOR F6 (positive-path tests for --adopt/--rename-local/--accept-removal) shipped",
+    "Code-reviewer MAJOR F7 (partial-failure manifest staleness) documented in INSTALL_LIFECYCLE.md; engine recovers correctly on rerun"
   ],
-  "suggested_commit_message": "meta-M8: generalization and compatibility docs"
+  "deferred_items": [
+    {
+      "tag": "M9.1 — namespaced docs/scaffold/ path",
+      "description": "Move scaffold-canonical docs under a namespaced directory for additional human-readable separation."
+    },
+    {
+      "tag": "M9.2 — semver + changelog with --upgrade --to vX.Y.Z",
+      "description": "Versioned scaffold releases and pinned-version upgrade target."
+    },
+    {
+      "tag": "M9.3 — Claude Code plugin distribution",
+      "description": ".claude-plugin/marketplace.json as an alternative to clone-and-run."
+    },
+    {
+      "tag": "M9.4 — subagent overlay mechanism",
+      "description": "overlays: [] reserved per file entry; *.project.md reserved as ignored convention. M9.4 fills in concat semantics so customizations survive scaffold upgrades."
+    },
+    {
+      "tag": "M9.5 — manifest signing / tamper detection",
+      "description": "Optional HMAC over manifest body."
+    },
+    {
+      "tag": "M9.6 — multi-profile additive installs",
+      "description": "A project enriched with profile A wants to add profile B's agents without re-enriching everything."
+    },
+    {
+      "tag": "Sync lint between .claude/settings.json and templates/settings.template.json",
+      "description": "These two files must stay byte-identical until a future Slice removes the scaffold-side duplicate. Currently a documented invariant; not yet mechanically enforced."
+    },
+    {
+      "tag": "F7 polish — partial-failure manifest write",
+      "description": "Engine could write a partial manifest reflecting succeeded copies before returning on a mid-run failure. Currently documented; recovery via re-run."
+    }
+  ],
+  "verification": {
+    "self_check_passes_on_master": true,
+    "tracked_files_classified": 80,
+    "test_count": 27,
+    "test_status": "all green",
+    "acceptance_criteria_met": "all 11 of F10",
+    "review_artifacts": [
+      "artifacts/decision-memo.md",
+      "artifacts/red-team-review.md",
+      "artifacts/red-team-review-v2.md",
+      "artifacts/code-review-m9.md"
+    ]
+  }
 }
