@@ -503,6 +503,354 @@ def migrate_manifest(manifest):
     return manifest
 
 
+# === --upgrade (M9 §6) =====================================================
+# Three-way reconciliation: manifest sha (recorded) vs. scaffold-new sha
+# (current canonical) vs. on-disk sha. Plan-then-confirm; never silent
+# overwrite. F10 acceptance #4 and #6.
+
+# Per-file action codes used in the plan output.
+ACTION_NOOP = "no-op"            # clean and no scaffold update
+ACTION_TAKE_NEW = "take-new"     # copy scaffold-new -> dest; update manifest sha
+ACTION_KEEP_LOCAL = "keep-local" # leave on-disk; update manifest sha to current
+ACTION_INSTALL = "install"       # not on disk yet; copy scaffold-new
+ACTION_ORPHAN = "orphan"         # scaffold-new doesn't have it; leave + flag
+ACTION_DELETE = "delete"         # explicit --accept-removal
+ACTION_ADOPT = "adopt"           # collision-novel: record current sha as canonical
+ACTION_RENAME_LOCAL = "rename-local"  # collision-novel: move out of the way
+ACTION_REFUSE = "refuse"         # ambiguous: needs an explicit per-file flag
+
+
+def _scaffold_source_for_spec(spec):
+    """Return the scaffold-side path that supplies content for this install spec.
+
+    For rendered files (`rendered_from` in spec), the source is the template.
+    Otherwise it's the same path inside the scaffold repo.
+    """
+    rendered_from = spec.get("rendered_from")
+    if rendered_from:
+        return REPO_ROOT / rendered_from
+    return REPO_ROOT / spec["path"]
+
+
+def compute_upgrade_plan(
+    target_dir, scaffold_manifest, existing_manifest, resolved_profile,
+    keep_local=(), take_new=(), adopt=(), rename_local=(), accept_removal=(),
+):
+    """Compute the per-file upgrade plan.
+
+    Returns a list of plan entries (dicts), each with keys:
+      path, state, action, ownership, text, rendered_from?,
+      manifest_sha, current_sha, scaffold_new_sha, note?
+    """
+    target = Path(target_dir).resolve()
+    keep_local = set(keep_local)
+    take_new = set(take_new)
+    adopt = set(adopt)
+    rename_local_map = dict(p.split("=", 1) for p in rename_local if "=" in p)
+    accept_removal = set(accept_removal)
+
+    existing_by_path = {f["path"]: f for f in existing_manifest.get("files", [])}
+    new_specs = enumerate_install_targets(scaffold_manifest, resolved_profile)
+    new_by_path = {s["path"]: s for s in new_specs}
+
+    plans = []
+
+    # Files declared by scaffold-new (with or without existing manifest entries).
+    for path, spec in new_by_path.items():
+        on_disk = target / path
+        is_text = spec.get("text", True)
+        ownership = spec["ownership"]
+        rendered_from = spec.get("rendered_from")
+
+        if on_disk.exists():
+            cur_norm, cur_strict = compute_file_shas(on_disk, is_text)
+            current_sha = cur_norm if is_text else cur_strict
+        else:
+            current_sha = None
+
+        # Compute scaffold-new sha (what the engine would install today).
+        src = _scaffold_source_for_spec(spec)
+        if src.exists():
+            new_norm, new_strict = compute_file_shas(src, is_text)
+            scaffold_new_sha = new_norm if is_text else new_strict
+        else:
+            scaffold_new_sha = None
+
+        existing = existing_by_path.get(path)
+        manifest_sha = existing.get("sha256") if existing else None
+
+        # State + default action
+        if existing is None:
+            if current_sha is not None:
+                # collision-novel: scaffold-new declares a path the project already has
+                state = "collision-novel"
+                if path in adopt:
+                    action = ACTION_ADOPT
+                elif path in rename_local_map:
+                    action = ACTION_RENAME_LOCAL
+                else:
+                    action = ACTION_REFUSE
+            else:
+                state = "new-install"
+                action = ACTION_INSTALL
+        else:
+            # Tracked
+            if current_sha is None:
+                state = "missing"
+                action = ACTION_INSTALL
+            elif current_sha == manifest_sha:
+                # local == manifest (clean)
+                if scaffold_new_sha is not None and scaffold_new_sha != manifest_sha:
+                    # update available
+                    if ownership == "scaffold":
+                        state = "update-available"
+                        action = ACTION_TAKE_NEW
+                    else:
+                        # bootstrap-* never auto-update
+                        state = "update-available-advisory"
+                        action = ACTION_NOOP
+                else:
+                    state = "clean"
+                    action = ACTION_NOOP
+            else:
+                # drifted: current != manifest
+                state = "drifted"
+                if path in keep_local:
+                    action = ACTION_KEEP_LOCAL
+                elif path in take_new:
+                    action = ACTION_TAKE_NEW
+                else:
+                    # bootstrap-* default keep-local; scaffold default refuse
+                    if ownership in ("bootstrap-frozen", "bootstrap-with-template-tracking"):
+                        action = ACTION_KEEP_LOCAL
+                    else:
+                        action = ACTION_REFUSE
+
+        plans.append({
+            "path": path,
+            "state": state,
+            "action": action,
+            "ownership": ownership,
+            "text": is_text,
+            "rendered_from": rendered_from,
+            "manifest_sha": manifest_sha,
+            "current_sha": current_sha,
+            "scaffold_new_sha": scaffold_new_sha,
+            "rename_target": rename_local_map.get(path),
+        })
+
+    # Removed: in existing manifest but not in scaffold-new install set.
+    for path, existing_entry in existing_by_path.items():
+        if path in new_by_path:
+            continue
+        on_disk = target / path
+        if on_disk.exists():
+            if path in accept_removal:
+                action = ACTION_DELETE
+            else:
+                action = ACTION_ORPHAN
+            plans.append({
+                "path": path,
+                "state": "removed",
+                "action": action,
+                "ownership": existing_entry.get("ownership", "scaffold"),
+                "text": existing_entry.get("text", True),
+                "rendered_from": existing_entry.get("rendered_from"),
+                "manifest_sha": existing_entry.get("sha256"),
+                "current_sha": None,
+                "scaffold_new_sha": None,
+            })
+
+    return plans
+
+
+def print_upgrade_plan(plans):
+    """Pretty-print an upgrade plan grouped by action."""
+    by_action = {}
+    for p in plans:
+        by_action.setdefault(p["action"], []).append(p)
+
+    summary = ", ".join(f"{action}: {len(rows)}" for action, rows in sorted(by_action.items()))
+    print(f"--upgrade plan: {summary}")
+    print()
+    for action in (ACTION_TAKE_NEW, ACTION_INSTALL, ACTION_KEEP_LOCAL,
+                   ACTION_ADOPT, ACTION_RENAME_LOCAL, ACTION_DELETE,
+                   ACTION_ORPHAN, ACTION_REFUSE, ACTION_NOOP):
+        rows = by_action.get(action, [])
+        if not rows:
+            continue
+        print(f"  [{action}] ({len(rows)})")
+        for p in rows:
+            note = ""
+            if p["state"] == "drifted":
+                note = "  (local edits differ from manifest)"
+            elif p["state"] == "update-available":
+                note = "  (scaffold has a newer canonical version)"
+            elif p["state"] == "update-available-advisory":
+                note = "  (scaffold updated but bootstrap-* never auto-overwritten)"
+            elif p["state"] == "collision-novel":
+                note = "  (scaffold v2 declares an existing project path)"
+            elif p["state"] == "removed":
+                note = "  (no longer declared by the scaffold)"
+            elif p["state"] == "new-install":
+                note = "  (not yet installed)"
+            elif p["state"] == "missing":
+                note = "  (tracked but file missing)"
+            print(f"    {p['path']}{note}")
+        print()
+
+
+def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
+    """Execute the plan and rewrite the manifest. Returns 0 on success."""
+    target = Path(target_dir).resolve()
+
+    # Refuse if any action is REFUSE — caller should have caught this.
+    refusals = [p for p in plans if p["action"] == ACTION_REFUSE]
+    if refusals:
+        print("Refusing to apply: ambiguous plan (use --keep-local PATH / --take-new PATH / --adopt PATH / --rename-local PATH=NEWPATH):", file=sys.stderr)
+        for p in refusals:
+            print(f"  {p['path']}  ({p['state']})", file=sys.stderr)
+        return 3
+
+    file_specs_for_manifest = []  # what to record in the new manifest
+
+    for p in plans:
+        path = p["path"]
+        action = p["action"]
+        dest = target / path
+
+        if action == ACTION_NOOP:
+            # Tracked clean files stay in the manifest
+            file_specs_for_manifest.append({
+                "path": path, "ownership": p["ownership"],
+                "text": p["text"], "rendered_from": p["rendered_from"],
+            })
+        elif action == ACTION_TAKE_NEW or action == ACTION_INSTALL:
+            spec = {"path": path, "ownership": p["ownership"], "text": p["text"],
+                    "rendered_from": p["rendered_from"]}
+            src = _scaffold_source_for_spec(spec)
+            if not src.exists():
+                print(f"  ERROR: scaffold source missing: {src}", file=sys.stderr)
+                return 1
+            atomic_copy(src, dest)
+            print(f"  {action}: {path}")
+            file_specs_for_manifest.append(spec)
+        elif action == ACTION_KEEP_LOCAL:
+            # Leave on-disk file as-is. Manifest sha will be updated to current.
+            print(f"  keep-local: {path}")
+            file_specs_for_manifest.append({
+                "path": path, "ownership": p["ownership"],
+                "text": p["text"], "rendered_from": p["rendered_from"],
+            })
+        elif action == ACTION_ADOPT:
+            # collision-novel: trust on-disk content; record under scaffold-new path
+            print(f"  adopt: {path}")
+            file_specs_for_manifest.append({
+                "path": path, "ownership": p["ownership"],
+                "text": p["text"], "rendered_from": p["rendered_from"],
+            })
+        elif action == ACTION_RENAME_LOCAL:
+            # Move on-disk file aside; install scaffold-new on the original path
+            new_path = p["rename_target"]
+            if not new_path:
+                print(f"  ERROR: --rename-local for {path} missing target", file=sys.stderr)
+                return 1
+            new_dest = target / new_path
+            new_dest.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(dest, new_dest)
+            spec = {"path": path, "ownership": p["ownership"], "text": p["text"],
+                    "rendered_from": p["rendered_from"]}
+            src = _scaffold_source_for_spec(spec)
+            atomic_copy(src, dest)
+            print(f"  rename-local: {path} -> {new_path}; installed scaffold-new at {path}")
+            file_specs_for_manifest.append(spec)
+        elif action == ACTION_DELETE:
+            try:
+                dest.unlink()
+                print(f"  delete: {path}")
+            except FileNotFoundError:
+                pass
+            # Do NOT add to file_specs_for_manifest
+        elif action == ACTION_ORPHAN:
+            print(f"  orphan: {path}  (left in place; scaffold no longer declares it)")
+            # Re-record under a downgraded class so subsequent --check stays sane
+            file_specs_for_manifest.append({
+                "path": path, "ownership": "scaffold-orphan",
+                "text": p["text"], "rendered_from": p["rendered_from"],
+            })
+
+    # Rewrite the manifest with the post-apply state.
+    write_downstream_manifest(target, scaffold_manifest, profile,
+                              file_specs_for_manifest)
+    return 0
+
+
+def cmd_upgrade(target_dir, profile=None, dry_run=False, yes=False, no_lock=False,
+                keep_local=(), take_new=(), adopt=(), rename_local=(),
+                accept_removal=()):
+    """Upgrade a downstream project: re-evaluate scaffold-owned files and
+    apply changes after a plan-then-confirm cycle.
+
+    Returns 0 on success, 1 on error, 3 on unresolved refusals.
+    """
+    target = Path(target_dir).resolve()
+    if not target.is_dir():
+        print(f"Error: target does not exist: {target}", file=sys.stderr)
+        return 1
+
+    sweep_orphan_tmpfiles(target)
+
+    existing = load_downstream_manifest(target)
+    if existing is None:
+        print(f"No .scaffold/manifest.json in {target}; run --reconcile first.",
+              file=sys.stderr)
+        return 1
+    try:
+        existing = migrate_manifest(existing)
+    except RuntimeError as e:
+        print(f"--upgrade: {e}", file=sys.stderr)
+        return 1
+
+    if profile is None:
+        profile = existing.get("profile") or "default"
+
+    scaffold_manifest = load_manifest()
+    profiles = scaffold_manifest.get("profiles", {})
+    resolved = resolve_profile(profiles, profile)
+
+    plans = compute_upgrade_plan(
+        target, scaffold_manifest, existing, resolved,
+        keep_local=keep_local, take_new=take_new,
+        adopt=adopt, rename_local=rename_local,
+        accept_removal=accept_removal,
+    )
+
+    print_upgrade_plan(plans)
+
+    refusals = [p for p in plans if p["action"] == ACTION_REFUSE]
+    if refusals:
+        print("\nNot applied: ambiguous (see [refuse] above).", file=sys.stderr)
+        print("Resolve with --keep-local PATH / --take-new PATH / --adopt PATH / --rename-local PATH=NEWPATH",
+              file=sys.stderr)
+        return 3
+
+    if dry_run:
+        print("\n(dry-run; no changes written)")
+        return 0
+
+    if not yes:
+        try:
+            answer = input("Apply this plan? [y/N]: ").strip().lower()
+        except EOFError:
+            answer = "n"
+        if answer not in ("y", "yes"):
+            print("Aborted.", file=sys.stderr)
+            return 1
+
+    with target_lock(target, no_lock=no_lock):
+        return apply_upgrade_plan(target, scaffold_manifest, plans, profile)
+
+
 def cmd_migrate_only(target_dir, no_lock=False):
     """Rewrite the on-disk manifest forward to SCHEMA_VERSION_CURRENT.
 
@@ -1171,10 +1519,24 @@ def main():
                         help="Build a retroactive .scaffold/manifest.json for a project enriched before M9")
     parser.add_argument("--migrate-only", dest="migrate_only", action="store_true",
                         help="Migrate the manifest's schema_version forward without other side effects")
+    parser.add_argument("--upgrade", action="store_true",
+                        help="Plan-then-confirm upgrade of a downstream project against the current scaffold")
     parser.add_argument("--strict", action="store_true",
                         help="Use byte-exact hashing instead of normalized (skips bootstrap-frozen)")
+    parser.add_argument("--yes", action="store_true",
+                        help="Skip confirmation prompt for --upgrade (non-interactive)")
     parser.add_argument("--no-lock", dest="no_lock", action="store_true",
                         help="Skip per-target fcntl.flock (for CI with its own mutexes)")
+    parser.add_argument("--keep-local", dest="keep_local", action="append", default=[],
+                        metavar="PATH", help="Per-file: preserve on-disk version during --upgrade")
+    parser.add_argument("--take-new", dest="take_new", action="append", default=[],
+                        metavar="PATH", help="Per-file: take scaffold-new version during --upgrade")
+    parser.add_argument("--adopt", action="append", default=[],
+                        metavar="PATH", help="Resolve collision-novel: record current as canonical")
+    parser.add_argument("--rename-local", dest="rename_local", action="append", default=[],
+                        metavar="PATH=NEWPATH", help="Resolve collision-novel: move on-disk file aside")
+    parser.add_argument("--accept-removal", dest="accept_removal", action="append", default=[],
+                        metavar="PATH", help="Allow --upgrade to delete a removed scaffold file")
     args = parser.parse_args()
 
     if args.self_check:
@@ -1199,6 +1561,22 @@ def main():
         if not args.target_dir:
             parser.error("--migrate-only requires target_dir")
         sys.exit(cmd_migrate_only(args.target_dir, no_lock=args.no_lock))
+
+    if args.upgrade:
+        if not args.target_dir:
+            parser.error("--upgrade requires target_dir")
+        sys.exit(cmd_upgrade(
+            args.target_dir,
+            profile=args.profile,
+            dry_run=args.dry_run,
+            yes=args.yes,
+            no_lock=args.no_lock,
+            keep_local=args.keep_local,
+            take_new=args.take_new,
+            adopt=args.adopt,
+            rename_local=args.rename_local,
+            accept_removal=args.accept_removal,
+        ))
 
     # Default: enrich
     if not args.target_dir:

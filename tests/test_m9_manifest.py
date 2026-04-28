@@ -371,6 +371,109 @@ class AtomicCopyAndOrphanSweep(unittest.TestCase):
                           f"expected sweep log in stderr:\n{result.stderr}")
 
 
+class UpgradeKeepLocalRoundTrip(unittest.TestCase):
+    """F10 #6 — enrich → modify scaffold-owned file → --upgrade --keep-local
+    preserves the edit, updates only the manifest sha, --check exits 0 thereafter."""
+
+    def test_round_trip_preserves_edits_and_clean_check(self):
+        fixture = _GreenfieldFixture()
+        try:
+            target = fixture.target
+            qg_path = target / "docs" / "QUALITY_GATES.md"
+            original = qg_path.read_text()
+            qg_path.write_text(original + "\nDRIFT MARKER\n")
+
+            # Pre-flight: --check now reports drift (exit 3)
+            check = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "--check", str(target)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(check.returncode, 3)
+            self.assertIn("DRIFT: docs/QUALITY_GATES.md", check.stdout)
+
+            # --upgrade --keep-local succeeds
+            up = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "--upgrade", "--yes",
+                 "--keep-local", "docs/QUALITY_GATES.md", str(target)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(up.returncode, 0,
+                             f"--upgrade --keep-local failed:\n{up.stderr}")
+
+            # File still has the DRIFT MARKER (local edit preserved)
+            self.assertIn("DRIFT MARKER", qg_path.read_text())
+
+            # --check now clean (manifest sha was updated to match local content)
+            check2 = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "--check", str(target)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(check2.returncode, 0,
+                             f"--check after --upgrade --keep-local should be clean:\n{check2.stdout}")
+        finally:
+            fixture.cleanup()
+
+
+class UpgradeCollisionNovelRefuses(unittest.TestCase):
+    """F10 #4 — `--upgrade` on a synthetic project with one drifted scaffold-owned
+    file plus one collision-novel file produces exit 3 and names both paths.
+
+    We synthesize a scaffold_manifest that adds docs/RUNBOOK.md as `scaffold`,
+    while the project already has its own docs/RUNBOOK.md (project-original).
+    """
+
+    def test_collision_novel_refuses_with_path_named(self):
+        fixture = _GreenfieldFixture()
+        try:
+            target = fixture.target
+
+            # Project-side: introduce drift and a collision-novel file
+            (target / "docs" / "QUALITY_GATES.md").write_text(
+                (target / "docs" / "QUALITY_GATES.md").read_text() + "\nDRIFT\n"
+            )
+            (target / "docs" / "RUNBOOK.md").write_text("project-original runbook\n")
+
+            module = _load_module()
+
+            # Synthesize a scaffold_manifest where docs/RUNBOOK.md is now declared
+            scaffold_manifest = module.load_manifest()
+            scaffold_manifest = json.loads(json.dumps(scaffold_manifest))
+            scaffold_manifest["files"]["docs/RUNBOOK.md"] = {"ownership": "scaffold"}
+
+            # Load existing downstream manifest, resolve profile, and plan
+            existing = module.load_downstream_manifest(target)
+            profiles = scaffold_manifest.get("profiles", {})
+            resolved = module.resolve_profile(profiles, "default")
+
+            # Note: enumerate_install_targets only adds paths it knows about
+            # via typed sections + ALWAYS_INSTALLED_FILE_PATHS. Files in the
+            # files: map are not auto-included unless explicitly enumerated.
+            # We patch ALWAYS_INSTALLED_FILE_PATHS to include docs/RUNBOOK.md
+            # for this test, then restore it.
+            original_always = module.ALWAYS_INSTALLED_FILE_PATHS
+            module.ALWAYS_INSTALLED_FILE_PATHS = original_always + ("docs/RUNBOOK.md",)
+            try:
+                plans = module.compute_upgrade_plan(
+                    target, scaffold_manifest, existing, resolved
+                )
+            finally:
+                module.ALWAYS_INSTALLED_FILE_PATHS = original_always
+
+            # Find both refusal cases
+            refusals = [p for p in plans if p["action"] == module.ACTION_REFUSE]
+            paths_in_refusal = {p["path"] for p in refusals}
+            self.assertIn("docs/QUALITY_GATES.md", paths_in_refusal,
+                          f"drift refusal missing; refusals: {paths_in_refusal}")
+            self.assertIn("docs/RUNBOOK.md", paths_in_refusal,
+                          f"collision-novel refusal missing; refusals: {paths_in_refusal}")
+
+            states = {p["path"]: p["state"] for p in plans}
+            self.assertEqual(states["docs/QUALITY_GATES.md"], "drifted")
+            self.assertEqual(states["docs/RUNBOOK.md"], "collision-novel")
+        finally:
+            fixture.cleanup()
+
+
 class ScaffoldInternalDenyFromManifest(unittest.TestCase):
     """The deny-list for scaffold-internal files now derives from the
     capability manifest (M9 retired the SCAFFOLD_INTERNAL_FILES constant)."""
