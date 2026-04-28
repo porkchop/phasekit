@@ -544,6 +544,68 @@ class UninstallIncludeOnceRoundTrip(unittest.TestCase):
             fixture.cleanup()
 
 
+class TemplateSourceAdvisoryDrift(unittest.TestCase):
+    """F10 #11 — modify a scaffold template; --check --include-templates on a
+    downstream project enriched before the change exits with an advisory
+    code, names the affected path, and never auto-overwrites the rendered file.
+
+    To avoid mutating the real scaffold templates we synthesize a manifest
+    with a deliberately-wrong `template_sha` for a bootstrap-with-template-tracking
+    entry, then verify --check --include-templates surfaces the advisory.
+    """
+
+    def test_template_sha_mismatch_surfaces_advisory(self):
+        fixture = _GreenfieldFixture()
+        try:
+            target = fixture.target
+
+            # Read manifest, corrupt the template_sha for .claude/CLAUDE.md
+            manifest_path = target / ".scaffold" / "manifest.json"
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+            tampered = False
+            original_content_before_render = None
+            for entry in manifest["files"]:
+                if entry.get("ownership") == "bootstrap-with-template-tracking" \
+                   and entry.get("rendered_from") == "templates/CLAUDE.template.md":
+                    entry["template_sha"] = "0" * 64  # deliberately wrong
+                    tampered = True
+                    break
+            self.assertTrue(tampered, "manifest should have a CLAUDE template-tracked entry")
+            with open(manifest_path, "w") as f:
+                json.dump(manifest, f, indent=2)
+
+            # Capture the rendered file's content; advisory must NOT auto-overwrite
+            rendered = target / ".claude" / "CLAUDE.md"
+            content_before = rendered.read_text()
+
+            # --check (no --include-templates): should be clean
+            r1 = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "--check", str(target)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(r1.returncode, 0,
+                             f"--check without --include-templates should be clean:\n{r1.stdout}")
+
+            # --check --include-templates: should report advisory and exit 3
+            r2 = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "--check", "--include-templates",
+                 str(target)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(r2.returncode, 3,
+                             f"--check --include-templates should detect template drift:\n{r2.stdout}")
+            self.assertIn(".claude/CLAUDE.md", r2.stdout)
+            self.assertIn("TEMPLATE DRIFT", r2.stdout)
+            self.assertIn("templates/CLAUDE.template.md", r2.stdout)
+
+            # Auto-overwrite must not have happened
+            self.assertEqual(rendered.read_text(), content_before,
+                             "advisory must NOT modify the rendered file")
+        finally:
+            fixture.cleanup()
+
+
 class ScaffoldInternalDenyFromManifest(unittest.TestCase):
     """The deny-list for scaffold-internal files now derives from the
     capability manifest (M9 retired the SCAFFOLD_INTERNAL_FILES constant)."""

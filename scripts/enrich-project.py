@@ -1350,11 +1350,15 @@ def cmd_reconcile(target_dir, profile=None, no_lock=False, force=False):
     return 0
 
 
-def cmd_check(target_dir, strict=False):
+def cmd_check(target_dir, strict=False, include_templates=False):
     """Compare on-disk files against the downstream manifest's recorded shas.
 
-    Returns 0 if clean, 3 if drift detected, 1 on error.
-    Slice B writes the downstream manifest; this command is harmless before then.
+    With `include_templates=True` (M9 F2), also compare the scaffold's current
+    template sha against each `bootstrap-with-template-tracking` entry's
+    recorded `template_sha`; mismatches are reported as advisory drift
+    (never auto-overwritten — the file was rendered once and is project-owned).
+
+    Returns 0 if clean, 3 if drift or template-source drift detected, 1 on error.
     """
     target = Path(target_dir).resolve()
     if not target.is_dir():
@@ -1378,6 +1382,7 @@ def cmd_check(target_dir, strict=False):
     drift = []
     missing = []
     skipped = []
+    template_drift = []
     clean = 0
 
     for entry in manifest.get("files", []):
@@ -1413,20 +1418,48 @@ def cmd_check(target_dir, strict=False):
         else:
             clean += 1
 
-    label = "--check (--strict)" if strict else "--check"
+        # Template-source drift advisory (M9 F2; --include-templates only)
+        if include_templates and ownership == "bootstrap-with-template-tracking":
+            rendered_from = entry.get("rendered_from")
+            recorded_template_sha = entry.get("template_sha")
+            if rendered_from and recorded_template_sha:
+                template_path = REPO_ROOT / rendered_from
+                if template_path.exists():
+                    current_template_sha = sha256_strict(template_path)
+                    if current_template_sha != recorded_template_sha:
+                        template_drift.append({
+                            "path": entry["path"],
+                            "rendered_from": rendered_from,
+                            "recorded": recorded_template_sha[:12],
+                            "current": current_template_sha[:12],
+                        })
+
+    label = "--check"
+    if strict:
+        label += " --strict"
+    if include_templates:
+        label += " --include-templates"
     print(f"{label}: scaffold {manifest.get('scaffold_version', '?')}")
     print(f"  clean: {clean}")
     print(f"  drifted: {len(drift)}")
     print(f"  missing: {len(missing)}")
     if skipped:
         print(f"  skipped (bootstrap-frozen, --strict): {len(skipped)}")
+    if include_templates:
+        print(f"  template-source drift (advisory): {len(template_drift)}")
 
     for path, ownership in drift:
         print(f"  DRIFT: {path}  ({ownership})")
     for path in missing:
         print(f"  MISSING: {path}")
+    for adv in template_drift:
+        print(
+            f"  TEMPLATE DRIFT (advisory; never auto-overwritten): "
+            f"{adv['path']} ← {adv['rendered_from']} "
+            f"(was {adv['recorded']}, now {adv['current']})"
+        )
 
-    if drift or missing:
+    if drift or missing or template_drift:
         return 3
     return 0
 
@@ -1636,6 +1669,8 @@ def main():
                         help="With --uninstall: also remove bootstrap-frozen and bootstrap-with-template-tracking files")
     parser.add_argument("--strict", action="store_true",
                         help="Use byte-exact hashing instead of normalized (skips bootstrap-frozen)")
+    parser.add_argument("--include-templates", dest="include_templates", action="store_true",
+                        help="With --check: also surface advisory drift on bootstrap-with-template-tracking template_sha changes")
     parser.add_argument("--yes", action="store_true",
                         help="Skip confirmation prompt for --upgrade (non-interactive)")
     parser.add_argument("--no-lock", dest="no_lock", action="store_true",
@@ -1658,7 +1693,11 @@ def main():
     if args.check:
         if not args.target_dir:
             parser.error("--check requires target_dir")
-        sys.exit(cmd_check(args.target_dir, strict=args.strict))
+        sys.exit(cmd_check(
+            args.target_dir,
+            strict=args.strict,
+            include_templates=args.include_templates,
+        ))
 
     if args.reconcile:
         if not args.target_dir:
