@@ -87,3 +87,38 @@ Skip it for:
 - pure CRUD apps with one obvious shape and no scaling concerns
 
 Enable it via the `with-design` profile at enrichment time, or by editing the project's `.scaffold/manifest.json` profile to `with-design` and running `--upgrade`. Keep `DESIGN.md` under one screen — push detail into per-decision memos in `artifacts/` rather than letting the design itself grow. `strategy-planner` produces and updates the design; `architecture-red-team` reviews it alongside decision memos.
+
+## Companion plugins
+
+Scaffolded projects compose well with workflow-skill plugins. The scaffold owns the *project structure layer* (phases, gates, provenance, capability profiles); plugins typically own the *workflow technique layer* (skills with anti-rationalization tables, slash commands, process recipes). Combining them is additive — pick what's useful from each.
+
+### Known-compatible: addyosmani/agent-skills
+
+The [agent-skills plugin](https://github.com/addyosmani/agent-skills) ships 21 skills (spec-driven-development, incremental-implementation, test-driven-development, debugging-and-error-recovery, code-review-and-quality, etc.), three personas (code-reviewer, security-auditor, test-engineer), and seven slash commands (`/spec`, `/plan`, `/build`, `/test`, `/review`, `/code-simplify`, `/ship`). Install it inside a scaffolded project:
+
+```
+/plugin marketplace add addyosmani/agent-skills
+/plugin install agent-skills@addy-agent-skills
+```
+
+**Resolution rules** (handled by Claude Code):
+
+- Project-local `.claude/agents/<name>.md` (installed by our enrich) wins over plugin agents. Their `code-reviewer` persona is shadowed by our `.claude/agents/code-reviewer.md`; this is intentional — local customizations (like meewar2-style project extensions) take precedence.
+- Project-local skills under `.claude/skills/<name>/` similarly win over plugin skills with the same name.
+- Slash commands from the plugin become available globally inside the project. There is no override mechanism today.
+
+**Caveat — slash commands are not phase-aware.** Their `/build`, `/ship`, etc. are workflow shortcuts that do not read `artifacts/phase-approval.json` or write approval artifacts. Treat the plugin's slash commands as *workflow aids inside phase work*, not as a substitute for the phase model. The phase model still owns the approval lifecycle; the plugin's skills enrich the work each phase does.
+
+**What composes well in practice:**
+
+| Plugin contribution | Scaffold partner | How they reinforce each other |
+|---|---|---|
+| `spec-driven-development` skill | `docs/SPEC.md` template | Skill says spec-before-code; scaffold installs the template |
+| `incremental-implementation` skill | `engine-builder` / `frontend-builder` / `backend-builder` agents | Skill says how to slice; agent says who builds each slice |
+| `test-driven-development` skill | Testing gate in `QUALITY_GATES.md` | Skill is the workflow; gate is the acceptance check |
+| `code-review-and-quality` skill | `code-reviewer` agent + review gate | Skill is reviewer process; agent is the role that runs the gate |
+| `debugging-and-error-recovery` skill | Used inside any build phase | Pure technique; orthogonal to phase model |
+| `documentation-and-adrs` skill | `docs/adr/` + `templates/adr.template.md` | Skill says write an ADR; scaffold says where they go |
+| Anti-rationalization tables (their authoring style) | Already adopted in `QUALITY_GATES.md` (M9) | Same idea; reinforces ours |
+
+If you adopt the plugin, mention it in your project's `docs/AGENTS.md` (rendered downstream from the M10 template) so other agents and humans entering the repo know which workflow conventions are active.
