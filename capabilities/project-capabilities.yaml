@@ -424,3 +424,9 @@ files:
     ownership: scaffold-internal
     # Empty placeholder so docs/adr/ is tracked by git; never installed
     # downstream (enrich-project.py creates the directory directly).
+
+  docs/adr/ADR-0001-install-lifecycle.md:
+    ownership: scaffold-internal
+    # ADR for the scaffold's own M9 decision; documents why install
+    # lifecycle and provenance work as they do. Downstream projects
+    # write their own ADR-NNNN files (project-owned).

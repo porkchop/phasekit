@@ -139,6 +139,75 @@ def atomic_copy(src, dest):
     os.replace(tmp, dest)
 
 
+# === Pre-install safety: secrets scan + symlink refusal (M9 §9, F11) =======
+
+# Secret patterns refused at install time (M9 §9 row 8, F11b). Short
+# placeholder forms (e.g. literal "sk-ant-..." with periods) do not match
+# the live-key regexes because `.` is outside the allowed key char class.
+_SECRET_PATTERNS = (
+    ("AWS access key ID",       re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("PEM private key block",   re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("Slack token",             re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}")),
+    ("Anthropic API key",       re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}")),
+    ("GitHub PAT",              re.compile(r"ghp_[A-Za-z0-9]{30,}")),
+    ("GitHub OAuth token",      re.compile(r"gho_[A-Za-z0-9]{30,}")),
+)
+
+
+def scan_for_secrets(file_path):
+    """Return a list of (label, snippet) tuples for any matches in the file.
+
+    Empty list if the file is clean. Binary files (non-decodable as UTF-8)
+    are scanned as bytes converted to str with errors='replace'.
+    """
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, IsADirectoryError):
+        return []
+    findings = []
+    for label, pat in _SECRET_PATTERNS:
+        m = pat.search(text)
+        if m:
+            findings.append((label, m.group(0)[:48]))
+    return findings
+
+
+def assert_no_symlink_escape(target_root, dest_path):
+    """Refuse to install a file when its destination, or any parent dir up
+    to target_root, is a symlink whose realpath escapes target_root.
+
+    Mitigates F11a: a malicious or misconfigured symlink could otherwise
+    cause atomic_copy to write into another repo or system directory.
+    """
+    target_real = target_root.resolve(strict=False)
+    p = dest_path
+    while True:
+        if p.is_symlink():
+            real = p.resolve(strict=False)
+            try:
+                real.relative_to(target_real)
+            except ValueError:
+                raise RuntimeError(
+                    f"Refusing to install via symlink that escapes target: "
+                    f"{p} -> {real}"
+                )
+        if p == target_real or p.parent == p:
+            return
+        p = p.parent
+
+
+def safe_install(src, dest, target_root):
+    """Pre-install checks (secrets, symlinks) followed by atomic_copy."""
+    findings = scan_for_secrets(src)
+    if findings:
+        labels = ", ".join(f"{label} ({snippet!r})" for label, snippet in findings)
+        raise RuntimeError(
+            f"Refusing to install {src.name}: secret-shaped strings found: {labels}"
+        )
+    assert_no_symlink_escape(target_root, dest)
+    atomic_copy(src, dest)
+
+
 def sweep_orphan_tmpfiles(target_dir):
     """Walk target_dir, log and remove any orphan `*.scaffold-tmp` files.
 
@@ -161,8 +230,14 @@ def sweep_orphan_tmpfiles(target_dir):
     return swept
 
 
-def copy_file(src, dest, force=False, dry_run=False):
-    """Copy a file, creating parent dirs as needed. Returns True if copied."""
+def copy_file(src, dest, force=False, dry_run=False, target_root=None):
+    """Copy a file, creating parent dirs as needed. Returns True if copied.
+
+    If `target_root` is provided, runs pre-install safety checks (secrets
+    scan, symlink-escape refusal) before the atomic copy. Callers in
+    cmd_enrich and apply_upgrade_plan pass target_root; legacy callers
+    fall back to a plain atomic_copy.
+    """
     try:
         rel_src = src.relative_to(REPO_ROOT)
         assert_not_scaffold_internal(rel_src)
@@ -174,7 +249,10 @@ def copy_file(src, dest, force=False, dry_run=False):
     if dry_run:
         print(f"  Would copy: {src} -> {dest}")
         return True
-    atomic_copy(src, dest)
+    if target_root is not None:
+        safe_install(src, dest, Path(target_root))
+    else:
+        atomic_copy(src, dest)
     print(f"  Copied: {dest}")
     return True
 
@@ -200,6 +278,16 @@ def render_claude_md(target_dir, project_name, force=False, dry_run=False):
     rendered = re.sub(r"\{\{OPTIONAL_REFERENCES\}\}", "", rendered)
     tmp = dest.parent / (dest.name + TMP_SUFFIX)
     tmp.write_text(rendered)
+    # Pre-promote safety: scan the rendered output for secret-shaped strings,
+    # and refuse if a parent symlink escapes the target.
+    findings = scan_for_secrets(tmp)
+    if findings:
+        tmp.unlink()
+        labels = ", ".join(f"{label} ({snippet!r})" for label, snippet in findings)
+        raise RuntimeError(
+            f"Refusing to render {dest.name}: secret-shaped strings in output: {labels}"
+        )
+    assert_no_symlink_escape(target_dir, dest)
     os.replace(tmp, dest)
     print(f"  Rendered: {dest}")
     return True
@@ -732,7 +820,11 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
             if not src.exists():
                 print(f"  ERROR: scaffold source missing: {src}", file=sys.stderr)
                 return 1
-            atomic_copy(src, dest)
+            try:
+                safe_install(src, dest, target)
+            except RuntimeError as e:
+                print(f"  REFUSE: {e}", file=sys.stderr)
+                return 1
             print(f"  {action}: {path}")
             file_specs_for_manifest.append(spec)
         elif action == ACTION_KEEP_LOCAL:
@@ -761,7 +853,11 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
             spec = {"path": path, "ownership": p["ownership"], "text": p["text"],
                     "rendered_from": p["rendered_from"]}
             src = _scaffold_source_for_spec(spec)
-            atomic_copy(src, dest)
+            try:
+                safe_install(src, dest, target)
+            except RuntimeError as e:
+                print(f"  REFUSE: {e}", file=sys.stderr)
+                return 1
             print(f"  rename-local: {path} -> {new_path}; installed scaffold-new at {path}")
             file_specs_for_manifest.append(spec)
         elif action == ACTION_DELETE:
@@ -785,7 +881,57 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
     return 0
 
 
+def _interactive_resolve(plans, target):
+    """Walk every drifted/refuse entry and prompt the user [k/t/d/s].
+
+    [k]eep-local | [t]ake-new | [d]iff (show, then re-prompt) | [s]top.
+    Returns the modified plans list, or None if user stopped.
+    """
+    print("\nInteractive resolution: per-file [k=keep-local / t=take-new / d=diff / s=stop]")
+    for p in plans:
+        if p["state"] not in ("drifted",):
+            continue
+        if p["action"] != ACTION_REFUSE and p["action"] not in (ACTION_KEEP_LOCAL, ACTION_TAKE_NEW):
+            continue
+        path = p["path"]
+        while True:
+            try:
+                ans = input(f"  {path}: [k/t/d/s] ").strip().lower()
+            except EOFError:
+                ans = "s"
+            if ans in ("k", "keep", "keep-local"):
+                p["action"] = ACTION_KEEP_LOCAL
+                break
+            elif ans in ("t", "take", "take-new"):
+                p["action"] = ACTION_TAKE_NEW
+                break
+            elif ans in ("d", "diff"):
+                local_path = target / path
+                if not local_path.exists():
+                    print("    (no local file to diff)")
+                    continue
+                spec = {"path": path, "rendered_from": p["rendered_from"]}
+                src = _scaffold_source_for_spec(spec)
+                if not src.exists():
+                    print("    (no scaffold source to diff)")
+                    continue
+                try:
+                    out = subprocess.run(
+                        ["diff", "-u", str(src), str(local_path)],
+                        capture_output=True, text=True,
+                    )
+                    print(out.stdout if out.stdout else "    (no textual diff)")
+                except FileNotFoundError:
+                    print("    (diff command not found)")
+            elif ans in ("s", "stop"):
+                return None
+            else:
+                print("    (unknown — try k, t, d, or s)")
+    return plans
+
+
 def cmd_upgrade(target_dir, profile=None, dry_run=False, yes=False, no_lock=False,
+                interactive=False,
                 keep_local=(), take_new=(), adopt=(), rename_local=(),
                 accept_removal=()):
     """Upgrade a downstream project: re-evaluate scaffold-owned files and
@@ -824,6 +970,15 @@ def cmd_upgrade(target_dir, profile=None, dry_run=False, yes=False, no_lock=Fals
         adopt=adopt, rename_local=rename_local,
         accept_removal=accept_removal,
     )
+
+    if interactive:
+        if yes:
+            print("Error: --interactive cannot be used with --yes", file=sys.stderr)
+            return 2
+        plans = _interactive_resolve(plans, target)
+        if plans is None:
+            print("Stopped.", file=sys.stderr)
+            return 1
 
     print_upgrade_plan(plans)
 
@@ -1496,7 +1651,7 @@ def cmd_enrich(args):
                 continue
             src = REPO_ROOT / agents[key]["source"]
             dest = target / agents[key]["source"]
-            if copy_file(src, dest, force=args.force, dry_run=args.dry_run):
+            if copy_file(src, dest, force=args.force, dry_run=args.dry_run, target_root=target):
                 copied += 1
             else:
                 skipped += 1
@@ -1524,7 +1679,7 @@ def cmd_enrich(args):
             if key in template_map:
                 template_src = REPO_ROOT / "templates" / template_map[key]
                 if template_src.exists():
-                    if copy_file(template_src, dest, force=args.force, dry_run=args.dry_run):
+                    if copy_file(template_src, dest, force=args.force, dry_run=args.dry_run, target_root=target):
                         copied += 1
                     else:
                         skipped += 1
@@ -1534,7 +1689,7 @@ def cmd_enrich(args):
             # copy from scaffold directly
             src = REPO_ROOT / doc_path
             if src.exists():
-                if copy_file(src, dest, force=args.force, dry_run=args.dry_run):
+                if copy_file(src, dest, force=args.force, dry_run=args.dry_run, target_root=target):
                     copied += 1
                 else:
                     skipped += 1
@@ -1549,7 +1704,7 @@ def cmd_enrich(args):
                 continue
             src = REPO_ROOT / hooks[key]["path"]
             dest = target / hooks[key]["path"]
-            if copy_file(src, dest, force=args.force, dry_run=args.dry_run):
+            if copy_file(src, dest, force=args.force, dry_run=args.dry_run, target_root=target):
                 copied += 1
             else:
                 skipped += 1
@@ -1561,7 +1716,7 @@ def cmd_enrich(args):
     src = REPO_ROOT / ".claude" / "settings.json"
     dest = target / ".claude" / "settings.json"
     if src.exists():
-        if copy_file(src, dest, force=args.force, dry_run=args.dry_run):
+        if copy_file(src, dest, force=args.force, dry_run=args.dry_run, target_root=target):
             copied += 1
         else:
             skipped += 1
@@ -1578,7 +1733,7 @@ def cmd_enrich(args):
                 continue
             src = REPO_ROOT / scripts[key]["path"]
             dest = target / scripts[key]["path"]
-            if copy_file(src, dest, force=args.force, dry_run=args.dry_run):
+            if copy_file(src, dest, force=args.force, dry_run=args.dry_run, target_root=target):
                 copied += 1
             else:
                 skipped += 1
@@ -1596,7 +1751,7 @@ def cmd_enrich(args):
         src = REPO_ROOT / filename
         dest = target / filename
         if src.exists():
-            if copy_file(src, dest, force=args.force, dry_run=args.dry_run):
+            if copy_file(src, dest, force=args.force, dry_run=args.dry_run, target_root=target):
                 copied += 1
             else:
                 skipped += 1
@@ -1617,7 +1772,7 @@ def cmd_enrich(args):
         src = REPO_ROOT / filename
         dest = target / filename
         if src.exists():
-            if copy_file(src, dest, force=args.force, dry_run=args.dry_run):
+            if copy_file(src, dest, force=args.force, dry_run=args.dry_run, target_root=target):
                 copied += 1
             else:
                 skipped += 1
@@ -1673,6 +1828,8 @@ def main():
                         help="With --check: also surface advisory drift on bootstrap-with-template-tracking template_sha changes")
     parser.add_argument("--yes", action="store_true",
                         help="Skip confirmation prompt for --upgrade (non-interactive)")
+    parser.add_argument("--interactive", action="store_true",
+                        help="With --upgrade: prompt per drifted file [k/t/d/s] (mutex with --yes)")
     parser.add_argument("--no-lock", dest="no_lock", action="store_true",
                         help="Skip per-target fcntl.flock (for CI with its own mutexes)")
     parser.add_argument("--keep-local", dest="keep_local", action="append", default=[],
@@ -1734,6 +1891,7 @@ def main():
             dry_run=args.dry_run,
             yes=args.yes,
             no_lock=args.no_lock,
+            interactive=args.interactive,
             keep_local=args.keep_local,
             take_new=args.take_new,
             adopt=args.adopt,

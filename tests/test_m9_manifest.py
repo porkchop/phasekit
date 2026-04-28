@@ -606,6 +606,56 @@ class TemplateSourceAdvisoryDrift(unittest.TestCase):
             fixture.cleanup()
 
 
+class PreInstallSafety(unittest.TestCase):
+    """F11b (secrets scan) and F11a (symlink refusal). Pre-install checks
+    prevent accidentally distributing leaked credentials and prevent symlink
+    escapes from writing into a directory outside the target."""
+
+    def test_secret_pattern_refused(self):
+        module = _load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            tainted = tmp / "src.txt"
+            # AKIA + 16 uppercase alnum chars matches the AWS pattern
+            tainted.write_text("Some text\nAKIAABCDEFGHIJKLMNOP\nmore\n")
+            dest = tmp / "dest.txt"
+            with self.assertRaises(RuntimeError) as ctx:
+                module.safe_install(tainted, dest, tmp)
+            self.assertIn("secret-shaped", str(ctx.exception))
+            self.assertFalse(dest.exists(), "tainted file must not be installed")
+
+    def test_placeholder_does_not_match(self):
+        """Documented placeholder forms (`sk-ant-...`) must NOT match the
+        live-key regex (`.` not in the allowed key char class)."""
+        module = _load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            doc = tmp / "doc.md"
+            doc.write_text("Use ANTHROPIC_API_KEY='sk-ant-...' to authenticate.\n")
+            dest = tmp / "dest.md"
+            module.safe_install(doc, dest, tmp)  # must not raise
+            self.assertTrue(dest.exists())
+
+    def test_symlink_escape_refused(self):
+        module = _load_module()
+        with tempfile.TemporaryDirectory() as outer:
+            outer = Path(outer)
+            target = outer / "target"
+            target.mkdir()
+            outside = outer / "outside"
+            outside.mkdir()
+            # Build target/sub as a symlink to outside (escape)
+            (target / "sub").symlink_to(outside)
+
+            src = outer / "src.txt"
+            src.write_text("ok\n")
+            dest = target / "sub" / "dest.txt"
+
+            with self.assertRaises(RuntimeError) as ctx:
+                module.safe_install(src, dest, target)
+            self.assertIn("escape", str(ctx.exception).lower())
+
+
 class ScaffoldInternalDenyFromManifest(unittest.TestCase):
     """The deny-list for scaffold-internal files now derives from the
     capability manifest (M9 retired the SCAFFOLD_INTERNAL_FILES constant)."""
