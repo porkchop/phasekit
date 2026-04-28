@@ -78,7 +78,12 @@ Use *before* Pattern 1, when you have a fuzzy idea and need to land on a SPEC, a
 The scaffold deliberately doesn't build its own ideation tool — conversation with Claude *is* the powerful core. The optimization is structuring the conversation and combining it with the right external tools.
 
 Workflow:
-1. **Set up a structured Claude session.** Open a [claude.ai Project](https://claude.ai) and pin your scaffold's templates as project knowledge: `templates/spec.template.md`, `templates/architecture.template.md`, `templates/design.template.md` (optional), and the four scaffold-canonical docs (`QUALITY_GATES.md`, `USAGE_PATTERNS.md`, `EXECUTION_MODES.md`, `REASONING_PROFILES.md`). Every conversation in that project starts with the templates in context.
+1. **Set up a structured Claude session.** No project directory exists yet — ideation happens in claude.ai (or another Claude surface), not in a repo. You need the scaffold's templates available to Claude somehow:
+   - **Local clone of the scaffold (most reliable today):** in [claude.ai](https://claude.ai), create a Project and upload these files as project knowledge from your local scaffold checkout: `templates/spec.template.md`, `templates/architecture.template.md`, `templates/design.template.md` (optional), and the canonical workflow docs (`docs/QUALITY_GATES.md`, `docs/USAGE_PATTERNS.md`, `docs/EXECUTION_MODES.md`, `docs/REASONING_PROFILES.md`).
+   - **Scaffold published publicly (once it is):** paste the raw GitHub/Bitbucket URLs into the Project's custom-instructions field so Claude can fetch them, or attach via a connector if your Claude surface supports it.
+   - **No-tool fallback:** paste the templates' contents directly into the Project's custom-instructions field. Less elegant but works anywhere.
+
+   Every conversation in that Project starts with the templates in context. If you're already inside an existing scaffolded project running Claude Code, you can do this even more directly — `@`-reference the scaffold's template paths in conversation. Pattern 8 doesn't require Claude Code; claude.ai works fine.
 2. **Walk the spec sections in order.** Prompt Claude with: "I want to build X. Walk me through `docs/SPEC.md` section by section — ask one question at a time and update the spec as we go." If you have the [agent-skills plugin](https://github.com/addyosmani/agent-skills) installed (see "Companion plugins" below), invoke its `idea-refine` and `spec-driven-development` skills here — they walk a deterministic question order with anti-rationalization tables that catch scope creep early.
 3. **Mock the UI if it matters.** For UI-heavy products, generate top 2–3 screens using:
    - **[v0](https://v0.dev)** for fast React mockups (lower fidelity, fastest iteration)
