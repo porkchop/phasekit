@@ -77,30 +77,44 @@ Use *before* Pattern 1, when you have a fuzzy idea and need to land on a SPEC, a
 
 The scaffold deliberately doesn't build its own ideation tool — conversation with Claude *is* the powerful core. The optimization is structuring the conversation and combining it with the right external tools.
 
-Workflow:
-1. **Set up a structured Claude session.** No project directory exists yet — ideation happens in claude.ai (or another Claude surface), not in a repo. You need the scaffold's templates available to Claude somehow:
+### Tool selection: claude.ai vs Claude Code
+
+Pattern 8 uses both Claude surfaces. They're better at different phases:
+
+| Phase | Best surface | Why |
+|---|---|---|
+| **Divergent — "is this idea worth pursuing?"** | [claude.ai](https://claude.ai) | Lightweight (open a tab); cheap to branch a new chat for "what if X?"; Artifacts render Markdown/React/Mermaid live so you can iterate on a SPEC draft visually; Projects pin templates + a system prompt across conversations; works on mobile |
+| **External tooling — UI mockups, diagrams** | v0 / Figma+AI / Excalidraw | Specialty surfaces; Claude can describe but not render |
+| **Convergent — "let's structure this into a buildable spec"** | Claude Code | The scaffold's `strategy-planner` and `architecture-red-team` agents only exist here; addyosmani/agent-skills' `idea-refine` and `spec-driven-development` skills run here when the plugin is installed; direct file writes into the eventual project location |
+| **Bootstrap + phase 0** | Claude Code | File system, verification, git integration are the value prop |
+
+The seam: **switch from claude.ai to Claude Code once you have a SPEC draft you'd be embarrassed to throw away.** Before that, you're exploring (claude.ai is right). After that, you're producing (Claude Code is right). Most people skip claude.ai entirely and start in Claude Code; that's correct once you have direction but wastes an hour of structured tool overhead on the "is this idea even good?" exploration.
+
+Workflow (each step labelled with its preferred surface):
+1. **Set up a structured Claude session.** *(claude.ai)* No project directory exists yet — ideation happens in claude.ai, not in a repo. You need the scaffold's templates available to Claude somehow:
    - **Local clone of the scaffold (most reliable today):** in [claude.ai](https://claude.ai), create a Project and upload these files as project knowledge from your local scaffold checkout: `templates/spec.template.md`, `templates/architecture.template.md`, `templates/design.template.md` (optional), and the canonical workflow docs (`docs/QUALITY_GATES.md`, `docs/USAGE_PATTERNS.md`, `docs/EXECUTION_MODES.md`, `docs/REASONING_PROFILES.md`).
    - **Scaffold published publicly (once it is):** paste the raw GitHub/Bitbucket URLs into the Project's custom-instructions field so Claude can fetch them, or attach via a connector if your Claude surface supports it.
    - **No-tool fallback:** paste the templates' contents directly into the Project's custom-instructions field. Less elegant but works anywhere.
 
    Every conversation in that Project starts with the templates in context. If you're already inside an existing scaffolded project running Claude Code, you can do this even more directly — `@`-reference the scaffold's template paths in conversation. Pattern 8 doesn't require Claude Code; claude.ai works fine.
-2. **Walk the spec sections in order.** Prompt Claude with: "I want to build X. Walk me through `docs/SPEC.md` section by section — ask one question at a time and update the spec as we go." If you have the [agent-skills plugin](https://github.com/addyosmani/agent-skills) installed (see "Companion plugins" below), invoke its `idea-refine` and `spec-driven-development` skills here — they walk a deterministic question order with anti-rationalization tables that catch scope creep early.
-3. **Mock the UI if it matters.** For UI-heavy products, generate top 2–3 screens using:
+2. **Walk the spec sections in order.** *(claude.ai — divergent phase; lightweight is right here)* Prompt Claude with: "I want to build X. Walk me through `docs/SPEC.md` section by section — ask one question at a time and update the spec as we go. Render the current draft as an Artifact so I can see it grow." Iterate freely; spawn new chats inside the Project to explore "what if I did Y instead?" without losing your main thread. Output is a SPEC draft good enough that you'd be embarrassed to throw it away — that's your signal to switch surfaces.
+3. **Mock the UI if it matters.** *(external tools — claude.ai can describe but not render high-fidelity UI)* For UI-heavy products, generate top 2–3 screens using:
    - **[v0](https://v0.dev)** for fast React mockups (lower fidelity, fastest iteration)
    - **Figma + Figma AI / Galileo AI / Builder.io's Figma plugin** for high-fidelity designs
    - **Whimsical AI / Excalidraw / Eraser.io** for sketch-style flow diagrams
    Drop screenshots or links into `docs/SPEC.md` rather than committing the design tool itself. Skip this step entirely for CLIs, libraries, or services without a UI.
-4. **Architecture pass.** Once SPEC is converging, ask `strategy-planner` (in scaffold mode, not the project mode) to compare 2–4 plausible architectures and recommend one. Output: a draft `docs/ARCHITECTURE.md` with the chosen layering, technology choices, and the rejected options.
-5. **(Optional) Design pass.** If the project's complexity warrants — multiple subsystems, scaling concerns, async/sync decisions worth being explicit about — opt into the M10 design artifact via the `with-design` profile. `strategy-planner` produces the initial `docs/DESIGN.md`; `architecture-red-team` reviews it. See "When to use docs/DESIGN.md" above.
-6. **Phase plan.** Ask `strategy-planner` to break the SPEC into phases such that each phase ends in a verifiable, deployable, reviewable increment. Output: `docs/PHASES.md`.
-7. **Adversarial review.** Run `architecture-red-team` against SPEC + ARCHITECTURE (+ DESIGN if present) + PHASES. Address blocking concerns; record non-blocking ones as `Open questions` in DESIGN.md if used, or in a planning memo. The red-team should flag scaling concerns, missing non-goals, weak phase acceptance criteria, and integration risks.
-8. **Initialize the project.** Now run Pattern 1 (`bootstrap-new-project.sh`). The SPEC, ARCHITECTURE, PHASES, and PROD_REQUIREMENTS.md you've drafted slot in directly — the scaffold's templates are *defaults*, not *requirements*. Override the rendered files with what you've already written.
+4. **Architecture pass.** *(Claude Code — convergent phase begins; you need the real `strategy-planner` agent now)* Move your SPEC draft into Claude Code (paste it into a working file, or run Pattern 1 first and paste into the rendered `docs/SPEC.md`). Ask `strategy-planner` to compare 2–4 plausible architectures and recommend one. Output: a draft `docs/ARCHITECTURE.md` with the chosen layering, technology choices, and the rejected options.
+5. **(Optional) Design pass.** *(Claude Code)* If the project's complexity warrants — multiple subsystems, scaling concerns, async/sync decisions worth being explicit about — opt into the M10 design artifact via the `with-design` profile. `strategy-planner` produces the initial `docs/DESIGN.md`; `architecture-red-team` reviews it. See "When to use docs/DESIGN.md" above.
+6. **Phase plan.** *(Claude Code)* Ask `strategy-planner` to break the SPEC into phases such that each phase ends in a verifiable, deployable, reviewable increment. Output: `docs/PHASES.md`.
+7. **Adversarial review.** *(Claude Code)* Run `architecture-red-team` against SPEC + ARCHITECTURE (+ DESIGN if present) + PHASES. Address blocking concerns; record non-blocking ones as `Open questions` in DESIGN.md if used, or in a planning memo. The red-team should flag scaling concerns, missing non-goals, weak phase acceptance criteria, and integration risks.
+8. **Initialize the project.** *(Claude Code)* Run Pattern 1 (`bootstrap-new-project.sh`). The SPEC, ARCHITECTURE, PHASES, and PROD_REQUIREMENTS.md you've drafted slot in directly — the scaffold's templates are *defaults*, not *requirements*. Override the rendered files with what you've already written. (If you ran Pattern 1 earlier in step 4 to use Claude Code's filesystem, you've already done this.)
 
 Notes:
-- Steps 1–3 happen outside any specific repo (the project doesn't exist yet). Use claude.ai Projects, an external Figma file, and your favorite scratch notes.
-- Steps 4–7 can also happen pre-bootstrap, in the same claude.ai Project, with the agent personas referenced by name. They produce text you'll paste into the eventual `docs/`. Alternatively, run `bootstrap-new-project.sh` first, then iterate inside the actual repo with the real agents.
-- If the concept genuinely fits in 30 minutes of conversation, skip the formal walk-through entirely. This pattern is for ideas worth at least a half-day of work.
-- For ongoing ideation on an existing project, prefer `decision-memo.md` artifacts under `artifacts/` rather than reopening SPEC. SPEC describes the steady-state product; decision memos describe each material change.
+- **Steps 1–3** happen *outside* any specific repo. claude.ai for the conversation, external tools for UI, scratch notes for everything else.
+- **Steps 4–8** happen *inside* Claude Code. The scaffold's `strategy-planner` and `architecture-red-team` agents are the value here — claude.ai cannot replicate them faithfully even if you describe the personas in a system prompt. The real agent files in `.claude/agents/*.md` carry specific instructions and output formats that took adversarial reviews to settle.
+- **The exact handoff point** is flexible. Some teams cross between steps 3 and 4 (claude.ai for SPEC + UI, Claude Code for ARCH + DESIGN + PHASES). Others run Pattern 1 immediately after step 2, paste the SPEC draft into the rendered `docs/SPEC.md`, and do steps 3–7 inside Claude Code with file references. Both are fine. The single hard rule: don't try to run `strategy-planner` or `architecture-red-team` from claude.ai by play-acting — you lose what makes them work.
+- **If the concept genuinely fits in 30 minutes of conversation**, skip the formal walk-through entirely. This pattern is for ideas worth at least a half-day of work.
+- **For ongoing ideation on an existing project**, prefer `decision-memo.md` artifacts under `artifacts/` rather than reopening SPEC. SPEC describes the steady-state product; decision memos describe each material change.
 
 ## When to use docs/DESIGN.md
 
