@@ -7,6 +7,22 @@ project:
     - capability-packager
     - self-improvement
 
+# M9 — install lifecycle and provenance.
+# Default text/binary classification for normalized hashing.
+# Per-entry `text:` overrides are supported in `files:` and typed sections.
+text_default: true
+
+# Constrained `ignore:` glob list (M9 §8). Audited at runtime by `--self-check`:
+# no glob may match a path inside `git ls-files docs/ .claude/ scripts/
+# templates/ .devcontainer/ capabilities/`. Allowed targets only.
+ignore:
+  - "artifacts/*.json"
+  - "artifacts/*.md"
+  - "examples/**"
+  - "generated/**"
+  - "dist/skills/**"
+  - "tests/**"
+
 profiles:
   default:
     include_agents:
@@ -63,46 +79,55 @@ agents:
     enabled: true
     source: .claude/agents/project-lead.md
     purpose: orchestrate phased delivery and approvals
+    ownership: scaffold
 
   strategy-planner:
     enabled: true
     source: .claude/agents/strategy-planner.md
     purpose: write implementation strategy memos and task breakdowns
+    ownership: scaffold
 
   architecture-red-team:
     enabled: true
     source: .claude/agents/architecture-red-team.md
     purpose: challenge design choices and identify risks
+    ownership: scaffold
 
   engine-builder:
     enabled: true
     source: .claude/agents/engine-builder.md
     purpose: build deterministic core logic where applicable
+    ownership: scaffold
 
   frontend-builder:
     enabled: true
     source: .claude/agents/frontend-builder.md
     purpose: build UI without leaking business rules
+    ownership: scaffold
 
   backend-builder:
     enabled: true
     source: .claude/agents/backend-builder.md
     purpose: build persistence, APIs, auth, and server authority
+    ownership: scaffold
 
   code-reviewer:
     enabled: true
     source: .claude/agents/code-reviewer.md
     purpose: enforce code quality and architecture compliance
+    ownership: scaffold
 
   qa-playwright:
     enabled: true
     source: .claude/agents/qa-playwright.md
     purpose: verify user-visible functionality in browser
+    ownership: scaffold
 
   release-hardening:
     enabled: true
     source: .claude/agents/release-hardening.md
     purpose: production-readiness and operational hardening
+    ownership: scaffold
 
 skills:
   autonomous-product-builder:
@@ -112,115 +137,272 @@ skills:
     validate: true
     package: true
     purpose: reusable workflow skill for project buildout, audit-first execution, and scaffold self-improvement
+    ownership: scaffold
 
 docs:
   SPEC:
     path: docs/SPEC.md
     required: true
+    ownership: bootstrap-frozen
 
   ARCHITECTURE:
     path: docs/ARCHITECTURE.md
     required: true
+    ownership: bootstrap-frozen
 
   PHASES:
     path: docs/PHASES.md
     required: true
+    ownership: bootstrap-frozen
 
   QUALITY_GATES:
     path: docs/QUALITY_GATES.md
     required: true
+    ownership: scaffold
 
   PROD_REQUIREMENTS:
     path: docs/PROD_REQUIREMENTS.md
     required: true
+    ownership: bootstrap-frozen
 
   USAGE_PATTERNS:
     path: docs/USAGE_PATTERNS.md
     required: true
+    ownership: scaffold
 
   META_SPEC:
     path: docs/META_SPEC.md
     required: true
+    ownership: scaffold-internal
 
   META_PHASES:
     path: docs/META_PHASES.md
     required: true
+    ownership: scaffold-internal
 
   CAPABILITY_MANIFEST:
     path: docs/CAPABILITY_MANIFEST.md
     required: true
+    ownership: scaffold
 
   EXECUTION_MODES:
     path: docs/EXECUTION_MODES.md
     required: true
+    ownership: scaffold
 
   REASONING_PROFILES:
     path: docs/REASONING_PROFILES.md
     required: true
+    ownership: scaffold
 
   ADR_TEMPLATE:
     path: docs/ADR_TEMPLATE.md
     required: false
+    ownership: scaffold
 
   SELF_APPLICATION_EXAMPLE:
     path: docs/SELF_APPLICATION_EXAMPLE.md
     required: false
+    ownership: scaffold-internal
     # scaffold-internal: describes the M7 self-improvement cycle; not included in downstream enrichment profiles
 
   COMPATIBILITY:
     path: docs/COMPATIBILITY.md
     required: false
+    ownership: scaffold-internal
     # scaffold-internal: describes versioning and compatibility policy for the scaffold itself; not included in downstream enrichment profiles
 
   EXTENSION_PATTERNS:
     path: docs/EXTENSION_PATTERNS.md
     required: false
+    ownership: scaffold-internal
     # scaffold-internal: describes how to extend the scaffold's manifest and profiles; not included in downstream enrichment profiles
 
   CONTAINERIZATION:
     path: docs/CONTAINERIZATION.md
     required: false
+    ownership: scaffold
 
 hooks:
   deny-dangerous-commands:
     path: .claude/hooks/deny-dangerous-commands.sh
     required: true
+    ownership: scaffold
 
 scripts:
   run-phase:
     path: scripts/run-phase.sh
     required: true
+    ownership: scaffold
 
   run-until-done:
     path: scripts/run-until-done.sh
     required: true
+    ownership: scaffold
 
   generate-skill:
     path: scripts/generate-skill.py
     required: true
+    ownership: scaffold
 
   validate-skill:
     path: scripts/validate-skill.py
     required: true
+    ownership: scaffold
 
   package-skill:
     path: scripts/package-skill.py
     required: true
+    ownership: scaffold
 
   enrich-project:
     path: scripts/enrich-project.py
     required: true
+    ownership: scaffold
+    # Engine warns when invoked from a downstream copy whose sha disagrees
+    # with the scaffold-canonical sha (M9 §9 row 12).
 
   container-setup:
     path: scripts/container-setup.sh
     required: false
+    ownership: scaffold
 
   verify-container:
     path: scripts/verify-container.sh
     required: false
+    ownership: scaffold
 
 generation:
   output_root: generated
   skills_output_root: dist/skills
   preserve_existing_files: true
   require_review_for_overwrite: true
+
+# Top-level `files:` map (M9 §4). Enumerates every tracked file not covered
+# by a typed section above. Together with the typed sections, this seeds
+# `--self-check`: every path in `git ls-files` must classify into exactly
+# one ownership class (or match an `ignore:` glob).
+#
+# Ownership classes (M9 §2):
+#   - `scaffold`            — copied verbatim downstream
+#   - `bootstrap-frozen`    — downstream-only, write-once, never re-checked
+#   - `bootstrap-with-template-tracking` — downstream-only, write-once,
+#                              advisory drift on `rendered_from` template change
+#   - `scaffold-template`   — scaffold-only; consumed by render logic
+#   - `scaffold-internal`   — scaffold-only; never installable
+#
+# Note: in the scaffold repo itself, `bootstrap-*` and `scaffold-template`
+# files are also scaffold-internal in the sense that they are never
+# re-installed *into* the scaffold; the class describes their downstream
+# behavior. (M9 §A clarification.)
+files:
+  # --- scaffold (copied verbatim downstream) ---
+  CONTINUE_PROMPT.txt:
+    ownership: scaffold
+
+  .devcontainer/Dockerfile:
+    ownership: scaffold
+
+  .devcontainer/devcontainer.json:
+    ownership: scaffold
+
+  .devcontainer/entrypoint.sh:
+    ownership: scaffold
+
+  .devcontainer/init-firewall.sh:
+    ownership: scaffold
+
+  .claude/settings.container.example.json:
+    ownership: scaffold
+
+  .claude/skills/autonomous-product-builder/SKILL.md:
+    ownership: scaffold
+
+  .claude/skills/autonomous-product-builder/agents/openai.yaml:
+    ownership: scaffold
+
+  .claude/skills/autonomous-product-builder/references/adversarial-checklist.md:
+    ownership: scaffold
+
+  .claude/skills/autonomous-product-builder/references/decision-memo-template.md:
+    ownership: scaffold
+
+  .claude/skills/autonomous-product-builder/references/workflows.md:
+    ownership: scaffold
+
+  .claude/skills/autonomous-product-builder/scripts/check_scaffold.py:
+    ownership: scaffold
+
+  # --- bootstrap-with-template-tracking ---
+  # Engine stores `template_sha` per file in the downstream manifest so a
+  # template change in the scaffold surfaces as advisory drift, never as
+  # auto-overwrite. M9 Slice B materializes templates/settings.template.json.
+  .claude/settings.json:
+    ownership: bootstrap-with-template-tracking
+    rendered_from: templates/settings.template.json
+
+  # --- scaffold-template (rendered downstream) ---
+  templates/CLAUDE.template.md:
+    ownership: scaffold-template
+
+  templates/adr.template.md:
+    ownership: scaffold-template
+
+  templates/architecture.template.md:
+    ownership: scaffold-template
+
+  templates/prod-requirements.template.md:
+    ownership: scaffold-template
+
+  templates/skill/SKILL.template.md:
+    ownership: scaffold-template
+
+  templates/skill/agents/openai.yaml:
+    ownership: scaffold-template
+
+  templates/spec.template.md:
+    ownership: scaffold-template
+
+  # --- scaffold-internal (never installable) ---
+  .claude/CLAUDE.md:
+    ownership: scaffold-internal
+    # Downstream gets a rendered copy from templates/CLAUDE.template.md.
+
+  .gitignore:
+    ownership: scaffold-internal
+
+  AGENTS.md:
+    ownership: scaffold-internal
+    # Downstream gets a rendered copy from templates/AGENTS.template.md
+    # (materialized by M9 Slice B).
+
+  CONTRIBUTING.md:
+    ownership: scaffold-internal
+
+  KICKOFF.md:
+    ownership: scaffold-internal
+
+  LICENSE:
+    ownership: scaffold-internal
+
+  README.md:
+    ownership: scaffold-internal
+
+  capabilities/project-capabilities.yaml:
+    ownership: scaffold-internal
+    # M9.6 may introduce a downstream-overlay mechanism; until then this
+    # file is scaffold-only authority.
+
+  scripts/adopt-existing-repo.sh:
+    ownership: scaffold-internal
+
+  scripts/bootstrap-new-project.sh:
+    ownership: scaffold-internal
+
+  scripts/verify-phase.sh:
+    ownership: scaffold-internal
+
+  docs/adr/.gitkeep:
+    ownership: scaffold-internal
+    # Empty placeholder so docs/adr/ is tracked by git; never installed
+    # downstream (enrich-project.py creates the directory directly).

@@ -2,7 +2,25 @@
 
 ## Overview
 
-`capabilities/project-capabilities.yaml` is the single source of truth for which capabilities a downstream project should receive. Every agent, skill, hook, doc, and script that the scaffold manages is declared here. Settings fragments (e.g. `.claude/settings.json` entries) are managed directly and may be added to the manifest schema in a future phase.
+`capabilities/project-capabilities.yaml` is the single source of truth for which capabilities a downstream project should receive. Every agent, skill, hook, doc, and script that the scaffold manages is declared here. As of Phase M9, every tracked file in the scaffold repo is also classified by an **ownership class** so that downstream projects can be upgraded, audited, and uninstalled cleanly.
+
+## Ownership classes (M9)
+
+Every file enumerated by the manifest carries one of these classes:
+
+| Class | Where it lives | Behavior on downstream upgrade |
+|---|---|---|
+| `scaffold` | scaffold repo + downstream | re-enrichment overwrites after acknowledged drift; default upgrade target |
+| `bootstrap-frozen` | downstream only, write-once | never re-rendered, never re-checked under `--check --strict` |
+| `bootstrap-with-template-tracking` | downstream only, write-once | never auto-overwritten; the manifest stores a `template_sha`; an advisory drift surfaces when the source template changes |
+| `scaffold-template` | scaffold only (`templates/`) | rendered into downstream files; never copied verbatim |
+| `scaffold-internal` | scaffold only | never installable; `--self-check` enforces |
+
+Notes:
+
+- Classes describe *downstream* behavior. In the scaffold repo itself, `bootstrap-*` and `scaffold-template` files are also scaffold-internal in the sense that they are never re-installed *into* the scaffold; the class describes their relationship to downstream projects.
+- The downstream provenance record (`.scaffold/manifest.json`) MUST be committed by the downstream project. The engine warns when it is gitignored.
+- An explicit `ignore:` glob list (see below) covers generated/example/test paths that don't fit any class. Globs are constrained: no `ignore:` glob may match a path under `docs/`, `.claude/`, `scripts/`, `templates/`, `.devcontainer/`, or `capabilities/`. `--self-check` enforces this constraint at runtime.
 
 ## File location
 
@@ -18,12 +36,15 @@ capabilities/project-capabilities.yaml
 |---|---|---|
 | `version` | yes | Integer schema version (currently `1`) |
 | `project` | yes | Project identity and mode declaration |
+| `text_default` | yes (M9) | Boolean default for `text:` per-entry overrides; controls hashing recipe |
+| `ignore` | yes (M9) | Constrained glob list for paths not classifiable by ownership |
 | `profiles` | yes | Named capability bundles for different project types |
 | `agents` | yes | Agent definitions |
 | `skills` | yes | Skill definitions |
 | `docs` | yes | Document definitions |
 | `hooks` | yes | Hook definitions |
 | `scripts` | yes | Script definitions |
+| `files` | yes (M9) | Per-file ownership for paths not covered by typed sections |
 | `generation` | yes | Output path conventions for generated/packaged assets |
 
 ### `project`
@@ -63,6 +84,7 @@ agents:
     enabled: <bool>        # whether this agent is active
     source: <path>         # relative path to the agent definition file
     purpose: <string>      # one-line description of what the agent does
+    ownership: <class>     # M9 — one of the five ownership classes above
 ```
 
 ### `skills`
@@ -76,6 +98,7 @@ skills:
     validate: <bool>              # whether skill validation is required
     package: <bool>               # whether skill packaging is required
     purpose: <string>
+    ownership: <class>            # M9 — typically `scaffold` for the package as a whole
 ```
 
 ### `docs`
@@ -85,6 +108,7 @@ docs:
   <doc-key>:
     path: <path>           # relative path to the document
     required: <bool>       # whether the document must exist for the scaffold to be valid
+    ownership: <class>     # M9 — `scaffold`, `bootstrap-frozen`, or `scaffold-internal`
 ```
 
 ### `hooks`
@@ -94,6 +118,7 @@ hooks:
   <hook-key>:
     path: <path>
     required: <bool>
+    ownership: <class>     # M9
 ```
 
 ### `scripts`
@@ -103,7 +128,44 @@ scripts:
   <script-key>:
     path: <path>
     required: <bool>
+    ownership: <class>     # M9
 ```
+
+### `files` (M9)
+
+Top-level map enumerating every tracked file not covered by a typed section
+(root files, container files, templates, individual skill files, etc.).
+Together with the typed sections this seeds `--self-check`: every path in
+`git ls-files` must classify into exactly one ownership class or match an
+`ignore:` glob.
+
+```yaml
+files:
+  <relative/path>:
+    ownership: <class>            # required, one of the five M9 classes
+    text: <bool>                  # optional; defaults to top-level text_default
+    rendered_from: <path>         # required for bootstrap-with-template-tracking
+```
+
+### `ignore` (M9)
+
+```yaml
+ignore:
+  - "<glob>"                       # gitignore-style glob; ** crosses /, * doesn't
+```
+
+Constrained: `--self-check` fails if any glob matches a path under
+`docs/`, `.claude/`, `scripts/`, `templates/`, `.devcontainer/`, or `capabilities/`.
+
+### `text_default` (M9)
+
+```yaml
+text_default: true                  # default for files without an explicit text:
+```
+
+Controls hashing recipe: `text: true` files use the normalized recipe
+(LF, trim trailing whitespace, single trailing newline); `text: false`
+files use byte-exact hashing only.
 
 ### `generation`
 
