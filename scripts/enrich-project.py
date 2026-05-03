@@ -1417,6 +1417,7 @@ ALWAYS_INSTALLED_FILE_PATHS = (
     "CONTINUE_PROMPT.txt",
     "scripts/container-setup.sh",
     "scripts/verify-container.sh",
+    "scripts/phasekit.sh",
     ".devcontainer/devcontainer.json",
     ".devcontainer/Dockerfile",
     ".devcontainer/entrypoint.sh",

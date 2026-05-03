@@ -294,6 +294,14 @@ scripts:
     required: false
     ownership: scaffold
 
+  phasekit:
+    path: scripts/phasekit.sh
+    required: false
+    ownership: scaffold
+    # Thin shell wrapper around enrich-project.py — usable as
+    # `bash scripts/phasekit.sh --check .` from inside any
+    # phasekit-enriched project, or aliased system-wide.
+
 generation:
   output_root: generated
   skills_output_root: dist/skills
