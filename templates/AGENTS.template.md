@@ -4,7 +4,7 @@ This file provides guidance to AI coding agents (Claude Code, Cursor, Copilot, O
 
 ## Repository overview
 
-{{PROJECT_NAME}} was scaffolded from the `competent-developer-template`. It uses a phase-gated, audit-first workflow: work progresses through defined phases with explicit approval artifacts and git commits between each. Adapt this section to describe what {{PROJECT_NAME}} actually does once the spec is filled in.
+{{PROJECT_NAME}} was scaffolded from `phasekit`. It uses a phase-gated, audit-first workflow: work progresses through defined phases with explicit approval artifacts and git commits between each. Adapt this section to describe what {{PROJECT_NAME}} actually does once the spec is filled in.
 
 See `README.md` for product detail and `docs/SPEC.md` for the product specification.
 
@@ -101,7 +101,7 @@ Reject these excuses:
 
 ## Scaffold provenance
 
-This repo was enriched by the `competent-developer-template` scaffold. The provenance record is at `.scaffold/manifest.json` (committed, not gitignored). To audit, upgrade, or uninstall scaffold-installed files, use the scaffold's `enrich-project.py` engine. See `docs/INSTALL_LIFECYCLE.md` (if present) for the lifecycle contract.
+This repo was enriched by the `phasekit` scaffold. The provenance record is at `.scaffold/manifest.json` (committed, not gitignored). To audit, upgrade, or uninstall scaffold-installed files, use the scaffold's `enrich-project.py` engine. See `docs/INSTALL_LIFECYCLE.md` (if present) for the lifecycle contract.
 
 ## Cross-tool notes
 

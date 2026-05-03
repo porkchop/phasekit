@@ -1,7 +1,7 @@
 version: 1
 
 project:
-  name: competent-developer-template
+  name: phasekit
   mode:
     - scaffold
     - capability-packager

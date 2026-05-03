@@ -1,4 +1,4 @@
-# competent developer template
+# phasekit
 
 A reusable Claude Code project scaffold for methodical, phase-gated software delivery. Works in two modes: **interactive collaboration** (default) where you work directly with Claude, and **autonomous containerized execution** where a wrapper script drives Claude through phases unattended.
 

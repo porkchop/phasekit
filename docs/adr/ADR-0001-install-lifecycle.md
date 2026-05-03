@@ -8,7 +8,7 @@ Red-team reviews: `artifacts/red-team-review.md`, `artifacts/red-team-review-v2.
 
 ## Context
 
-The `competent-developer-template` scaffold installs subagents, hooks, settings, scripts, and documentation into downstream projects. Before M9, none of this was tracked: there was no record of which files came from the scaffold, which version installed them, or whether they had been hand-edited locally. This made upgrade silent (or destructive), uninstall guesswork, and drift undetectable. A real downstream project (`meewar2`) had already accumulated 19 lines of un-recorded hand-edits to `docs/QUALITY_GATES.md` and 5 agent files with project-specific extensions, exactly the failure mode the absence of provenance produces.
+The `phasekit` scaffold installs subagents, hooks, settings, scripts, and documentation into downstream projects. Before M9, none of this was tracked: there was no record of which files came from the scaffold, which version installed them, or whether they had been hand-edited locally. This made upgrade silent (or destructive), uninstall guesswork, and drift undetectable. A real downstream project (`meewar2`) had already accumulated 19 lines of un-recorded hand-edits to `docs/QUALITY_GATES.md` and 5 agent files with project-specific extensions, exactly the failure mode the absence of provenance produces.
 
 Constraints:
 

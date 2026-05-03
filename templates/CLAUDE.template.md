@@ -1,6 +1,6 @@
 # {{PROJECT_NAME}}
 
-This repository uses the competent developer workflow.
+This repository uses the phasekit workflow.
 
 ## Core operating rules
 - Work in audit-first mode

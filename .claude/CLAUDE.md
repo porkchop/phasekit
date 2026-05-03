@@ -1,4 +1,4 @@
-# Competent Developer Scaffold
+# Phasekit
 
 This repository is a reusable development operating system.
 
