@@ -73,13 +73,16 @@ while read -r cidr; do
     ipset add --exist allowed-domains "$cidr"
 done < <(echo "$gh_ranges" | jq -r '(.web + .api + .git)[]' | aggregate -q)
 
-# Resolve and add other allowed domains
+# Resolve and add other allowed domains.
+# DEVIATION FROM UPSTREAM: `statsig.anthropic.com` was removed because the
+# domain returns NXDOMAIN (verified 2026-05-03; upstream ships the entry
+# anyway and would also fail). Statsig telemetry continues to work via
+# `statsig.com`, which is the actual production endpoint.
 for domain in \
     "registry.npmjs.org" \
     "api.anthropic.com" \
     "claude.ai" \
     "sentry.io" \
-    "statsig.anthropic.com" \
     "statsig.com" \
     "marketplace.visualstudio.com" \
     "vscode.blob.core.windows.net" \
