@@ -116,6 +116,53 @@ Notes:
 - **If the concept genuinely fits in 30 minutes of conversation**, skip the formal walk-through entirely. This pattern is for ideas worth at least a half-day of work.
 - **For ongoing ideation on an existing project**, prefer `decision-memo.md` artifacts under `artifacts/` rather than reopening SPEC. SPEC describes the steady-state product; decision memos describe each material change.
 
+## Pattern 9 - Cloud-driven phase loop
+Use when the project should make progress unattended on a schedule (overnight builds, weekly auto-checks, multi-phase background work) without tying you to a local machine. Phasekit doesn't require local execution — the scaffold is just files (Python + bash + agents + docs), and any Claude session with git + filesystem + tooling can run it. Anthropic's hosted Claude Code (CCR routines) provides exactly that.
+
+The phase model maps cleanly onto the routine model: each routine invocation advances one phase, writes `artifacts/phase-approval.json`, commits, pushes; the next scheduled run picks up where the last one left off. No host-side loop required.
+
+Workflow:
+1. **Push the project to GitHub** (or another remote Claude Code routines can clone). The routine's sandbox is ephemeral, so all state must round-trip through git.
+2. **First-time enrichment.** Easier to do once locally (Pattern 1 / Pattern 2) before scheduling the loop. The downstream `.scaffold/manifest.json` is then committed and the cloud routine can take over.
+3. **Schedule the routine.** Use the `/schedule` slash command (or claude.ai/code/routines UI) to create a recurring or one-time CCR routine pointing at the project's GitHub URL. Prompt skeleton:
+   ```
+   You are continuing the phasekit phase loop on this repo.
+   1. Read AGENTS.md and docs/PHASES.md.
+   2. Run: python3 scripts/enrich-project.py --check . to verify clean state.
+   3. Identify the next unapproved phase (the earliest phase without a
+      matching artifacts/phase-approval.json entry).
+   4. Execute it per the audit-first protocol — invoke project-lead;
+      use strategy-planner / architecture-red-team for material design
+      decisions; run tests; require code-reviewer approval.
+   5. On phase completion, write artifacts/phase-approval.json, commit
+      with the suggested message, and push to origin/master.
+   6. If the phase produces a blocker (artifacts/phase-blocked.json),
+      stop and surface the blocker in your final reply.
+   ```
+4. **Schedule cadence.** Once-per-cron-tick advances one phase; back-to-back routines (chained via the next-run trigger or a separate orchestrator) can advance multiple. For a 6-phase project on a weekly cron, the project completes in 6 weeks unattended.
+5. **Review between runs.** Each routine writes a phase-approval artifact and pushes. You review the diff at your own pace; if a phase goes wrong, revert and edit the routine prompt before the next run.
+6. **Handle blockers.** When a routine writes `artifacts/phase-blocked.json`, the scheduled loop pauses pending your input. Resolve out-of-band (locally, in conversation), commit your resolution, and the next scheduled run resumes.
+
+What translates from local to cloud:
+- Subagents (`.claude/agents/*`), skills (`.claude/skills/*`), and the lifecycle scripts (`enrich-project.py` and friends) — pure files; run anywhere with git + Python.
+- The phase model, manifest schema, and approval-then-commit flow — the *outer wrapper* changes (cron instead of `run-until-done.sh`) but the inner contract is identical.
+
+What does NOT translate:
+- The `.devcontainer/` + firewall *containerized autonomous mode*. CCR is already a sandboxed cloud environment; running Docker-in-Docker inside it is not supported by most cloud sandboxes anyway, and isn't needed because the sandbox itself provides the isolation that mode was designed to give.
+- The `run-until-done.sh` host-side loop. The scheduling system *is* the loop; don't run a wrapper inside the routine.
+
+When local still wins:
+- **Active interactive development.** Fast feedback, lower token cost per turn, no commit/push round-trip.
+- **UI-heavy work needing visual review** (screenshots, browser state).
+- **Ad-hoc exploration** before committing to a phase plan — Pattern 8 plus local Claude Code is faster than designing a routine.
+
+When cloud actually wins:
+- **Unattended long-running builds** ("build this side project on weekends; review the PRs Monday").
+- **Scheduled drift audits** — cron `--check` against a downstream project; alert on non-zero exit.
+- **Team collaboration** without per-developer local-clone setup (especially once M9.3 ships and the agents are plugin-installable).
+
+Future improvement (queued, not blocking): once **M9.3 (plugin distribution)** lands, the routine prompt can drop the "clone phasekit alongside" step and instead `/plugin install phasekit-agents` at the start. Until then, the routine either includes phasekit as a git submodule of the project, or the prompt instructs Claude to clone it on-demand.
+
 ## When to use docs/DESIGN.md
 
 The optional `docs/DESIGN.md` artifact (M10) documents the steady-state system shape: subsystems, data flows, hot spots, and boundaries. Pair it with `SPEC.md` (what users see) and `ARCHITECTURE.md` (how code is organized).
