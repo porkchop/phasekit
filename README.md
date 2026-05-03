@@ -52,14 +52,29 @@ bash /path/to/scaffold/scripts/adopt-existing-repo.sh           # uses "default"
 
 This copies agents, hooks, scripts, and doc templates **without overwriting existing files**. Adapt the generated `docs/` to your current codebase state, then start the lead in audit mode to re-vet existing work.
 
-### Re-enriching a project
+### Lifecycle commands
 
-To update a previously scaffolded project with newer scaffold assets:
+After a project has been bootstrapped or adopted, all subsequent operations go through the `phasekit.sh` shell wrapper (or directly through `scripts/enrich-project.py`). The wrapper forwards any flag the engine supports.
 
 ```bash
-python3 /path/to/scaffold/scripts/enrich-project.py /path/to/project --profile default
-# preview first with --dry-run; overwrite with --force
+# From inside an enriched project:
+bash scripts/phasekit.sh --check .                              # detect drift
+bash scripts/phasekit.sh --upgrade --dry-run .                  # plan an upgrade
+bash scripts/phasekit.sh --upgrade --yes .                      # apply scaffold updates
+bash scripts/phasekit.sh --upgrade --keep-local docs/X.md .     # preserve project edits
+bash scripts/phasekit.sh --reconcile .                          # retrofit a pre-M9 project
+bash scripts/phasekit.sh --uninstall --include-once --yes .     # remove all scaffold files
 ```
+
+For frequent use, alias the scaffold's wrapper system-wide:
+
+```bash
+alias phasekit='bash /path/to/phasekit/scripts/phasekit.sh'
+phasekit --check ~/projects/myapp
+phasekit --upgrade --dry-run ~/projects/myapp
+```
+
+Best practice: always run `--upgrade --dry-run` first to inspect the plan, then re-invoke with `--keep-local PATH` for any scaffold-class file you've customized. See `docs/INSTALL_LIFECYCLE.md` for the full lifecycle contract, the ownership-class table, and the "What to commit" guidance.
 
 ## Quick start: autonomous mode (containerized)
 
@@ -172,7 +187,8 @@ examples/
 scripts/
   bootstrap-new-project.sh        # enrich a new project from a profile
   adopt-existing-repo.sh          # enrich an existing repo (no-overwrite)
-  enrich-project.py               # profile-based enrichment engine
+  phasekit.sh                     # wrapper for lifecycle commands (--check, --upgrade, etc.)
+  enrich-project.py               # profile-based enrichment + lifecycle engine
   run-phase.sh                    # run a single phase via Claude CLI
   run-until-done.sh               # autonomous phase loop
   container-setup.sh              # build/run/shell for Docker container
@@ -199,6 +215,7 @@ KICKOFF.md                        # entrypoint documentation
 | `docs/USAGE_PATTERNS.md` | Workflow patterns for different project types |
 | `docs/META_SPEC.md` | Scaffold self-improvement specification |
 | `docs/META_PHASES.md` | Self-improvement phase plan |
+| `docs/INSTALL_LIFECYCLE.md` | Install / upgrade / uninstall contract; "What to commit" guidance; ownership classes |
 
 ## Scaffold self-improvement
 
