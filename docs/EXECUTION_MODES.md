@@ -55,6 +55,7 @@ These scripts pass `--permission-mode bypassPermissions` to Claude. This flag on
 |---|---|---|
 | `CLAUDE_MODE` | `new` | Set to `continue` to resume a previous session |
 | `MAX_ITERATIONS` | `50` | Maximum phase iterations for `run-until-done.sh` |
+| `AUTO_PUSH` | (unset) | Set to `1` to push after each phase commit. Useful when the project needs CI to fire on each phase, github-pages-as-progress-mirror, or deploy previews. Pushes to the current branch's upstream (`git push` with no args). Push failures are non-fatal — the loop continues; the commit is already local. |
 
 ## Settings layering
 

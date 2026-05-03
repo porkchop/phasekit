@@ -101,6 +101,18 @@ ANTHROPIC_API_KEY='sk-ant-...' bash scripts/container-setup.sh run
 5. The wrapper commits, then starts the next iteration
 6. Loop stops when `artifacts/project-complete.json` appears, a blocker is written, or `MAX_ITERATIONS` (default 50) is reached
 
+### Optional: auto-push after each phase
+
+For projects whose feedback loop depends on CI / deploy previews / github-pages-as-progress-mirror, set `AUTO_PUSH=1` to have the wrapper `git push` after every phase commit. Failures are non-fatal — the commit is already local; the next iteration continues.
+
+```bash
+AUTO_PUSH=1 bash scripts/run-until-done.sh
+# or, in a containerized run:
+AUTO_PUSH=1 bash scripts/container-setup.sh run
+```
+
+Default off because pushes cascade side effects (CI runs, deploys, notifications). Enable per-project, not globally.
+
 The wrapper passes `--permission-mode bypassPermissions` — this flag only applies inside the container and does not affect interactive users.
 
 See `docs/CONTAINERIZATION.md` for full details on security model, firewall, environment variables, and troubleshooting.

@@ -41,6 +41,28 @@ print_json_summary() {
   jq -r '.' "$file"
 }
 
+auto_push_if_enabled() {
+  # Opt-in auto-push after a phase commit. Useful when the project needs
+  # CI to fire on each phase (e.g. github-pages-as-progress-mirror, deploy
+  # previews, integration tests in CI). Default off for safety — pushes are
+  # observable and can cascade side effects.
+  #
+  # Enable: AUTO_PUSH=1 bash scripts/run-until-done.sh
+  #
+  # Pushes to the current branch's upstream (git push with no args).
+  # Failures are non-fatal — the loop continues; the commit is already
+  # local and a future push will catch up.
+  if [[ "${AUTO_PUSH:-}" != "1" ]]; then
+    return 0
+  fi
+  echo "AUTO_PUSH=1 — pushing to remote..."
+  if git push 2>&1; then
+    echo "  Pushed."
+  else
+    echo "  WARN: git push failed (commit is local; continuing loop)" >&2
+  fi
+}
+
 commit_from_artifact() {
   local file="$1"
   local fallback_msg="$2"
@@ -63,6 +85,7 @@ commit_from_artifact() {
   fi
 
   git commit -m "$msg"
+  auto_push_if_enabled
 }
 
 run_once() {
