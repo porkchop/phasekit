@@ -56,6 +56,8 @@ These scripts pass `--permission-mode bypassPermissions` to Claude. This flag on
 | `CLAUDE_MODE` | `new` | Set to `continue` to resume a previous session |
 | `MAX_ITERATIONS` | `50` | Maximum phase iterations for `run-until-done.sh` |
 | `AUTO_PUSH` | (unset) | Set to `1` to push after each phase commit. Useful when the project needs CI to fire on each phase, github-pages-as-progress-mirror, or deploy previews. Pushes to the current branch's upstream (`git push` with no args). Push failures are non-fatal — the loop continues; the commit is already local. |
+| `SSH_AUTH_SOCK` | (host's value) | When invoked via `container-setup.sh run`, the host's SSH agent socket is forwarded into the container so `git push` to SSH remotes works. Run `ssh-add` on the host first. |
+| `GH_TOKEN` / `GITHUB_TOKEN` | (unset) | Passed through to the container if set, for HTTPS-remote push workflows that use a Personal Access Token. |
 
 ## Settings layering
 

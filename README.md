@@ -106,12 +106,25 @@ ANTHROPIC_API_KEY='sk-ant-...' bash scripts/container-setup.sh run
 For projects whose feedback loop depends on CI / deploy previews / github-pages-as-progress-mirror, set `AUTO_PUSH=1` to have the wrapper `git push` after every phase commit. Failures are non-fatal — the commit is already local; the next iteration continues.
 
 ```bash
+# Host-side loop (simplest — uses your existing git credentials):
 AUTO_PUSH=1 bash scripts/run-until-done.sh
-# or, in a containerized run:
-AUTO_PUSH=1 bash scripts/container-setup.sh run
 ```
 
-Default off because pushes cascade side effects (CI runs, deploys, notifications). Enable per-project, not globally.
+For container-mode auto-push, the container also needs git auth. The setup script forwards both:
+
+- **SSH remotes** (`git@github.com:...`): the container forwards your host's SSH agent if one is running. Run `ssh-add ~/.ssh/id_ed25519` on the host before invoking.
+- **HTTPS remotes with a token**: set `GH_TOKEN` (or `GITHUB_TOKEN`) on the host; it's passed through.
+
+```bash
+# SSH-remote case:
+eval "$(ssh-agent -s)" && ssh-add
+AUTO_PUSH=1 bash scripts/container-setup.sh run
+
+# Token-remote case:
+GH_TOKEN=ghp_... AUTO_PUSH=1 bash scripts/container-setup.sh run
+```
+
+Default off because pushes cascade side effects (CI runs, deploys, notifications). Enable per-project, not globally. If `git push` inside the container fails (no agent forwarded, no token, branch protection, etc.), the warning logs and the loop continues — you don't lose work.
 
 The wrapper passes `--permission-mode bypassPermissions` — this flag only applies inside the container and does not affect interactive users.
 

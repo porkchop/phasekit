@@ -111,6 +111,36 @@ run_container() {
     docker_args+=(-e SKIP_PLAYWRIGHT_MCP="$SKIP_PLAYWRIGHT_MCP")
   fi
 
+  # AUTO_PUSH=1 enables `git push` after every phase commit inside the loop.
+  # See scripts/run-until-done.sh and docs/EXECUTION_MODES.md for the contract.
+  if [[ -n "${AUTO_PUSH:-}" ]]; then
+    docker_args+=(-e AUTO_PUSH="$AUTO_PUSH")
+  fi
+
+  # Forward the host's SSH agent so `git push` to SSH remotes (git@github.com:…)
+  # works inside the container. No keys are copied — the container only sees
+  # the agent socket. Requires a running ssh-agent on the host with the right
+  # key loaded (`ssh-add ~/.ssh/id_ed25519`).
+  if [[ -n "${SSH_AUTH_SOCK:-}" ]] && [[ -S "$SSH_AUTH_SOCK" ]]; then
+    docker_args+=(-v "$SSH_AUTH_SOCK:/ssh-agent")
+    docker_args+=(-e SSH_AUTH_SOCK=/ssh-agent)
+  fi
+
+  # Mount known_hosts so the container trusts the same host keys as the host
+  # (avoids prompts for `git@github.com` etc. on first connection).
+  if [[ -f "$HOME/.ssh/known_hosts" ]]; then
+    docker_args+=(-v "$HOME/.ssh/known_hosts:/home/node/.ssh/known_hosts:ro")
+  fi
+
+  # GH_TOKEN / GITHUB_TOKEN for HTTPS-with-PAT push workflows. Pass through
+  # if set; container uses it via gh CLI or git credential helper.
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    docker_args+=(-e GH_TOKEN="$GH_TOKEN")
+  fi
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    docker_args+=(-e GITHUB_TOKEN="$GITHUB_TOKEN")
+  fi
+
   docker run "${docker_args[@]}" "$IMAGE_NAME" "${cmd[@]}"
 }
 
