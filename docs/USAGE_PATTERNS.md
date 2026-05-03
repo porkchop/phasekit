@@ -10,9 +10,10 @@ Workflow:
    ```
    This copies agents, docs, hooks, and generates `.claude/CLAUDE.md` using the manifest profile (default: `default`).
 2. customize `docs/SPEC.md`, `docs/ARCHITECTURE.md`, `docs/PHASES.md`, and `docs/PROD_REQUIREMENTS.md`
-3. let `project-lead` start at phase 0
-4. require planning memos for architecture choices
-5. iterate phase by phase until `project-complete.json`
+3. commit the scaffold-installed files. See `docs/INSTALL_LIFECYCLE.md` § "What to commit (and what to gitignore)" for the canonical list and a `.gitignore` snippet for runtime-only paths (`.claude/settings.local.json`, `.scaffold/manifest.json.lock`, `*.scaffold-tmp`).
+4. let `project-lead` start at phase 0
+5. require planning memos for architecture choices
+6. iterate phase by phase until `project-complete.json`
 
 ## Pattern 2 - Existing repo adoption
 Use when code already exists and needs methodical continuation.

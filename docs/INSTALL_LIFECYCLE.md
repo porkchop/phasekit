@@ -39,6 +39,51 @@ The manifest records:
   - `installed_at` (UTC)
   - For `bootstrap-with-template-tracking`: `rendered_from` and `template_sha`
 
+## What to commit (and what to gitignore)
+
+Phasekit installs files and produces runtime artifacts. Most of what it installs is project-shared (commit it); a few specific paths are runtime-only or per-user (gitignore them).
+
+### Always commit
+
+Everything the scaffold installs into the project, plus everything the workflow produces:
+
+- **All scaffold-installed files** — `.claude/agents/`, `.claude/hooks/`, `.claude/skills/`, `.claude/settings.json`, `.claude/CLAUDE.md`, `docs/*.md` (both scaffold-canonical and rendered project docs), `scripts/run-phase.sh`, `scripts/run-until-done.sh`, `CONTINUE_PROMPT.txt`, `AGENTS.md`, `.devcontainer/*`, `scripts/container-setup.sh`, `scripts/verify-container.sh`. These define the project's workflow contract and must be shared with the team.
+- **`.scaffold/manifest.json`** — the provenance record. **Must** be committed (engine warns when gitignored). This is how `--check` and `--upgrade` know what scaffold version installed what.
+- **`artifacts/phase-approval.json`** — the gate every phase ends with.
+- **`artifacts/decision-memo.md`** and any `artifacts/*.md` review documents (red-team reviews, code reviews) — the audit trail.
+- **`artifacts/phase-blocked.json`** when present — surfaces blockers for the next session.
+- **`artifacts/project-complete.json`** when present — final completion artifact.
+- **`docs/adr/ADR-NNNN-*.md`** — your project's architectural decision records.
+- **`docs/DESIGN.md`** if the `with-design` profile is active — the steady-state design (M10).
+
+### Always gitignore
+
+These are runtime-only or per-user artifacts:
+
+- **`.claude/settings.local.json`** — per-user overrides (often permissive); not project-shared.
+- **`.scaffold/manifest.json.lock`** — fcntl.flock advisory lockfile; runtime-only.
+- **`*.scaffold-tmp`** — orphan temp files from atomic copy interrupts; swept by the engine on next run, but might briefly exist.
+
+### Copy-pasteable `.gitignore` snippet
+
+If your project doesn't already have these entries, append:
+
+```gitignore
+# Phasekit — per-user and runtime-only artifacts
+.claude/settings.local.json
+.scaffold/manifest.json.lock
+*.scaffold-tmp
+```
+
+Project-language gitignores (`node_modules/`, `.venv/`, build outputs, etc.) are the project's concern and aren't covered by phasekit. Keep them in your existing `.gitignore` alongside the snippet above.
+
+### Notes
+
+- **`AGENTS.md` at project root** is rendered with your project name and is `bootstrap-with-template-tracking` — write your project-specific guidance into it; future template improvements surface as advisory drift via `--check --include-templates`, never auto-overwriting your edits.
+- **`docs/SPEC.md`, `docs/ARCHITECTURE.md`, `docs/PHASES.md`, `docs/PROD_REQUIREMENTS.md`** are `bootstrap-frozen` — written once, never re-rendered. Customize freely.
+- **`.claude/agents/<name>.md`** files are `scaffold` class — you can extend them with project-specific rules (use `--keep-local` on `--upgrade` to preserve those edits until M9.4 ships overlay support).
+- **`artifacts/`** as a directory should always exist (the engine creates it during enrichment) but its contents accumulate over time as phases land. Each artifact you commit is a piece of the project's audit trail.
+
 ## Ownership classes (M9 §2)
 
 | Class | Behavior on upgrade |
