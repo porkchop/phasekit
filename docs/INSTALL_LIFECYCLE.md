@@ -97,6 +97,33 @@ Migrated manifest from schema v1 to v2.
 
 `--migrate-only` rewrites the on-disk manifest without other side effects. Migrations are linear-chain pure functions in `scripts/migrations/`; the engine composes them in order.
 
+## Best practice: always `--upgrade --dry-run` first
+
+`--upgrade --yes` is convenient but it auto-takes scaffold-new for any file in the **`update-available`** state — i.e., the file matches the manifest sha (clean from the manifest's perspective) but the scaffold has a newer canonical version. This is correct as a default for files the team has not customized.
+
+The trap: when a downstream project has customizations that pre-date the manifest baseline (e.g. agent files extended with project-specific rules before `--reconcile` snapshotted them), those files appear `update-available` rather than `drifted`. The default action overwrites them silently.
+
+**The discipline:**
+
+```bash
+# 1. See the plan first; never apply blind
+python3 enrich-project.py --upgrade --dry-run ~/projects/myapp
+
+# 2. Identify any files in [take-new] that you have customized
+#    (project-specific agent rules, hand-edits to bootstrap-* files,
+#    anything you intentionally diverged from canonical scaffold)
+
+# 3. Re-run with explicit --keep-local for each of those files
+python3 enrich-project.py --upgrade --yes \
+    --keep-local .claude/agents/code-reviewer.md \
+    --keep-local .claude/agents/qa-playwright.md \
+    ~/projects/myapp
+```
+
+If a project genuinely has no customizations, `--upgrade --yes` without flags is fine. The risk scales with how heavily the project has extended scaffold-installed files. Until **M9.4 (subagent overlay mechanism)** ships — which lets customizations live alongside scaffold updates without per-file flag handling — this dry-run-first discipline is the working stop-gap.
+
+A quick way to inventory likely-customized files: run `python3 enrich-project.py --check ~/projects/myapp` first. Anything reported as `DRIFT:` is a definite candidate for `--keep-local`. The trickier cases are files in `update-available` (clean against manifest, behind canonical) — those don't surface in `--check`, only in `--upgrade --dry-run`.
+
 ## Reserved conventions
 
 These are reserved by M9 for future sub-phases. Do not use them yet:
