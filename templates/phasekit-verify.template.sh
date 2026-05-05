@@ -21,14 +21,18 @@
 #   VERIFY_SKIP=1              Skip verify entirely for this iteration
 #                              (use sparingly — e.g. docs-only phases or
 #                              TDD phases that intentionally commit red).
-#
-# Customize the commands below for {{PROJECT_NAME}}. Defaults are commented
-# out; uncomment the ones that match your stack and remove the rest.
 
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+
+# ============================================================================
+# CONFIGURE: uncomment the checks that match your stack.
+#
+# Once you've enabled at least one real check, FLIP THE SENTINEL below to "1"
+# so the stub-mode warning at the bottom of this file stops firing.
+# ============================================================================
 
 # --- Node / TypeScript projects -------------------------------------------
 # npm run lint
@@ -44,8 +48,17 @@ cd "$ROOT_DIR"
 # go vet ./...
 # go test ./...
 
-# --- Default (no checks configured) ---------------------------------------
-# Until you uncomment real checks above, this script no-ops with a warning.
-# The loop continues, but you lose the gate's value. Configure ASAP.
-echo "phasekit-verify.sh: no checks configured — edit scripts/phasekit-verify.sh" >&2
+# ============================================================================
+# Sentinel — set to "1" once at least one real check above is enabled. While
+# this is "0", the gate fail-opens (the loop continues) but the stub message
+# below fires every iteration as a reminder that {{PROJECT_NAME}}'s verify
+# isn't actually configured yet.
+# ============================================================================
+PHASEKIT_VERIFY_CONFIGURED=0
+
+if [[ "$PHASEKIT_VERIFY_CONFIGURED" != "1" ]]; then
+  echo "phasekit-verify.sh: STUB MODE — no checks configured." >&2
+  echo "  Edit scripts/phasekit-verify.sh, enable real checks, set" >&2
+  echo "  PHASEKIT_VERIFY_CONFIGURED=1 in this file. See docs/QUALITY_GATES.md." >&2
+fi
 exit 0

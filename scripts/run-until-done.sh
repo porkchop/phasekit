@@ -94,11 +94,17 @@ run_verify_gate() {
   echo "Pre-commit verify: $label"
   local log
   log="$(mktemp)"
+  # Ensure the log tmpfile is removed even if we're interrupted mid-verify.
+  trap 'rm -f "$log"' RETURN
   local verify_status=0
   if [[ "$invoke" == "bash" ]]; then
+    # Project's script provides its own set -e/pipefail.
     bash "$cmd" >"$log" 2>&1 || verify_status=$?
   else
-    bash -c "$cmd" >"$log" 2>&1 || verify_status=$?
+    # PHASEKIT_VERIFY_CMD may be a multi-command compound (e.g.
+    # "lint && test"). Force -eo pipefail so a failing earlier
+    # command isn't masked by a successful tail.
+    bash -eo pipefail -c "$cmd" >"$log" 2>&1 || verify_status=$?
   fi
   if [[ "$verify_status" -eq 0 ]]; then
     echo "  Verify passed."
@@ -220,6 +226,17 @@ run_once() {
 }
 
 iteration=1
+
+# Fresh-kickoff reset: phase-verify-failed.json is intentionally preserved
+# across iterations within a run, but a *new* run starts a fresh attempt
+# budget. Without this reset, a prior run interrupted at attempt 2 would
+# circuit-break on the very next failure even after the user has fixed
+# the underlying issue.
+if [[ "$CLAUDE_MODE" == "new" && -f "$ARTIFACTS_DIR/phase-verify-failed.json" ]]; then
+  echo "Fresh kickoff (CLAUDE_MODE=new) — clearing stale phase-verify-failed.json from prior run."
+  rm -f "$ARTIFACTS_DIR/phase-verify-failed.json"
+fi
+
 while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   echo "=== Iteration $iteration ==="
   cleanup_artifacts

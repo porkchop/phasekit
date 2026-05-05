@@ -126,6 +126,8 @@ On failure:
 - the next iteration's `CONTINUE_PROMPT.txt` directs Claude to fix the failure before doing any new phase work
 - after `VERIFY_MAX_ATTEMPTS` (default 3) consecutive failures on the same artifact, the wrapper writes `artifacts/phase-blocked.json` and exits so a human can intervene
 
+To recover from a circuit-break: fix the underlying failure (or set `VERIFY_SKIP=1` if the next iteration legitimately needs to commit red), then re-run `scripts/run-until-done.sh`. The wrapper resets the verify-attempt counter at the start of any fresh `CLAUDE_MODE=new` run; `phase-blocked.json` is cleared automatically by the iteration's `cleanup_artifacts` step.
+
 Escape hatches:
 - `VERIFY_SKIP=1` bypasses the gate for one iteration (use sparingly — docs-only phases or TDD phases that intentionally commit a red test)
 - `PHASEKIT_VERIFY_CMD="..."` overrides the script with a one-shot command
