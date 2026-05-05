@@ -14,6 +14,7 @@ These are excuses agents (and humans) reach for when they want to skip a gate. E
 | "I'll skip the planner — the design is obvious" | The planning gate exists for changes that cross layers, touch persistence/auth, or have multiple plausible strategies. 'Obvious' is what missed-the-tradeoff sounds like before review. |
 | "I'll loosen project settings just for this run" | Project settings are shared. Permissive execution belongs in `settings.local.json` or CLI flags, never committed. |
 | "Code review can wait until after merge" | The review gate catches duplication, missed drift, and architecture violations the implementer is least likely to see. After-merge review is a documentation step, not a gate. |
+| "I'll push anyway, CI will catch it" | CI is shared infrastructure. Broken master pages humans, blocks deploys, and disrupts other consumers of the loop. The pre-commit verify gate exists so easy classes of failure are caught locally. |
 | "I'll skip the verification sprint — nothing changed there" | Cumulative regressions are the failure mode the sprint exists to catch. 'Nothing changed' is an assumption, not evidence. |
 | "Discovered work can wait for a later phase" | Discovered work that blocks the current phase is part of the current phase. Deferring it produces phases that pass review but don't actually deliver. |
 
@@ -107,8 +108,29 @@ must include:
 Claude must stop after writing `artifacts/phase-approval.json`.
 The host-side wrapper is responsible for:
 1. reading the approval artifact
-2. creating a git commit
-3. resuming Claude for the next phase
+2. running the pre-commit verification gate (see below)
+3. creating a git commit
+4. resuming Claude for the next phase
+
+## Pre-commit verification gate
+The wrapper runs a project-defined fast-check command before creating any phase commit, regardless of whether `AUTO_PUSH` is enabled. Mechanism lives in the scaffold (`scripts/run-until-done.sh`); policy lives in the project (`scripts/phasekit-verify.sh`).
+
+Scope of the verify command:
+- fast checks only — lint, typecheck, formatter, unit tests
+- **not** full E2E or integration suites (those belong to the verification-sprint gate, which Claude drives at phase boundaries)
+- target under ~30 seconds; this runs every iteration
+
+On failure:
+- the commit is **not** created
+- the wrapper writes `artifacts/phase-verify-failed.json` with the failing command, exit code, attempt counter, and a tail of the output
+- the next iteration's `CONTINUE_PROMPT.txt` directs Claude to fix the failure before doing any new phase work
+- after `VERIFY_MAX_ATTEMPTS` (default 3) consecutive failures on the same artifact, the wrapper writes `artifacts/phase-blocked.json` and exits so a human can intervene
+
+Escape hatches:
+- `VERIFY_SKIP=1` bypasses the gate for one iteration (use sparingly — docs-only phases or TDD phases that intentionally commit a red test)
+- `PHASEKIT_VERIFY_CMD="..."` overrides the script with a one-shot command
+
+Configuration is project-owned: edit `scripts/phasekit-verify.sh` (rendered into the project at enrich time) to declare the right fast checks for the stack. Until configured, the gate fail-opens with a warning so un-instrumented projects continue to work.
 
 ## Suggested phase approval artifact
 

@@ -128,6 +128,19 @@ Default off because pushes cascade side effects (CI runs, deploys, notifications
 
 The wrapper passes `--permission-mode bypassPermissions` — this flag only applies inside the container and does not affect interactive users.
 
+### Pre-commit verification gate
+
+The wrapper runs `scripts/phasekit-verify.sh` before every phase commit (whether or not AUTO_PUSH is set). A non-zero exit blocks the commit, writes `artifacts/phase-verify-failed.json`, and the next iteration directs Claude to fix the failure before doing new work. After three consecutive failures the loop stops with `phase-blocked.json`.
+
+Enrichment renders a stub at `scripts/phasekit-verify.sh` — edit it to call your stack's fast checks (lint, typecheck, unit tests). Aim for under ~30 seconds; full E2E belongs to the verification-sprint gate, not this one.
+
+Overrides:
+- `PHASEKIT_VERIFY_CMD="..."` — one-shot override, bypasses the script
+- `VERIFY_SKIP=1` — skip the gate for one iteration (docs-only or TDD red-commit phases)
+- `VERIFY_MAX_ATTEMPTS=N` — change the circuit-breaker threshold (default 3)
+
+Until you customize the stub it no-ops with a warning, so existing projects keep working with no change.
+
 See `docs/CONTAINERIZATION.md` for full details on security model, firewall, environment variables, and troubleshooting.
 
 ## Profiles

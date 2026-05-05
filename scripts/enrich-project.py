@@ -1518,6 +1518,17 @@ def enumerate_install_targets(scaffold_manifest, resolved_profile):
         "rendered_from": "templates/AGENTS.template.md",
     })
 
+    # Downstream scripts/phasekit-verify.sh (rendered from
+    # templates/phasekit-verify.template.sh). Backs the pre-commit
+    # verification gate in run-until-done.sh; project owns the file
+    # after install (bootstrap-with-template-tracking).
+    specs.append({
+        "path": "scripts/phasekit-verify.sh",
+        "ownership": "bootstrap-with-template-tracking",
+        "text": True,
+        "rendered_from": "templates/phasekit-verify.template.sh",
+    })
+
     # Always-installed flat files
     for path in ALWAYS_INSTALLED_FILE_PATHS:
         f_entry = files_section.get(path, {})

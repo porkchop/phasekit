@@ -401,6 +401,12 @@ files:
     # `.claude/settings.json`; the scaffold's own `.claude/settings.json`
     # must stay in sync (enforced by future M9.x lint).
 
+  templates/phasekit-verify.template.sh:
+    ownership: scaffold-template
+    # Rendered into downstream scripts/phasekit-verify.sh as
+    # bootstrap-with-template-tracking. Sourced by run-until-done.sh's
+    # pre-commit verify gate (see docs/QUALITY_GATES.md).
+
   templates/skill/SKILL.template.md:
     ownership: scaffold-template
 

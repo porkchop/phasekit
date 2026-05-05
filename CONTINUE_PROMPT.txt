@@ -49,8 +49,9 @@ How to determine what is already approved:
 - Start work on the next phase after that
 
 First task:
-1. Read `artifacts/phase-approval.json` to find the last approved phase
-2. Identify the next unapproved phase from docs/META_PHASES.md or docs/PHASES.md
-3. List the minimum work needed for that phase
-4. Execute only that phase
-5. Stop after approval, phase update, blocker, or completion
+1. If `artifacts/phase-verify-failed.json` exists, the previous iteration's commit was blocked by the pre-commit verification gate. Treat fixing that failure as the highest-priority work for this iteration — read the artifact's `command`, `log_tail`, and `attempts` fields, then fix the underlying problem before doing any new phase work. Re-write `artifacts/phase-approval.json` (preserving the same phase identity) when the fix is in place; the wrapper will retry the commit.
+2. Read `artifacts/phase-approval.json` to find the last approved phase
+3. Identify the next unapproved phase from docs/META_PHASES.md or docs/PHASES.md
+4. List the minimum work needed for that phase
+5. Execute only that phase
+6. Stop after approval, phase update, blocker, or completion
