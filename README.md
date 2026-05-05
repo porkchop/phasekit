@@ -74,6 +74,17 @@ phasekit --check ~/projects/myapp
 phasekit --upgrade --dry-run ~/projects/myapp
 ```
 
+Bootstrap and adopt are run from inside the target directory (each takes an optional profile name, default `default`). Worth a dedicated alias so you don't have to remember the script path:
+
+```bash
+alias phasekit-bootstrap='bash /path/to/phasekit/scripts/bootstrap-new-project.sh'
+alias phasekit-adopt='bash /path/to/phasekit/scripts/adopt-existing-repo.sh'
+
+# Then, from inside the project:
+cd ~/projects/myapp && phasekit-bootstrap saas-project
+cd ~/projects/legacy-app && phasekit-adopt
+```
+
 Best practice: always run `--upgrade --dry-run` first to inspect the plan, then re-invoke with `--keep-local PATH` for any scaffold-class file you've customized. See `docs/INSTALL_LIFECYCLE.md` for the full lifecycle contract, the ownership-class table, and the "What to commit" guidance.
 
 ## Quick start: autonomous mode (containerized)
