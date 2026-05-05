@@ -112,6 +112,16 @@ ANTHROPIC_API_KEY='sk-ant-...' bash scripts/container-setup.sh run
 5. The wrapper commits, then starts the next iteration
 6. Loop stops when `artifacts/project-complete.json` appears, a blocker is written, or `MAX_ITERATIONS` (default 50) is reached
 
+To cap the run at a small number of iterations — handy for smoke-testing a setup, validating a single phase, or stopping after a fixed billable budget — set `MAX_ITERATIONS` on the command line:
+
+```bash
+MAX_ITERATIONS=1 bash scripts/run-until-done.sh                   # one phase then stop
+MAX_ITERATIONS=2 AUTO_PUSH=1 bash scripts/run-until-done.sh       # two phases with push
+MAX_ITERATIONS=3 bash scripts/container-setup.sh run              # also works in container mode
+```
+
+The wrapper exits 0 on a clean stop, 2 on a blocker, 3 if it hits `MAX_ITERATIONS` without project completion.
+
 ### Optional: auto-push after each phase
 
 For projects whose feedback loop depends on CI / deploy previews / github-pages-as-progress-mirror, set `AUTO_PUSH=1` to have the wrapper `git push` after every phase commit. Failures are non-fatal — the commit is already local; the next iteration continues.
