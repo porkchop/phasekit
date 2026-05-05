@@ -4,6 +4,7 @@ Before doing substantive work:
 1. Re-read the current checked-in source of truth from disk.
 2. Prefer the latest repository state over any prior session assumptions.
 3. Treat previous plans as provisional unless they still match the current files.
+4. Untracked files or unstaged changes in the working tree are work-in-progress from a previously interrupted run, not noise. Inspect them, decide whether they belong to the current phase, and either fold them in or discard them deliberately — do not ignore them.
 
 Read and follow, in this order, if present:
 - .claude/CLAUDE.md
