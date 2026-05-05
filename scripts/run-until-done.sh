@@ -94,8 +94,6 @@ run_verify_gate() {
   echo "Pre-commit verify: $label"
   local log
   log="$(mktemp)"
-  # Ensure the log tmpfile is removed even if we're interrupted mid-verify.
-  trap 'rm -f "$log"' RETURN
   local verify_status=0
   if [[ "$invoke" == "bash" ]]; then
     # Project's script provides its own set -e/pipefail.
