@@ -262,6 +262,15 @@ scripts:
     required: true
     ownership: scaffold
 
+  phasekit-log-fmt:
+    path: scripts/phasekit-log-fmt.sh
+    required: true
+    ownership: scaffold
+    # Pretty-printer for the stream-json events written by run-phase.sh.
+    # Always installed alongside run-phase so the .log file is human-readable;
+    # run-phase falls back to `cat` if absent, but downstream provisioning is
+    # the supported path. See docs/EXECUTION_MODES.md "Visibility and logs".
+
   generate-skill:
     path: scripts/generate-skill.py
     required: true

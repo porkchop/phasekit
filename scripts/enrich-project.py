@@ -1418,6 +1418,7 @@ ALWAYS_INSTALLED_FILE_PATHS = (
     "scripts/container-setup.sh",
     "scripts/verify-container.sh",
     "scripts/phasekit.sh",
+    "scripts/phasekit-log-fmt.sh",
     ".devcontainer/devcontainer.json",
     ".devcontainer/Dockerfile",
     ".devcontainer/entrypoint.sh",
