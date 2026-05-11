@@ -158,7 +158,8 @@ This registers the server in your user-level Claude configuration. Add `--headle
 |---|---|---|
 | `ANTHROPIC_API_KEY` | (optional) | API key for pay-per-token auth; omit to use stored subscription credentials |
 | `MAX_ITERATIONS` | `50` | Phase loop iteration limit |
-| `CLAUDE_MODE` | `new` | Set to `continue` to resume a session |
+| `CLAUDE_MODE` | `new` | Set to `continue` to resume a previous session (forwarded into the container) |
+| `PHASEKIT_ITER_RETRY` | `1` | Retry budget per iteration on a transient `claude` CLI failure; see `docs/EXECUTION_MODES.md` |
 | `IMAGE_NAME` | `scaffold-runner` | Docker image name |
 | `CLAUDE_VOLUME` | `scaffold-claude-config` | Named Docker volume for `~/.claude` credential persistence |
 | `GIT_USER_NAME` | `Scaffold Runner` | Git author name for commits |

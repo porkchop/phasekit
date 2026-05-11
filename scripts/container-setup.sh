@@ -117,6 +117,20 @@ run_container() {
     docker_args+=(-e AUTO_PUSH="$AUTO_PUSH")
   fi
 
+  # CLAUDE_MODE controls whether the inner loop starts a fresh session (`new`,
+  # default) or resumes the most recent one (`continue`). Forward so users can
+  # manually continue a run that crashed mid-iteration without editing scripts:
+  #   CLAUDE_MODE=continue bash scripts/container-setup.sh run
+  if [[ -n "${CLAUDE_MODE:-}" ]]; then
+    docker_args+=(-e CLAUDE_MODE="$CLAUDE_MODE")
+  fi
+
+  # PHASEKIT_ITER_RETRY caps per-iteration retries on transient claude CLI
+  # failures (filter trips, 5xx, etc.). See scripts/run-until-done.sh.
+  if [[ -n "${PHASEKIT_ITER_RETRY:-}" ]]; then
+    docker_args+=(-e PHASEKIT_ITER_RETRY="$PHASEKIT_ITER_RETRY")
+  fi
+
   # Forward the host's SSH agent so `git push` to SSH remotes (git@github.com:…)
   # works inside the container. No keys are copied — the container only sees
   # the agent socket. Requires a running ssh-agent on the host with the right

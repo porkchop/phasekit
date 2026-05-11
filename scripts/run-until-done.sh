@@ -225,6 +225,15 @@ run_once() {
 
 iteration=1
 
+# Per-iteration retry budget for transient claude CLI failures (e.g. an
+# API-side content-filter trip that aborts a response mid-stream, a 5xx, or
+# a transient network blip). On a non-zero exit from claude we re-attempt
+# the same iteration in `continue` mode, up to PHASEKIT_ITER_RETRY times,
+# without advancing the iteration counter. Set to 0 to disable retries and
+# exit on the first failure (the pre-retry historical behavior).
+ITER_RETRY_LIMIT="${PHASEKIT_ITER_RETRY:-1}"
+retries_used=0
+
 # Fresh-kickoff reset: phase-verify-failed.json is intentionally preserved
 # across iterations within a run, but a *new* run starts a fresh attempt
 # budget. Without this reset, a prior run interrupted at attempt 2 would
@@ -239,11 +248,26 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   echo "=== Iteration $iteration ==="
   cleanup_artifacts
 
-  if [[ "$iteration" -eq 1 && "$CLAUDE_MODE" == "new" ]]; then
-    run_once "$PROMPT_FILE" "new"
+  # First attempt of iteration 1 in `new` mode uses fresh-session semantics;
+  # retries (and every later iteration) use `continue` so they resume the
+  # session that was just established rather than starting a new one.
+  rc=0
+  if [[ "$iteration" -eq 1 && "$CLAUDE_MODE" == "new" && "$retries_used" -eq 0 ]]; then
+    run_once "$PROMPT_FILE" "new" || rc=$?
   else
-    run_once "$PROMPT_FILE" "continue"
+    run_once "$PROMPT_FILE" "continue" || rc=$?
   fi
+
+  if [[ "$rc" -ne 0 ]]; then
+    if [[ "$retries_used" -lt "$ITER_RETRY_LIMIT" ]]; then
+      retries_used=$((retries_used + 1))
+      echo "Iteration $iteration: claude exited $rc; retrying in continue mode (retry $retries_used/$ITER_RETRY_LIMIT)." >&2
+      continue
+    fi
+    echo "Iteration $iteration: claude exited $rc; per-iteration retry budget exhausted." >&2
+    exit "$rc"
+  fi
+  retries_used=0
 
   if [[ -f "$ARTIFACTS_DIR/project-complete.json" ]]; then
     echo "Project complete artifact detected:"
