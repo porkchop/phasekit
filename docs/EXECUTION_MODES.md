@@ -63,20 +63,31 @@ These scripts pass `--permission-mode bypassPermissions` to Claude. This flag on
 
 ### Visibility and logs
 
-`run-phase.sh` passes `--verbose` to `claude -p`, so the CLI streams tool calls and intermediate text as the model works rather than going silent until the final response. The combined stdout/stderr of each `claude` invocation is also tee'd to a per-iteration log:
+`run-phase.sh` invokes the claude CLI with `--output-format stream-json --include-partial-messages --verbose`, so every assistant message, tool call, tool result, and even partial in-flight chunks are emitted as JSONL events in real time. The default `-p text` mode is silent until the final response, which is useless when claude crashes mid-stream (e.g. an API content-filter trip).
+
+Two files are produced per attempt under `artifacts/logs/`:
 
 ```
-artifacts/logs/claude-iter-<N>.log          # first attempt of iteration N
-artifacts/logs/claude-iter-<N>-retry<M>.log # M-th retry of iteration N
+claude-iter-<N>.jsonl           raw stream-json events (full fidelity, forensics)
+claude-iter-<N>.log             human-readable rendering of the same stream
+claude-iter-<N>-retry<M>.jsonl  M-th retry of iteration N (raw)
+claude-iter-<N>-retry<M>.log    M-th retry of iteration N (rendered)
 ```
 
-For a live view of a long-running loop (e.g. one started in a remote tmux session), open a second pane and `tail -F` the current iteration's log:
+The `*.log` file is produced by `scripts/phasekit-log-fmt.sh`, a small jq pretty-printer that turns each JSON event into a labelled line (`[text] ...`, `[tool_use] Bash {"command":"..."}`, `[tool_result] ...`, `[partial] ...`, `[result success] ...`). Non-JSON lines from stderr (such as `API Error: Output blocked by content filtering policy`) pass through unchanged so they still land in the log next to the events.
+
+For a live view of a long-running loop (e.g. one started in a remote tmux session), open a second pane and `tail -F` the current iteration's `.log`:
 
 ```bash
 tail -F artifacts/logs/claude-iter-3.log
 ```
 
-After a crash, the most recent `claude-iter-*.log` files contain the full transcript of what claude was generating when it failed — useful for diagnosing content-filter trips and similar mid-stream aborts.
+After a crash, the most recent `claude-iter-*.log` files contain the rendered transcript of what claude was generating when it failed. If you need more detail than the rendering exposes, run the raw JSONL through the formatter (or `jq`) directly:
+
+```bash
+bash scripts/phasekit-log-fmt.sh < artifacts/logs/claude-iter-1.jsonl | less
+jq -c 'select(.type == "assistant")' artifacts/logs/claude-iter-1.jsonl
+```
 
 `PHASEKIT_TRACE=1` additionally enables `set -x` in the wrapper scripts themselves, so every shell command they run (git commits, verify-gate invocations, artifact cleanup) is printed before execution.
 

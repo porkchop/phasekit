@@ -21,20 +21,43 @@ cd "$ROOT_DIR"
 # this script is invoked directly we fall back to "manual". On retries the
 # loop also passes PHASEKIT_RETRY_ATTEMPT so prior attempts' logs are not
 # overwritten — useful when the first attempt and its retry fail differently.
+#
+# Two files are produced per attempt:
+#   *.jsonl  raw stream-json events from the claude CLI (machine-readable,
+#            full fidelity — keep this for forensics on a mid-stream abort
+#            like an API content-filter trip)
+#   *.log    human-readable rendering produced by phasekit-log-fmt.sh
+#            (tail -F this for a live view of the loop)
 LOG_DIR="$ROOT_DIR/artifacts/logs"
 mkdir -p "$LOG_DIR"
 ATTEMPT_TAG=""
 if [[ "${PHASEKIT_RETRY_ATTEMPT:-0}" -gt 0 ]]; then
   ATTEMPT_TAG="-retry${PHASEKIT_RETRY_ATTEMPT}"
 fi
+RAW_LOG="$LOG_DIR/claude-iter-${PHASEKIT_ITER:-manual}${ATTEMPT_TAG}.jsonl"
 LOG_FILE="$LOG_DIR/claude-iter-${PHASEKIT_ITER:-manual}${ATTEMPT_TAG}.log"
-echo "Logging claude output to: $LOG_FILE"
+FORMATTER="$ROOT_DIR/scripts/phasekit-log-fmt.sh"
+echo "Logging claude output to: $LOG_FILE (raw JSONL: $RAW_LOG)"
 
-# --verbose makes -p print tool calls and intermediate text as claude works
-# (without it, -p is silent until the final response). pipefail propagates
-# claude's exit code through tee so the caller still sees non-zero on failure.
+# stream-json emits realtime events (assistant text, tool_use, tool_result,
+# partial message chunks before the model finalizes a response). Without it,
+# -p text only prints the final response — useless when claude crashes
+# mid-stream. --include-partial-messages captures the in-flight text right
+# up to the moment of a filter trip or other API abort.
+#
+# 2>&1 mixes claude's stderr (e.g. "API Error: ...") into the pipe; the
+# formatter passes non-JSON lines through unchanged so those errors still
+# land in *.log alongside the JSON events.
+#
+# pipefail propagates a non-zero exit anywhere in the pipeline (most
+# importantly claude's), so the caller still sees failure.
+CLAUDE_FLAGS=(--permission-mode bypassPermissions --verbose
+              --output-format stream-json --include-partial-messages)
 if [[ "$CLAUDE_MODE" == "continue" ]]; then
-  claude --permission-mode bypassPermissions --verbose -c -p "$PROMPT_CONTENT" 2>&1 | tee "$LOG_FILE"
-else
-  claude --permission-mode bypassPermissions --verbose -p "$PROMPT_CONTENT" 2>&1 | tee "$LOG_FILE"
+  CLAUDE_FLAGS+=(-c)
 fi
+
+claude "${CLAUDE_FLAGS[@]}" -p "$PROMPT_CONTENT" 2>&1 \
+  | tee "$RAW_LOG" \
+  | bash "$FORMATTER" \
+  | tee "$LOG_FILE"
