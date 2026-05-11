@@ -8,6 +8,7 @@ This repository is a reusable development operating system.
 - Prefer minimal, backward-compatible changes
 - Stop after writing `artifacts/phase-approval.json`
 - Do not proceed past a phase until the repository has been committed externally
+- Any new tracked file (script, devcontainer asset, doc, template, …) must be registered in `capabilities/project-capabilities.yaml` and, if it should ship to downstream projects, in `ALWAYS_INSTALLED_FILE_PATHS` in `scripts/enrich-project.py`. Run `python3 scripts/enrich-project.py --self-check` before committing. See `CONTRIBUTING.md` "Adding a new tracked file" for the full procedure. Unregistered files pass local tests but silently fail to provision downstream on `phasekit --upgrade`.
 
 ## Execution mode rules
 - Prefer normal interactive collaboration mode by default

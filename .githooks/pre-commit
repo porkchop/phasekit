@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Phasekit pre-commit hook.
+#
+# Runs `python3 scripts/enrich-project.py --self-check` so every tracked
+# file is classified by the install manifest before a commit lands. The
+# previous failure mode: a contributor adds a new file under scripts/ or
+# .devcontainer/ without registering it in capabilities/project-capabilities.yaml
+# or ALWAYS_INSTALLED_FILE_PATHS. Self-check passes locally (the file is
+# untracked) and the gap only surfaces downstream when `phasekit --upgrade`
+# fails to provision the file, at which point the loop dies far from the
+# source change.
+#
+# Enable once per clone:   git config core.hooksPath .githooks
+# Bypass intentionally:    git commit --no-verify
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+LOG="$(mktemp)"
+trap 'rm -f "$LOG"' EXIT
+
+if python3 scripts/enrich-project.py --self-check >"$LOG" 2>&1; then
+  exit 0
+fi
+
+echo "phasekit pre-commit: --self-check failed" >&2
+echo "" >&2
+cat "$LOG" >&2
+echo "" >&2
+echo "Fix: register the new path in capabilities/project-capabilities.yaml" >&2
+echo "(typed section) and/or scripts/enrich-project.py's" >&2
+echo "ALWAYS_INSTALLED_FILE_PATHS, then re-stage and retry." >&2
+echo "See CONTRIBUTING.md \"Adding a new tracked file\" for the procedure." >&2
+exit 1

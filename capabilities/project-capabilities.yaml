@@ -464,6 +464,11 @@ files:
   scripts/verify-phase.sh:
     ownership: scaffold-internal
 
+  .githooks/pre-commit:
+    ownership: scaffold-internal
+    # Scaffold's own pre-commit hook (runs --self-check). Downstream
+    # projects manage their own git hooks; never installed.
+
   docs/adr/.gitkeep:
     ownership: scaffold-internal
     # Empty placeholder so docs/adr/ is tracked by git; never installed
