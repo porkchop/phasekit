@@ -56,9 +56,29 @@ These scripts pass `--permission-mode bypassPermissions` to Claude. This flag on
 | `CLAUDE_MODE` | `new` | Set to `continue` to resume a previous session. Honored both for direct `run-until-done.sh` invocation and when forwarded through `container-setup.sh run`. |
 | `MAX_ITERATIONS` | `50` | Maximum phase iterations for `run-until-done.sh` |
 | `PHASEKIT_ITER_RETRY` | `1` | Per-iteration retry budget when the `claude` CLI exits non-zero (e.g. an API-side content-filter trip mid-response, a 5xx, or a transient network failure). Retries reuse the current session via `continue` mode and do not advance the iteration counter. Set to `0` to disable. |
+| `PHASEKIT_TRACE` | (unset) | Set to `1` to enable `set -x` xtrace in the wrapper scripts (`container-setup.sh`, `run-until-done.sh`, `run-phase.sh`). Every shell command is printed before execution — loud, but useful when diagnosing why the loop took an unexpected branch. Forwarded into the container by `container-setup.sh run`. |
 | `AUTO_PUSH` | (unset) | Set to `1` to push after each phase commit. Useful when the project needs CI to fire on each phase, github-pages-as-progress-mirror, or deploy previews. Pushes to the current branch's upstream (`git push` with no args). Push failures are non-fatal — the loop continues; the commit is already local. |
 | `SSH_AUTH_SOCK` | (host's value) | When invoked via `container-setup.sh run`, the host's SSH agent socket is forwarded into the container so `git push` to SSH remotes works. Run `ssh-add` on the host first. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | (unset) | Passed through to the container if set, for HTTPS-remote push workflows that use a Personal Access Token. |
+
+### Visibility and logs
+
+`run-phase.sh` passes `--verbose` to `claude -p`, so the CLI streams tool calls and intermediate text as the model works rather than going silent until the final response. The combined stdout/stderr of each `claude` invocation is also tee'd to a per-iteration log:
+
+```
+artifacts/logs/claude-iter-<N>.log          # first attempt of iteration N
+artifacts/logs/claude-iter-<N>-retry<M>.log # M-th retry of iteration N
+```
+
+For a live view of a long-running loop (e.g. one started in a remote tmux session), open a second pane and `tail -F` the current iteration's log:
+
+```bash
+tail -F artifacts/logs/claude-iter-3.log
+```
+
+After a crash, the most recent `claude-iter-*.log` files contain the full transcript of what claude was generating when it failed — useful for diagnosing content-filter trips and similar mid-stream aborts.
+
+`PHASEKIT_TRACE=1` additionally enables `set -x` in the wrapper scripts themselves, so every shell command they run (git commits, verify-gate invocations, artifact cleanup) is printed before execution.
 
 ## Settings layering
 

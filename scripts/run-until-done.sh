@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# PHASEKIT_TRACE=1 turns on bash xtrace so every wrapper command is visible.
+# Loud but useful for debugging the autonomous loop. See docs/EXECUTION_MODES.md.
+[[ "${PHASEKIT_TRACE:-}" == "1" ]] && set -x
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACTS_DIR="$ROOT_DIR/artifacts"
@@ -215,11 +218,19 @@ commit_from_artifact() {
 run_once() {
   local prompt_file="$1"
   local mode="$2"
+  local iter_num="$3"
+  local retry_attempt="${4:-0}"
 
   if [[ "$mode" == "continue" ]]; then
-    CLAUDE_MODE=continue "$RUN_PHASE_SCRIPT" "$prompt_file"
+    CLAUDE_MODE=continue \
+      PHASEKIT_ITER="$iter_num" \
+      PHASEKIT_RETRY_ATTEMPT="$retry_attempt" \
+      "$RUN_PHASE_SCRIPT" "$prompt_file"
   else
-    CLAUDE_MODE=new "$RUN_PHASE_SCRIPT" "$prompt_file"
+    CLAUDE_MODE=new \
+      PHASEKIT_ITER="$iter_num" \
+      PHASEKIT_RETRY_ATTEMPT="$retry_attempt" \
+      "$RUN_PHASE_SCRIPT" "$prompt_file"
   fi
 }
 
@@ -253,9 +264,9 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   # session that was just established rather than starting a new one.
   rc=0
   if [[ "$iteration" -eq 1 && "$CLAUDE_MODE" == "new" && "$retries_used" -eq 0 ]]; then
-    run_once "$PROMPT_FILE" "new" || rc=$?
+    run_once "$PROMPT_FILE" "new" "$iteration" "$retries_used" || rc=$?
   else
-    run_once "$PROMPT_FILE" "continue" || rc=$?
+    run_once "$PROMPT_FILE" "continue" "$iteration" "$retries_used" || rc=$?
   fi
 
   if [[ "$rc" -ne 0 ]]; then

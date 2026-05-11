@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# PHASEKIT_TRACE=1 turns on bash xtrace so every wrapper command is visible.
+# Forwarded into the container so the in-container scripts also trace.
+[[ "${PHASEKIT_TRACE:-}" == "1" ]] && set -x
 
 # Container setup script for scaffold unattended execution.
 #
@@ -129,6 +132,12 @@ run_container() {
   # failures (filter trips, 5xx, etc.). See scripts/run-until-done.sh.
   if [[ -n "${PHASEKIT_ITER_RETRY:-}" ]]; then
     docker_args+=(-e PHASEKIT_ITER_RETRY="$PHASEKIT_ITER_RETRY")
+  fi
+
+  # PHASEKIT_TRACE=1 enables bash xtrace inside the wrappers (loud but useful
+  # for diagnosing loop behavior).
+  if [[ -n "${PHASEKIT_TRACE:-}" ]]; then
+    docker_args+=(-e PHASEKIT_TRACE="$PHASEKIT_TRACE")
   fi
 
   # Forward the host's SSH agent so `git push` to SSH remotes (git@github.com:…)
