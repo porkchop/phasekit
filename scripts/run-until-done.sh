@@ -199,9 +199,27 @@ commit_from_artifact() {
   # Also stage any other repo changes
   git add -A
 
-  if git diff --cached --quiet; then
-    echo "No repo changes detected; skipping commit."
-    return 0
+  # Never commit per-iteration logs. run-phase.sh rewrites artifacts/logs/*
+  # every iteration (the iteration counter resets on each run), so committing
+  # them floods history with churn AND lets a no-progress iteration look like
+  # a real change. Keep them on disk for live tailing/forensics; just don't
+  # stage them. (Autonomous-loop-only — logs only exist during loop runs.)
+  git reset -q -- "$ARTIFACTS_DIR/logs" 2>/dev/null || true
+
+  # Substantive-change gate. A blocked or stalled iteration must still write
+  # *some* signal artifact (the loop contract requires one), and a prior
+  # phase-approval.json persists on disk as the durable approval record. Left
+  # unchecked, that persisted approval alone drives the commit path, so the
+  # only staged content ends up being the re-emitted transient signal — an
+  # inconsequential commit with no progress behind it (see foundry debe2d7).
+  # Treat the transient signals as non-substantive: if nothing else is staged,
+  # skip the commit and return 2 so the caller falls through to its blocked
+  # handler instead of committing churn.
+  if git diff --cached --quiet -- ':/' \
+       ":(exclude)$ARTIFACTS_DIR/phase-blocked.json" \
+       ":(exclude)$ARTIFACTS_DIR/phase-verify-failed.json"; then
+    echo "No substantive change staged (only logs or transient signals); skipping commit."
+    return 2
   fi
 
   # Pre-commit verification gate. On failure, leave changes staged so the
@@ -296,11 +314,14 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
       iteration=$((iteration + 1))
       continue
     fi
-    # Verify gate blocked the commit. If the circuit breaker wrote
-    # phase-blocked.json, the next loop iteration's blocker check will
-    # exit cleanly. Otherwise re-enter so Claude can fix the failure.
+    # No commit was made: either the verify gate failed, or there was no
+    # substantive change to commit (only logs/transient signals). In both
+    # cases, if phase-blocked.json is present the iteration is genuinely
+    # blocked — stop cleanly rather than spinning to MAX_ITERATIONS or
+    # committing churn. Otherwise re-enter so Claude can make progress
+    # (or fix a verify failure) on the next iteration.
     if [[ -f "$ARTIFACTS_DIR/phase-blocked.json" ]]; then
-      echo "Phase blocked by verify circuit breaker:"
+      echo "Phase blocked; no substantive change to commit:"
       print_json_summary "$ARTIFACTS_DIR/phase-blocked.json"
       exit 2
     fi
@@ -318,7 +339,7 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
       continue
     fi
     if [[ -f "$ARTIFACTS_DIR/phase-blocked.json" ]]; then
-      echo "Phase blocked by verify circuit breaker:"
+      echo "Phase blocked; no substantive change to commit:"
       print_json_summary "$ARTIFACTS_DIR/phase-blocked.json"
       exit 2
     fi

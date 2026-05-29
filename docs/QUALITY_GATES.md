@@ -112,6 +112,21 @@ The host-side wrapper is responsible for:
 3. creating a git commit
 4. resuming Claude for the next phase
 
+### No-churn rule
+The wrapper only commits when the iteration produced a **substantive** change.
+Two kinds of churn are explicitly excluded:
+- **Per-iteration logs** (`artifacts/logs/*`) are never staged. `run-phase.sh`
+  rewrites them every iteration, so committing them would flood history and
+  make a no-progress iteration look like real work. They stay on disk for live
+  tailing and forensics.
+- **Re-emitted transient signals.** A prior `phase-approval.json` persists on
+  disk as the durable approval record, so a later iteration that is blocked or
+  stalled (and must still write *some* signal artifact) would otherwise commit
+  nothing but the re-emitted `phase-blocked.json` / `phase-verify-failed.json`.
+  When those signals are the only staged change, the wrapper skips the commit;
+  if `phase-blocked.json` is present it stops cleanly (exit 2) for operator
+  handoff rather than committing an empty-progress change.
+
 ## Pre-commit verification gate
 The wrapper runs a project-defined fast-check command before creating any phase commit, regardless of whether `AUTO_PUSH` is enabled. Mechanism lives in the scaffold (`scripts/run-until-done.sh`); policy lives in the project (`scripts/phasekit-verify.sh`).
 
