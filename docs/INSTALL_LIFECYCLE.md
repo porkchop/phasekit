@@ -11,6 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/porkchop/phasekit/master/install.sh
 # From inside a project (verbs act on the current directory):
 phasekit bootstrap          # first-time install (greenfield)
 phasekit adopt              # adopt an existing project (no overwrites)
+phasekit status             # current phase state (derived from workflow artifacts)
 phasekit check              # audit current state against the recorded manifest
 phasekit check-version      # is a newer scaffold release available?
 phasekit upgrade            # re-provision against the current scaffold

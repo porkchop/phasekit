@@ -7,6 +7,7 @@
 #   phasekit upgrade [flags...]   re-provision against the current scaffold
 #   phasekit check                detect file drift vs the recorded manifest
 #   phasekit check-version        is a newer scaffold release available?
+#   phasekit status               current phase state (derived from artifacts)
 #   phasekit self-update          move this phasekit clone to the latest release tag
 #
 # Anything else is forwarded verbatim to the engine, so the raw flag form
@@ -72,6 +73,10 @@ case "$verb" in
   check-version)
     shift
     exec "${ENGINE[@]}" --check-version "$PWD"
+    ;;
+  status)
+    shift
+    exec "${ENGINE[@]}" --status "$PWD"
     ;;
   self-update)
     self_update

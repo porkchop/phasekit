@@ -1815,6 +1815,91 @@ def cmd_check_version(target_dir):
     return 0
 
 
+def cmd_status(target_dir):
+    """Print the project's current phase state as a *derived view* of the
+    workflow artifacts — never a second source of truth. The authority remains
+    `artifacts/phase-approval.json` (+ git log); this command only renders it.
+
+    Reports, in order of precedence: project completion, the blocker that
+    stopped the loop, a pending pre-commit verify failure, and otherwise the
+    last approved phase with a pointer to the next one. Always exit 0 unless the
+    target is unusable.
+    """
+    target = Path(target_dir).resolve()
+    if not target.is_dir():
+        print(f"Error: target directory does not exist: {target}", file=sys.stderr)
+        return 1
+
+    artifacts = target / "artifacts"
+
+    def load(name):
+        path = artifacts / name
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            print(f"  WARN: {path.name} is present but unreadable", file=sys.stderr)
+            return None
+
+    def trim(text, limit=200):
+        text = " ".join(str(text).split())
+        return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+    approval = load("phase-approval.json")
+    blocked = load("phase-blocked.json")
+    complete = load("project-complete.json")
+    verify_failed = load("phase-verify-failed.json")
+
+    print(f"phasekit status: {target}")
+
+    if not any((approval, blocked, complete, verify_failed)):
+        print("  no phase artifacts yet — project not started, or artifacts/ is empty.")
+        return 0
+
+    if approval is not None:
+        phase = approval.get("phase", "?")
+        suffix = "" if approval.get("approved") else "  (NOT marked approved)"
+        print(f"  approved through: {phase}{suffix}")
+        if approval.get("summary"):
+            print(f"  summary: {trim(approval['summary'])}")
+
+    # Git context: the commit that last recorded the approval (authority trail).
+    try:
+        last = subprocess.run(
+            ["git", "-C", str(target), "log", "-1", "--format=%h %s",
+             "--", "artifacts/phase-approval.json"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        if last:
+            print(f"  last approval commit: {last}")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    if complete is not None:
+        print("  state: PROJECT COMPLETE")
+        if complete.get("summary"):
+            print(f"  summary: {trim(complete['summary'])}")
+        return 0
+
+    if blocked is not None:
+        kind = blocked.get("blocker_kind", "")
+        reason = blocked.get("reason") or blocked.get("summary") or "(no reason given)"
+        print(f"  state: BLOCKED{(' [' + kind + ']') if kind else ''} — {trim(reason)}")
+        if blocked.get("next_step"):
+            print(f"  next step: {blocked['next_step']}")
+        return 0
+
+    if verify_failed is not None:
+        attempts = verify_failed.get("attempts", "?")
+        print(f"  state: VERIFY FAILED (attempt {attempts}) — "
+              f"{trim(verify_failed.get('command', ''), 80)}; fix before the next commit")
+        return 0
+
+    print("  state: phase approved; next: start the next unapproved phase")
+    return 0
+
+
 # ============================================================================
 # Default command: enrich
 # ============================================================================
@@ -1894,6 +1979,8 @@ def main():
                         help="Compare downstream project against its .scaffold/manifest.json")
     parser.add_argument("--check-version", dest="check_version", action="store_true",
                         help="Report whether a downstream project is behind the running scaffold version")
+    parser.add_argument("--status", action="store_true",
+                        help="Print the project's current phase state (derived from workflow artifacts)")
     parser.add_argument("--reconcile", action="store_true",
                         help="Build a retroactive .scaffold/manifest.json for a project enriched before M9")
     parser.add_argument("--migrate-only", dest="migrate_only", action="store_true",
@@ -1942,6 +2029,11 @@ def main():
         if not args.target_dir:
             parser.error("--check-version requires target_dir")
         sys.exit(cmd_check_version(args.target_dir))
+
+    if args.status:
+        if not args.target_dir:
+            parser.error("--status requires target_dir")
+        sys.exit(cmd_status(args.target_dir))
 
     if args.reconcile:
         if not args.target_dir:

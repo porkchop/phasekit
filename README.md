@@ -75,6 +75,7 @@ This copies agents, hooks, scripts, and doc templates **without overwriting exis
 With the global install, run these from **inside** an enriched project (they act on the current directory):
 
 ```bash
+phasekit status                 # current phase state (derived from artifacts)
 phasekit check                  # detect file drift vs the recorded manifest
 phasekit check-version          # is a newer scaffold release available?
 phasekit upgrade --dry-run      # plan an upgrade
