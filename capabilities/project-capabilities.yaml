@@ -22,6 +22,8 @@ ignore:
   - "generated/**"
   - "dist/skills/**"
   - "tests/**"
+  # Repo-only CI infrastructure; never provisioned into downstream projects.
+  - ".github/**"
 
 profiles:
   default:
