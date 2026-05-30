@@ -452,6 +452,11 @@ files:
   KICKOFF.md:
     ownership: scaffold-internal
 
+  install.sh:
+    ownership: scaffold-internal
+    # Curl|bash installer fetched via raw.githubusercontent.com; sets up the
+    # canonical clone + venv + `phasekit` shim. Never enriched into a project.
+
   LICENSE:
     ownership: scaffold-internal
 

@@ -5,21 +5,25 @@ This document describes how scaffold capabilities are installed into a downstrea
 ## TL;DR
 
 ```bash
-# First-time install (greenfield)
-bash /path/to/scaffold/scripts/bootstrap-new-project.sh
+# One-time: install phasekit (canonical clone + venv + `phasekit` shim on PATH)
+curl -fsSL https://raw.githubusercontent.com/porkchop/phasekit/master/install.sh | bash
 
-# Adopt an existing project (no overwrites)
-bash /path/to/scaffold/scripts/adopt-existing-repo.sh
+# From inside a project (verbs act on the current directory):
+phasekit bootstrap          # first-time install (greenfield)
+phasekit adopt              # adopt an existing project (no overwrites)
+phasekit check              # audit current state against the recorded manifest
+phasekit check-version      # is a newer scaffold release available?
+phasekit upgrade            # re-provision against the current scaffold
+phasekit self-update        # move the phasekit install to the latest release tag
 
-# Audit current state against the recorded manifest
-python3 /path/to/scaffold/scripts/enrich-project.py --check .
-
-# Rebuild the manifest from disk (for projects enriched before M9)
-python3 /path/to/scaffold/scripts/enrich-project.py --reconcile .
-
-# Migrate the manifest forward to the current schema (no other side effects)
-python3 /path/to/scaffold/scripts/enrich-project.py --migrate-only .
+# Raw-flag forms still work (and can target a path), e.g.:
+phasekit --reconcile .      # rebuild the manifest from disk (pre-M9 projects)
+phasekit --migrate-only .   # migrate the manifest schema forward, no other effects
 ```
+
+## The canonical clone (source of truth)
+
+`install.sh` clones phasekit to `${XDG_DATA_HOME:-~/.local/share}/phasekit` and writes a `phasekit` launcher to `~/.local/bin` that runs the engine from that clone (under an isolated venv). Because `enrich-project.py` reads every scaffold source relative to its own location, **that clone is the single source for both running and upgrading any project** — you `cd` into a project and run a verb. `phasekit self-update` (or re-running the installer) moves the clone to the latest release tag. A project's own vendored `scripts/` are loop runtime, not the upgrade source.
 
 ## Provenance: `.scaffold/manifest.json`
 

@@ -22,6 +22,23 @@ Each phase ends with `artifacts/phase-approval.json` and an external commit. The
 - **Capability profiles** — named bundles (`default`, `game-project`, `saas-project`, or custom) that control which agents, docs, hooks, and scripts a project receives
 - **Skill packaging** — validates and packages reusable Claude Code skills as `skill.zip` deliverables
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/porkchop/phasekit/master/install.sh | bash
+```
+
+This installs a canonical phasekit clone to `~/.local/share/phasekit` (with an isolated venv for its one dependency) and puts a `phasekit` command on your PATH. It tracks the latest release tag and **does not touch any project** — you enrich a project explicitly afterwards. Re-run it (or `phasekit self-update`) to move to the newest release.
+
+Prefer to read before running? Download and inspect first:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/porkchop/phasekit/master/install.sh -o install.sh
+less install.sh && bash install.sh
+```
+
+Overridable via env: `PHASEKIT_HOME` (install dir), `PHASEKIT_BIN` (launcher dir), `PHASEKIT_REF` (pin a tag/branch). Requires `git` and `python3` with venv support.
+
 ## Quick start: interactive mode
 
 This is the default and most common way to use a scaffolded project. Open the repo in Claude Code and work normally — the scaffold provides structure without getting in the way.
@@ -30,9 +47,8 @@ This is the default and most common way to use a scaffolded project. Open the re
 
 ```bash
 mkdir my-project && cd my-project && git init
-bash /path/to/scaffold/scripts/bootstrap-new-project.sh        # uses "default" profile
-# or with a specific profile:
-bash /path/to/scaffold/scripts/bootstrap-new-project.sh game-project
+phasekit bootstrap              # uses "default" profile
+phasekit bootstrap game-project # or a specific profile
 ```
 
 Then customize the generated docs for your project:
@@ -47,44 +63,35 @@ Start Claude Code in the project directory and work interactively. The `project-
 
 ```bash
 cd /path/to/existing-repo
-bash /path/to/scaffold/scripts/adopt-existing-repo.sh           # uses "default" profile
+phasekit adopt                  # uses "default" profile
 ```
 
 This copies agents, hooks, scripts, and doc templates **without overwriting existing files**. Adapt the generated `docs/` to your current codebase state, then start the lead in audit mode to re-vet existing work.
 
+> **From a clone (contributors / no install):** if you're working on phasekit itself or don't want the global install, the path-based scripts still work — `bash /path/to/phasekit/scripts/bootstrap-new-project.sh [profile]` and `adopt-existing-repo.sh [profile]` do the same thing from a checkout.
+
 ### Lifecycle commands
 
-After a project has been bootstrapped or adopted, all subsequent operations go through the `phasekit.sh` shell wrapper (or directly through `scripts/enrich-project.py`). The wrapper forwards any flag the engine supports.
+With the global install, run these from **inside** an enriched project (they act on the current directory):
 
 ```bash
-# From inside an enriched project:
-bash scripts/phasekit.sh --check .                              # detect file drift
-bash scripts/phasekit.sh --check-version .                      # is a newer scaffold release out?
-bash scripts/phasekit.sh --upgrade --dry-run .                  # plan an upgrade
-bash scripts/phasekit.sh --upgrade --yes .                      # apply scaffold updates
-bash scripts/phasekit.sh --upgrade --keep-local docs/X.md .     # preserve project edits
-bash scripts/phasekit.sh --reconcile .                          # retrofit a pre-M9 project
-bash scripts/phasekit.sh --uninstall --include-once --yes .     # remove all scaffold files
+phasekit check                  # detect file drift vs the recorded manifest
+phasekit check-version          # is a newer scaffold release available?
+phasekit upgrade --dry-run      # plan an upgrade
+phasekit upgrade --yes          # apply scaffold updates
+phasekit upgrade --keep-local docs/X.md   # preserve specific project edits
+phasekit self-update            # move the phasekit install to the latest release tag
 ```
 
-For frequent use, alias the scaffold's wrapper system-wide:
+Anything the engine supports is still available in raw-flag form (forwarded verbatim), which also lets you target a project by path from anywhere:
 
 ```bash
-alias phasekit='bash /path/to/phasekit/scripts/phasekit.sh'
-phasekit --check ~/projects/myapp
-phasekit --upgrade --dry-run ~/projects/myapp
+phasekit --reconcile .                       # retrofit a pre-M9 project
+phasekit --uninstall --include-once --yes .  # remove all scaffold files
+phasekit --check-version ~/projects/myapp    # explicit target instead of cwd
 ```
 
-Bootstrap and adopt are run from inside the target directory (each takes an optional profile name, default `default`). Worth a dedicated alias so you don't have to remember the script path:
-
-```bash
-alias phasekit-bootstrap='bash /path/to/phasekit/scripts/bootstrap-new-project.sh'
-alias phasekit-adopt='bash /path/to/phasekit/scripts/adopt-existing-repo.sh'
-
-# Then, from inside the project:
-cd ~/projects/myapp && phasekit-bootstrap saas-project
-cd ~/projects/legacy-app && phasekit-adopt
-```
+Without the global install, the same commands work through the wrapper in a checkout: `bash /path/to/phasekit/scripts/phasekit.sh <verb-or-flags>`.
 
 Best practice: always run `--upgrade --dry-run` first to inspect the plan, then re-invoke with `--keep-local PATH` for any scaffold-class file you've customized. See `docs/INSTALL_LIFECYCLE.md` for the full lifecycle contract, the ownership-class table, and the "What to commit" guidance.
 
