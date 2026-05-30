@@ -2,13 +2,14 @@
 # phasekit — thin wrapper around enrich-project.py.
 #
 # Forwards all arguments to the Python engine. Use any flag the engine
-# supports: --check, --upgrade, --uninstall, --reconcile, --migrate-only,
-# --self-check, --include-templates, --keep-local, --take-new, --adopt,
-# --rename-local, --accept-removal, --interactive, --strict, --no-lock,
-# --dry-run, --yes, --force, --profile, --include-once.
+# supports: --check, --check-version, --upgrade, --uninstall, --reconcile,
+# --migrate-only, --self-check, --include-templates, --keep-local, --take-new,
+# --adopt, --rename-local, --accept-removal, --interactive, --strict,
+# --no-lock, --dry-run, --yes, --force, --profile, --include-once.
 #
 # Usage:
 #   bash scripts/phasekit.sh --check .
+#   bash scripts/phasekit.sh --check-version .
 #   bash scripts/phasekit.sh --upgrade --yes .
 #   bash scripts/phasekit.sh --upgrade --dry-run --include-templates .
 #

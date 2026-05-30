@@ -58,7 +58,8 @@ After a project has been bootstrapped or adopted, all subsequent operations go t
 
 ```bash
 # From inside an enriched project:
-bash scripts/phasekit.sh --check .                              # detect drift
+bash scripts/phasekit.sh --check .                              # detect file drift
+bash scripts/phasekit.sh --check-version .                      # is a newer scaffold release out?
 bash scripts/phasekit.sh --upgrade --dry-run .                  # plan an upgrade
 bash scripts/phasekit.sh --upgrade --yes .                      # apply scaffold updates
 bash scripts/phasekit.sh --upgrade --keep-local docs/X.md .     # preserve project edits

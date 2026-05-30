@@ -227,6 +227,12 @@ docs:
     ownership: scaffold-internal
     # scaffold-internal: describes how to extend the scaffold's manifest and profiles; not included in downstream enrichment profiles
 
+  RELEASING:
+    path: docs/RELEASING.md
+    required: false
+    ownership: scaffold-internal
+    # scaffold-internal: describes how to cut a scaffold release (tags) and how downstream discovers updates; not included in downstream enrichment profiles
+
   CONTAINERIZATION:
     path: docs/CONTAINERIZATION.md
     required: false

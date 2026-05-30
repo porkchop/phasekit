@@ -1226,20 +1226,56 @@ def utc_now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+# Canonical upstream remote. Used only as a fallback when a downstream
+# manifest predates the origin_url field; the live remote is preferred.
+# Keep in sync with the same fallback in scripts/run-until-done.sh.
+CANONICAL_ORIGIN_URL = "https://github.com/porkchop/phasekit.git"
+
+
 def get_scaffold_version():
-    """Compute scaffold version (semver-with-git or fallback) and short commit.
+    """Compute scaffold version (semver tag-derived or fallback) and short commit.
 
     Returns (version_string, commit_string).
+
+    With release tags present, `git describe` yields a meaningful version such
+    as `v0.1.0`, `v0.1.0-3-g0d9ee74` (3 commits past the tag), or
+    `v0.1.0-dirty`. Untagged checkouts fall back to the short commit via
+    `--always`, preserving the pre-tag behavior (just without the synthetic
+    `0.0.0+git.` prefix).
+    """
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short=7", "HEAD"],
+            cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "0.0.0+git.unknown", "unknown"
+    try:
+        version = subprocess.run(
+            ["git", "describe", "--tags", "--always", "--dirty"],
+            cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        version = commit
+    return version, commit
+
+
+def get_scaffold_origin_url():
+    """Return the scaffold repo's `origin` remote URL, or None if unavailable.
+
+    Recorded in the downstream manifest so a project can later discover where
+    its upstream lives (for `--check-version` and the loop update nudge)
+    without hardcoding it.
     """
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--short=7", "HEAD"],
+            ["git", "config", "--get", "remote.origin.url"],
             cwd=REPO_ROOT, capture_output=True, text=True, check=True,
         )
-        commit = result.stdout.strip()
-        return f"0.0.0+git.{commit}", commit
+        url = result.stdout.strip()
+        return url or None
     except (subprocess.CalledProcessError, FileNotFoundError):
-        return "0.0.0+git.unknown", "unknown"
+        return None
 
 
 def compute_file_shas(file_path, is_text):
@@ -1374,6 +1410,7 @@ def write_downstream_manifest(target_dir, scaffold_manifest, profile, file_specs
         "schema_version": SCHEMA_VERSION_CURRENT,
         "scaffold_version": version,
         "scaffold_commit": commit,
+        "origin_url": get_scaffold_origin_url(),
         "profile": profile,
         "enriched_at": utc_now_iso(),
         "normalization": {
@@ -1710,6 +1747,74 @@ def cmd_check(target_dir, strict=False, include_templates=False):
     return 0
 
 
+def cmd_check_version(target_dir):
+    """Report whether a downstream project is behind the running scaffold.
+
+    Complements `--check` (which detects *file* drift): this compares the
+    `scaffold_version`/`scaffold_commit` the project was enriched from against
+    the version of the scaffold clone this command runs in. When the recorded
+    commit is resolvable in the local clone, ancestry gives a precise
+    behind/ahead/diverged verdict; otherwise it falls back to a plain version
+    string compare.
+
+    "Behind" is informational (exit 0), matching `--check`'s tone. Only usage
+    or I/O problems return non-zero.
+    """
+    target = Path(target_dir).resolve()
+    if not target.is_dir():
+        print(f"Error: target directory does not exist: {target}", file=sys.stderr)
+        return 1
+
+    manifest = load_downstream_manifest(target)
+    if manifest is None:
+        print(f"No .scaffold/manifest.json in {target}.", file=sys.stderr)
+        print("Run `enrich-project.py --reconcile` first.", file=sys.stderr)
+        return 1
+
+    recorded_version = manifest.get("scaffold_version", "unknown")
+    recorded_commit = manifest.get("scaffold_commit", "unknown")
+    current_version, current_commit = get_scaffold_version()
+
+    print(f"--check-version: {target}")
+    print(f"  enriched from:  {recorded_version} ({recorded_commit})")
+    print(f"  this scaffold:  {current_version} ({current_commit})")
+
+    def _git(*args):
+        try:
+            return subprocess.run(
+                ["git", *args], cwd=REPO_ROOT,
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return None
+
+    # Precise verdict when the recorded commit exists in this clone's history.
+    resolvable = (
+        recorded_commit not in (None, "", "unknown")
+        and _git("cat-file", "-e", f"{recorded_commit}^{{commit}}") is not None
+    )
+    if resolvable:
+        if recorded_commit == current_commit or _git("rev-parse", "HEAD") == \
+                _git("rev-parse", recorded_commit):
+            print("  status: up to date")
+        elif _git("merge-base", "--is-ancestor", recorded_commit, "HEAD") is not None:
+            behind = _git("rev-list", "--count", f"{recorded_commit}..HEAD") or "?"
+            print(f"  status: BEHIND by {behind} commit(s) — run `phasekit --upgrade`")
+        elif _git("merge-base", "--is-ancestor", "HEAD", recorded_commit) is not None:
+            print("  status: ahead (enriched from a newer scaffold than this clone)")
+        else:
+            print("  status: diverged (no common ancestor on this branch)")
+    else:
+        # Fallback: the recorded commit isn't in this clone (shallow clone,
+        # different remote, or a pre-tag synthetic version). Compare strings.
+        if recorded_version == current_version:
+            print("  status: up to date (by version string)")
+        else:
+            print("  status: differs — recorded commit not in this clone; "
+                  "cannot determine direction. Run `phasekit --upgrade` if unsure.")
+    return 0
+
+
 # ============================================================================
 # Default command: enrich
 # ============================================================================
@@ -1787,6 +1892,8 @@ def main():
                         help="Audit scaffold-side ownership taxonomy (M9 §8); ignores target_dir")
     parser.add_argument("--check", action="store_true",
                         help="Compare downstream project against its .scaffold/manifest.json")
+    parser.add_argument("--check-version", dest="check_version", action="store_true",
+                        help="Report whether a downstream project is behind the running scaffold version")
     parser.add_argument("--reconcile", action="store_true",
                         help="Build a retroactive .scaffold/manifest.json for a project enriched before M9")
     parser.add_argument("--migrate-only", dest="migrate_only", action="store_true",
@@ -1830,6 +1937,11 @@ def main():
             strict=args.strict,
             include_templates=args.include_templates,
         ))
+
+    if args.check_version:
+        if not args.target_dir:
+            parser.error("--check-version requires target_dir")
+        sys.exit(cmd_check_version(args.target_dir))
 
     if args.reconcile:
         if not args.target_dir:

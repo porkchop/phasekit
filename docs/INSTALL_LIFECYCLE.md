@@ -28,7 +28,8 @@ After every successful enrichment, the engine writes `.scaffold/manifest.json` i
 The manifest records:
 
 - `schema_version` — integer; the engine migrates older manifests in-memory before any operation
-- `scaffold_version` and `scaffold_commit` — what version of the scaffold installed this state
+- `scaffold_version` and `scaffold_commit` — what version of the scaffold installed this state. `scaffold_version` is `git describe --tags --always --dirty` (e.g. `v0.1.0`, `v0.1.0-3-g0d9ee74`), falling back to the short commit when untagged. See `docs/RELEASING.md`.
+- `origin_url` — the scaffold repo's `origin` remote, so a project can find its upstream for `--check-version` and the loop update nudge (may be `null` on older manifests)
 - `profile` — which profile was active (`default`, `game-project`, etc.)
 - `enriched_at` — UTC ISO-8601 timestamp
 - `normalization` — the recipe used for content hashing (`lf-trim-trailing-ws-single-final-newline` v1)
@@ -103,7 +104,7 @@ A team enriched a project with the `default` profile. Months later, they want to
 
 ```bash
 $ python3 enrich-project.py --check ~/projects/myapp
---check: scaffold 0.0.0+git.fbfe29d
+--check: scaffold v0.1.0
   clean: 26
   drifted: 1
   missing: 0

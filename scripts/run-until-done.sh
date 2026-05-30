@@ -32,6 +32,53 @@ require_cmd() {
 require_cmd jq
 require_cmd git
 
+# Canonical upstream remote, used only when a downstream manifest predates the
+# origin_url field. Keep in sync with CANONICAL_ORIGIN_URL in scripts/enrich-project.py.
+PHASEKIT_CANONICAL_ORIGIN="https://github.com/porkchop/phasekit.git"
+
+check_for_scaffold_update() {
+  # Best-effort "a newer phasekit release exists" nudge, printed once at loop
+  # start. Self-contained (bash + git + jq, both required above) — never depends
+  # on the Python engine being vendored downstream. MUST NEVER block or fail the
+  # loop: the network call is hard-bounded and every failure path is swallowed
+  # (consistent with "observability must never break the loop"). The call site
+  # invokes this as `... || true`, which also disables `set -e` for the body.
+  # Opt out with PHASEKIT_NO_UPDATE_CHECK=1.
+  [[ "${PHASEKIT_NO_UPDATE_CHECK:-}" == "1" ]] && return 0
+  local manifest="$ROOT_DIR/.scaffold/manifest.json"
+  [[ -f "$manifest" ]] || return 0
+
+  local local_ver url latest
+  local_ver="$(jq -r '.scaffold_version // empty' "$manifest" 2>/dev/null)" || return 0
+  [[ -n "$local_ver" ]] || return 0
+  url="$(jq -r '.origin_url // empty' "$manifest" 2>/dev/null)" || true
+  [[ -n "$url" ]] || url="$PHASEKIT_CANONICAL_ORIGIN"
+  # Normalize SSH/scp-style remotes to anonymous HTTPS so the check works
+  # without SSH keys (phasekit is public; manifests often record the SSH origin).
+  url="$(printf '%s' "$url" | sed -E 's#^git@([^:]+):#https://\1/#; s#^ssh://git@#https://#')"
+
+  # Highest release tag upstream. One network call, hard-capped; any failure
+  # (offline, firewall, timeout) just skips the nudge.
+  latest="$(timeout 5 git ls-remote --tags --refs "$url" 'v*' 2>/dev/null \
+    | sed -E 's#.*refs/tags/##' | sort -V | tail -n1)" || return 0
+  [[ -n "$latest" ]] || return 0
+
+  # Normalize both to bare semver: strip a leading 'v' and any describe suffix
+  # (`-N-gSHA`, `-dirty`) or `+build` metadata. Legacy '0.0.0+git.*' has no 'v'
+  # and normalizes to 0.0.0, so any real tag reads as newer.
+  local norm_local norm_latest highest
+  norm_local="$(printf '%s' "$local_ver" | sed -E 's/^v//; s/[-+].*$//')"
+  norm_latest="$(printf '%s' "$latest" | sed -E 's/^v//; s/[-+].*$//')"
+  [[ -n "$norm_latest" ]] || return 0
+  [[ "$norm_local" == "$norm_latest" ]] && return 0
+
+  highest="$(printf '%s\n%s\n' "$norm_local" "$norm_latest" | sort -V | tail -n1)"
+  if [[ "$highest" == "$norm_latest" ]]; then
+    echo "ℹ phasekit ${local_ver} → ${latest} available — run 'phasekit --upgrade' (see docs/RELEASING.md)" >&2
+  fi
+  return 0
+}
+
 cleanup_artifacts() {
   # Remove transient signal artifacts from the previous iteration.
   # phase-approval.json is NOT deleted — it persists as the durable
@@ -272,6 +319,9 @@ if [[ "$CLAUDE_MODE" == "new" && -f "$ARTIFACTS_DIR/phase-verify-failed.json" ]]
   echo "Fresh kickoff (CLAUDE_MODE=new) — clearing stale phase-verify-failed.json from prior run."
   rm -f "$ARTIFACTS_DIR/phase-verify-failed.json"
 fi
+
+# Once-per-run, non-fatal nudge if a newer phasekit release is available.
+check_for_scaffold_update || true
 
 while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   echo "=== Iteration $iteration ==="
