@@ -25,6 +25,12 @@ fi
 # Inject Playwright MCP server configuration for containerized mode.
 # Writes to settings.local.json (gitignored) so it does not affect
 # the checked-in project settings or interactive users.
+#
+# Note: this write targets the bind-mounted /workspace. Under rootless Docker
+# the default non-root `node` user (UID 1000) maps to an unmapped subordinate
+# host UID and this write can fail with "Permission denied". Launch with
+# PHASEKIT_ROOTLESS_DOCKER=1 (see scripts/container-setup.sh) to run as UID 0,
+# which maps back to the host user and makes /workspace writable again.
 if [[ "${SKIP_PLAYWRIGHT_MCP:-}" != "1" ]]; then
     SETTINGS_DIR="/workspace/.claude"
     SETTINGS_LOCAL="$SETTINGS_DIR/settings.local.json"

@@ -40,12 +40,48 @@ set -euo pipefail
 #   GIT_USER_EMAIL      Git author email (default: scaffold-runner@localhost)
 #   SKIP_PLAYWRIGHT_MCP Set to 1 to skip Playwright MCP injection (default: inject)
 #   PLAYWRIGHT_MCP_VERSION  Override @playwright/mcp version for builds (default: in Dockerfile)
+#
+# Rootless Docker support:
+#   PHASEKIT_ROOTLESS_DOCKER  Set to 1 to run the container as UID 0 (container
+#                             root). Under rootless Docker this maps back to the
+#                             unprivileged host user, so files written to the
+#                             bind-mounted /workspace are owned by that host user
+#                             instead of an unmapped subordinate UID. Fixes
+#                             "Permission denied" on /workspace under rootless.
+#   PHASEKIT_CONTAINER_USER   Lower-level override for the container user passed
+#                             to `docker run --user`. Accepts "root" or a raw
+#                             "uid:gid" (e.g. "1001:1001"). Takes precedence over
+#                             PHASEKIT_ROOTLESS_DOCKER. Default: unset (image's
+#                             built-in non-root `node` user, UID 1000).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMAGE_NAME="${IMAGE_NAME:-scaffold-runner}"
 CLAUDE_VOLUME="${CLAUDE_VOLUME:-scaffold-claude-config}"
 COMMAND="${1:-build}"
+
+# Resolve the container user (see header docs).
+#
+# The image normally runs as the non-root `node` user (UID 1000). That is the
+# right default under standard ("rootful") Docker, where container UID 1000 ==
+# host UID 1000. But under *rootless* Docker the daemon runs in a user
+# namespace: container UID 1000 maps to a high subordinate UID on the host that
+# the launching user cannot chown/modify. Files the container writes into the
+# bind-mounted /workspace then appear owned by that unmapped UID, producing
+# errors like "Permission denied" on .claude/settings.local.json or
+# artifacts/logs that even `chmod -R a+rwX` can't fully repair.
+#
+# Running as container root (UID 0) sidesteps this: under rootless Docker,
+# container UID 0 maps back to the unprivileged *host* user who started the
+# daemon, so /workspace writes are owned by that host user. The rootless
+# security boundary is preserved — "root" here is not real host root.
+#
+# PHASEKIT_CONTAINER_USER (explicit) wins over the PHASEKIT_ROOTLESS_DOCKER=1
+# convenience flag, which is just shorthand for PHASEKIT_CONTAINER_USER=root.
+CONTAINER_USER="${PHASEKIT_CONTAINER_USER:-}"
+if [[ -z "$CONTAINER_USER" && "${PHASEKIT_ROOTLESS_DOCKER:-}" == "1" ]]; then
+  CONTAINER_USER="root"
+fi
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -98,6 +134,24 @@ run_container() {
     -e MAX_ITERATIONS="${MAX_ITERATIONS:-50}"
     -e CLAUDE_CONFIG_DIR=/home/node/.claude
   )
+
+  # Optional rootless-Docker mode: run as the requested container user (UID 0
+  # for "root"). We deliberately keep HOME pointed at /home/node so every asset
+  # baked into the image for the node user stays reachable under the new UID:
+  #   - the Claude credential volume mounted at /home/node/.claude
+  #   - CLAUDE_CONFIG_DIR (already /home/node/.claude)
+  #   - the Playwright browser cache (/home/node/.cache/ms-playwright)
+  #   - the default git identity (/home/node/.gitconfig)
+  #   - the ssh known_hosts mount (/home/node/.ssh/known_hosts, below)
+  # Without this, a root process would default to HOME=/root and silently miss
+  # all of them (lost login, no browser, "Author identity unknown" on commit).
+  if [[ -n "$CONTAINER_USER" ]]; then
+    local user_spec="$CONTAINER_USER"
+    [[ "$user_spec" == "root" ]] && user_spec="0:0"
+    docker_args+=(--user "$user_spec")
+    docker_args+=(-e HOME=/home/node)
+    echo "Container user override: running as '$user_spec' (HOME=/home/node)"
+  fi
 
   # Pass API key only if set — omitting it lets Claude use stored subscription credentials.
   if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then

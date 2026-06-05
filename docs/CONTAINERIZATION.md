@@ -167,6 +167,8 @@ This registers the server in your user-level Claude configuration. Add `--headle
 | `GIT_USER_EMAIL` | `scaffold-runner@localhost` | Git author email for commits |
 | `SKIP_PLAYWRIGHT_MCP` | (empty) | Set to `1` to skip Playwright MCP injection |
 | `PLAYWRIGHT_MCP_VERSION` | `0.0.70` | Override `@playwright/mcp` version at build time |
+| `PHASEKIT_ROOTLESS_DOCKER` | (unset) | Set to `1` to run the container as UID 0 for rootless Docker bind mounts; see [Rootless Docker](#rootless-docker) |
+| `PHASEKIT_CONTAINER_USER` | (unset) | Lower-level override for `docker run --user` (`root` or `uid:gid`); takes precedence over `PHASEKIT_ROOTLESS_DOCKER` |
 
 ## Container capabilities
 
@@ -176,6 +178,60 @@ The container runs with a minimal capability set:
 - `--cap-add=NET_RAW` — required for raw socket operations used by the firewall
 - `--cap-add=SETUID` — required for `sudo` to run the firewall init as root
 - `--cap-add=SETGID` — required for `sudo` to switch group identity
+
+## Rootless Docker
+
+By default the container runs as the non-root `node` user (UID 1000). Under
+standard ("rootful") Docker this is correct: container UID 1000 is the same as
+host UID 1000, so files written into the bind-mounted `/workspace` are owned by
+your host user.
+
+**Under [rootless Docker](https://docs.docker.com/engine/security/rootless/) this
+breaks.** The daemon runs inside a user namespace, so container UID 1000 maps to
+a high *subordinate* UID on the host (from `/etc/subuid`) that your login user
+cannot chown or modify. Files the container writes to `/workspace` then appear
+owned by that unmapped UID, producing errors such as:
+
+```
+/usr/local/bin/entrypoint.sh: line 40: /workspace/.claude/settings.local.json: Permission denied
+mkdir: cannot create directory '/workspace/artifacts/logs': Permission denied
+```
+
+`chmod -R a+rwX .` does not reliably fix this, because some files end up owned by
+mapped UIDs your host user cannot touch.
+
+### The fix: run as container root
+
+Set `PHASEKIT_ROOTLESS_DOCKER=1`:
+
+```bash
+PHASEKIT_ROOTLESS_DOCKER=1 bash scripts/container-setup.sh run
+```
+
+This runs the container process as UID 0. Because Docker is rootless, **container
+root maps back to your unprivileged host user**, not real host root — so
+`/workspace` writes land as your user and the permission errors disappear. The
+rootless security boundary is preserved: the "root" inside the container has no
+elevated privileges on the host.
+
+`HOME` is kept at `/home/node` in this mode so the image's prebuilt, node-owned
+assets stay reachable as UID 0: the Claude credential volume, the Playwright
+browser cache, the default git identity, and the ssh `known_hosts` mount.
+
+For finer control (e.g. matching a specific host UID/GID), use the lower-level
+override instead — it accepts `root` or a raw `uid:gid`:
+
+```bash
+PHASEKIT_CONTAINER_USER=root        bash scripts/container-setup.sh run
+PHASEKIT_CONTAINER_USER=1001:1001   bash scripts/container-setup.sh run
+```
+
+`PHASEKIT_CONTAINER_USER` takes precedence over `PHASEKIT_ROOTLESS_DOCKER`.
+
+> Note: rootless Docker may also restrict the `NET_ADMIN`/`NET_RAW` capabilities
+> the firewall needs. If `init-firewall.sh` fails to initialize in your rootless
+> setup, that is a separate capability concern from the bind-mount ownership fix
+> above; see the firewall note in [Troubleshooting](#troubleshooting).
 
 ## VS Code devcontainer support (optional)
 
@@ -235,7 +291,7 @@ The script checks: core tools (claude, git, jq, python3+pyyaml), Playwright MCP 
 
 - **"ANTHROPIC_API_KEY is not set"**: Export the variable before running
 - **"Firewall initialization failed"**: Ensure Docker supports `--cap-add=NET_ADMIN` (rootless Docker may not)
-- **Permission errors on /workspace**: Ensure the host directory is readable by UID 1000 (the `node` user)
+- **Permission errors on /workspace**: Under standard Docker, ensure the host directory is readable by UID 1000 (the `node` user). Under **rootless Docker** these errors are expected with the default user — run with `PHASEKIT_ROOTLESS_DOCKER=1` (see [Rootless Docker](#rootless-docker))
 - **Claude CLI not found**: Rebuild the image to pick up the latest CLI version
 - **Phase loop exits immediately**: Check that `CONTINUE_PROMPT.txt` exists in the repo root
 - **Firewall blocking needed domains**: Check `init-firewall.sh` whitelist; add domains if your workflow requires additional network access
