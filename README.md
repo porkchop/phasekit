@@ -159,6 +159,16 @@ Default off because pushes cascade side effects (CI runs, deploys, notifications
 
 The wrapper passes `--permission-mode bypassPermissions` — this flag only applies inside the container and does not affect interactive users.
 
+### Optional: rootless Docker
+
+The container runs as the non-root `node` user by default. Under [rootless Docker](https://docs.docker.com/engine/security/rootless/) that user maps to an unmapped subordinate UID, so writes to the bind-mounted `/workspace` fail with `Permission denied`. Set `PHASEKIT_ROOTLESS_DOCKER=1` to run as UID 0 instead — under rootless Docker that maps back to your host user, so `/workspace` is owned correctly while the rootless security boundary is preserved.
+
+```bash
+PHASEKIT_ROOTLESS_DOCKER=1 bash scripts/container-setup.sh run
+```
+
+Confirm it's active from the startup line `Container user override: running as '0:0'`. Default behavior is unchanged when unset. See `docs/CONTAINERIZATION.md` → "Rootless Docker" for the full rationale and the `PHASEKIT_CONTAINER_USER` (`root` or `uid:gid`) override.
+
 ### Pre-commit verification gate
 
 The wrapper runs `scripts/phasekit-verify.sh` before every phase commit (whether or not AUTO_PUSH is set). A non-zero exit blocks the commit, writes `artifacts/phase-verify-failed.json`, and the next iteration directs Claude to fix the failure before doing new work. After three consecutive failures the loop stops with `phase-blocked.json`.
