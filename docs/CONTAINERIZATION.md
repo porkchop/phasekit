@@ -292,6 +292,7 @@ The script checks: core tools (claude, git, jq, python3+pyyaml), Playwright MCP 
 - **"ANTHROPIC_API_KEY is not set"**: Export the variable before running
 - **"Firewall initialization failed"**: Ensure Docker supports `--cap-add=NET_ADMIN` (rootless Docker may not)
 - **Permission errors on /workspace**: Under standard Docker, ensure the host directory is readable by UID 1000 (the `node` user). Under **rootless Docker** these errors are expected with the default user — run with `PHASEKIT_ROOTLESS_DOCKER=1` (see [Rootless Docker](#rootless-docker))
+- **`fatal: detected dubious ownership in repository at '/workspace'`** (git exits 128): the bind-mounted workspace is owned by a different UID than the container user. The image marks `/workspace` as a git `safe.directory`, so **rebuild** to pick up the fix (`bash scripts/container-setup.sh build`). If extending the image with your own Dockerfile, re-apply `git config --global --add safe.directory /workspace`
 - **Claude CLI not found**: Rebuild the image to pick up the latest CLI version
 - **Phase loop exits immediately**: Check that `CONTINUE_PROMPT.txt` exists in the repo root
 - **Firewall blocking needed domains**: Check `init-firewall.sh` whitelist; add domains if your workflow requires additional network access

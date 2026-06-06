@@ -88,6 +88,16 @@ ENV SHELL=/bin/bash
 RUN git config --global user.name "Scaffold Runner" && \
   git config --global user.email "scaffold-runner@localhost"
 
+# SCAFFOLD: Trust the bind-mounted workspace.
+# /workspace is a bind mount, so its files are owned by the host user's UID. When
+# that differs from the container user — always the case under rootless Docker,
+# and common otherwise — git's "dubious ownership" guard aborts every command
+# with exit 128 ("detected dubious ownership in repository at '/workspace'"),
+# which would break the loop's between-phase commit step. /workspace is our own
+# controlled mount, so marking it safe is correct. Baked into /home/node/.gitconfig,
+# which is read in both the default (node) and rootless-root (HOME=/home/node) modes.
+RUN git config --global --add safe.directory /workspace
+
 # Install Claude Code
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 

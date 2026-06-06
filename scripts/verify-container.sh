@@ -72,6 +72,18 @@ echo "Chromium:"
 check "playwright browser cache exists" bash -c "ls /home/node/.cache/ms-playwright/chromium-*/chrome-linux*/chrome >/dev/null 2>&1 || ls /home/node/.cache/ms-playwright/chromium_headless_shell-*/headless_shell >/dev/null 2>&1"
 echo ""
 
+# --- Git workspace trust ---
+# git aborts with exit 128 ("dubious ownership") on a bind-mounted /workspace
+# whose owner UID differs from the container user (always under rootless Docker).
+# The image marks /workspace safe; confirm git can actually operate here.
+echo "Git workspace:"
+if [[ -d /workspace/.git ]]; then
+  check "git operates in /workspace (no dubious-ownership abort)" git -C /workspace status --porcelain
+else
+  echo "  skip  /workspace is not a git repo"
+fi
+echo ""
+
 # --- MCP settings injection ---
 echo "MCP settings injection:"
 SETTINGS_LOCAL="/workspace/.claude/settings.local.json"
