@@ -28,6 +28,61 @@ def _run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
 
+def _git(repo, *args):
+    return _run(["git", "-C", str(repo), *args])
+
+
+class InstallerBranchFastForward(unittest.TestCase):
+    """Re-running the installer on a branch ref must advance to the remote tip.
+
+    Regression for: `PHASEKIT_REF=master` did a bare `git checkout master`,
+    stranding an existing install on a stale local branch (the `fetch` only
+    moves remote-tracking refs). Uses a throwaway local "remote" so it runs
+    fully offline — the fast-forward happens before the network-dependent venv
+    step, so we assert on git state regardless of the installer's exit code.
+    """
+
+    def test_existing_install_fast_forwards_to_remote_tip(self):
+        with tempfile.TemporaryDirectory() as d:
+            remote = Path(d) / "remote"
+            home = Path(d) / "share" / "phasekit"
+            ident = ["-c", "user.email=t@t", "-c", "user.name=t"]
+
+            # Build a remote with two commits on the default branch.
+            remote.mkdir(parents=True)
+            self.assertEqual(_git(remote, "init", "-q", "-b", "master").returncode, 0)
+            (remote / "a").write_text("1")
+            _git(remote, "add", "-A")
+            _run(["git", "-C", str(remote), *ident, "commit", "-q", "-m", "A"])
+            (remote / "b").write_text("2")
+            _git(remote, "add", "-A")
+            _run(["git", "-C", str(remote), *ident, "commit", "-q", "-m", "B"])
+            tip = _git(remote, "rev-parse", "master").stdout.strip()
+
+            # Existing install: clone, then rewind local master one commit so it
+            # is behind origin/master — exactly the stranded-install state.
+            home.parent.mkdir(parents=True)
+            self.assertEqual(_git(remote, "clone", "-q", ".", str(home)).returncode, 0)
+            _git(home, "reset", "--hard", "-q", "HEAD~1")
+            self.assertNotEqual(_git(home, "rev-parse", "HEAD").stdout.strip(), tip)
+
+            # Re-run the installer targeting the branch. The venv step may fail
+            # offline; we only assert the repo advanced to the remote tip.
+            env = {
+                **os.environ,
+                "PHASEKIT_URL": str(remote),
+                "PHASEKIT_REF": "master",
+                "PHASEKIT_HOME": str(home),
+                "PHASEKIT_BIN": str(Path(d) / "bin"),
+            }
+            _run(["bash", str(INSTALLER)], env=env)
+
+            self.assertEqual(
+                _git(home, "rev-parse", "HEAD").stdout.strip(), tip,
+                "installer left the branch behind the remote tip",
+            )
+
+
 class SyntaxChecks(unittest.TestCase):
     def test_install_sh_parses(self):
         self.assertEqual(_run(["bash", "-n", str(INSTALLER)]).returncode, 0)

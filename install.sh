@@ -58,12 +58,18 @@ if [[ -z "$ref" ]]; then
          | sed 's#^origin/##')"
   ref="${ref:-master}"
   say "no release tags found; tracking '$ref'"
-  git -C "$PHASEKIT_HOME" checkout --quiet "$ref"
-  git -C "$PHASEKIT_HOME" pull --quiet --ff-only origin "$ref" || true
 else
   say "checking out release $ref"
-  git -C "$PHASEKIT_HOME" checkout --quiet "$ref"
 fi
+
+git -C "$PHASEKIT_HOME" checkout --quiet "$ref"
+# If $ref names a branch, fast-forward it to the remote tip so a re-run picks up
+# new commits (e.g. PHASEKIT_REF=master, or the default-branch fallback) instead
+# of stranding the install on a stale local branch. The fetch above only updates
+# remote-tracking refs, so a bare `checkout master` leaves local master behind.
+# No-op for tags and detached SHAs: `origin/<tag-or-sha>` doesn't exist, so the
+# merge fails and is swallowed, leaving the exact ref checked out.
+git -C "$PHASEKIT_HOME" merge --ff-only --quiet "origin/$ref" 2>/dev/null || true
 
 # --- 4. isolated venv with the one dependency (pyyaml) ----------------------
 if [[ ! -x "$PHASEKIT_HOME/.venv/bin/python" ]]; then
