@@ -149,6 +149,12 @@ Escape hatches:
 
 Configuration is project-owned: edit `scripts/phasekit-verify.sh` (rendered into the project at enrich time) to declare the right fast checks for the stack. Until configured, the gate fail-opens with a warning so un-instrumented projects continue to work.
 
+### Self-hosting gap (phasekit on phasekit)
+
+The verify script is *rendered* into downstream projects from `templates/phasekit-verify.template.sh`; the phasekit source repo deliberately does not carry a rendered `scripts/phasekit-verify.sh` (it would shadow the template). So when the autonomous loop runs **on phasekit itself** (self-improvement runs), the gate fail-opens with a warning — phasekit does not currently enforce its own pre-commit checks. This is a known gap, not a bug: every enriched downstream project still gets a working gate.
+
+To close it, phasekit would gain its own `scripts/phasekit-verify.sh` running the checks we already run by hand (`python3 -m unittest discover tests` + `python3 scripts/enrich-project.py --self-check`), registered so it does not collide with the rendered template. Deferred until we decide to dogfood; promote to an ADR if/when that decision is made.
+
 ## Suggested phase approval artifact
 
 ```json

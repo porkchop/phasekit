@@ -135,6 +135,9 @@ run_verify_gate() {
   fi
 
   if [[ -z "$cmd" ]]; then
+    # Expected on the phasekit source repo itself: the verify script is rendered
+    # into downstream projects but not committed here, so self-improvement loops
+    # fail-open. Known gap — see docs/QUALITY_GATES.md "Self-hosting gap".
     echo "WARN: no verify configured (scripts/phasekit-verify.sh not present)" >&2
     echo "      see docs/QUALITY_GATES.md 'Pre-commit verification gate' to enable" >&2
     rm -f "$ARTIFACTS_DIR/phase-verify-failed.json"
