@@ -15,7 +15,8 @@ phasekit status             # current phase state (derived from workflow artifac
 phasekit check              # audit current state against the recorded manifest
 phasekit check-version      # is a newer scaffold release available?
 phasekit upgrade            # re-provision against the current scaffold
-phasekit self-update        # move the phasekit install to the latest release tag
+phasekit channel            # show/set the self-update channel (stable|edge|<ref>)
+phasekit self-update        # move the phasekit install along its channel
 
 # Raw-flag forms still work (and can target a path), e.g.:
 phasekit --reconcile .      # rebuild the manifest from disk (pre-M9 projects)
@@ -24,7 +25,26 @@ phasekit --migrate-only .   # migrate the manifest schema forward, no other effe
 
 ## The canonical clone (source of truth)
 
-`install.sh` clones phasekit to `${XDG_DATA_HOME:-~/.local/share}/phasekit` and writes a `phasekit` launcher to `~/.local/bin` that runs the engine from that clone (under an isolated venv). Because `enrich-project.py` reads every scaffold source relative to its own location, **that clone is the single source for both running and upgrading any project** — you `cd` into a project and run a verb. `phasekit self-update` (or re-running the installer) moves the clone to the latest release tag. A project's own vendored `scripts/` are loop runtime, not the upgrade source.
+`install.sh` clones phasekit to `${XDG_DATA_HOME:-~/.local/share}/phasekit` and writes a `phasekit` launcher to `~/.local/bin` that runs the engine from that clone (under an isolated venv). Because `enrich-project.py` reads every scaffold source relative to its own location, **that clone is the single source for both running and upgrading any project** — you `cd` into a project and run a verb. `phasekit self-update` (or re-running the installer) moves the clone along its channel (see below). A project's own vendored `scripts/` are loop runtime, not the upgrade source.
+
+### Update channels (stable / edge)
+
+The clone follows a **channel** that decides which ref `self-update` moves it to (full rationale in `docs/adr/ADR-0002-self-update-channels.md`):
+
+- **`stable`** (default) — the latest `v*` release tag. Recommended for projects that consume phasekit; reproducible and reviewed.
+- **`edge`** — the tip of the default branch (`origin/master`). For developing phasekit itself or riding fixes before a release. **Opt-in and loud:** `self-update` prints an "unreleased" warning, because `edge` means `phasekit upgrade` can provision pre-release scaffold into downstream projects.
+- **`<ref>`** — an explicit pin to a tag or sha; does not auto-advance.
+
+```bash
+phasekit channel            # print the current channel (default: stable)
+phasekit channel edge       # follow origin/master from now on
+phasekit channel stable     # back to release tags
+phasekit self-update        # apply the current channel
+```
+
+The channel is persisted in `<clone>/.phasekit-channel` and is the single source of truth shared by `self-update` and `install.sh`. The installer also sets it from `PHASEKIT_REF`: the default branch → `edge`, a release tag → `stable`, anything else → a pin. With no `PHASEKIT_REF`, re-running the installer follows the persisted channel. Existing installs with no channel file default to `stable`, so behavior is unchanged until you opt in.
+
+> Note: `phasekit check-version` is not yet channel-aware — on `edge` it still reports against release tags. Tracked as a fast-follow in ADR-0002.
 
 ## Provenance: `.scaffold/manifest.json`
 

@@ -2,9 +2,12 @@
 
 ## Status
 
-Proposed (2026-06-05). Not yet implemented. Supersedes the implicit
-"self-update always tracks the latest release tag" behavior in
-`scripts/phasekit.sh` if accepted.
+Accepted (2026-06-05). Implemented: `scripts/phasekit-channel.sh` (shared
+resolution library), the `phasekit channel` verb and channel-aware
+`self-update` in `scripts/phasekit.sh`, channel persistence/honoring in
+`install.sh`, and tests in `tests/test_installer.py`. Supersedes the implicit
+"self-update always tracks the latest release tag" behavior. The
+`check-version` channel-awareness in "Follow-up" remains outstanding.
 
 ## Context
 

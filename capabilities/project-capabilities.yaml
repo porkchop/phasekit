@@ -319,6 +319,15 @@ scripts:
     # `bash scripts/phasekit.sh --check .` from inside any
     # phasekit-enriched project, or aliased system-wide.
 
+  phasekit-channel:
+    path: scripts/phasekit-channel.sh
+    required: false
+    ownership: scaffold
+    # Sourced by phasekit.sh (and install.sh) — single source of truth for
+    # self-update channel resolution (stable/edge/pin). Vendored alongside
+    # phasekit.sh so the wrapper's `channel`/`self-update` verbs work from the
+    # installed clone. See docs/adr/ADR-0002-self-update-channels.md.
+
 generation:
   output_root: generated
   skills_output_root: dist/skills

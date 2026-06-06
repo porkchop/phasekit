@@ -17,7 +17,10 @@
 #   PHASEKIT_URL   git remote to clone (default: the public GitHub repo)
 #   PHASEKIT_HOME  install location    (default: ${XDG_DATA_HOME:-~/.local/share}/phasekit)
 #   PHASEKIT_BIN   launcher directory  (default: ~/.local/bin)
-#   PHASEKIT_REF   pin a tag/branch    (default: latest v* release tag, else default branch)
+#   PHASEKIT_REF   one-shot ref to check out (a tag/branch/sha). Also sets the
+#                  self-update channel: the default branch -> edge, a release tag
+#                  -> stable, anything else -> a pin. Omit to follow the persisted
+#                  channel (default: stable = latest v* tag). See ADR-0002.
 set -euo pipefail
 
 PHASEKIT_URL="${PHASEKIT_URL:-https://github.com/porkchop/phasekit.git}"
@@ -47,29 +50,52 @@ else
   git clone --quiet "$PHASEKIT_URL" "$PHASEKIT_HOME"
 fi
 
-# --- 3. resolve and check out the release ref -------------------------------
-ref="$PHASEKIT_REF"
-if [[ -z "$ref" ]]; then
-  ref="$(git -C "$PHASEKIT_HOME" tag -l 'v*' | sort -V | tail -n1)"
-fi
-if [[ -z "$ref" ]]; then
-  # No release tags yet: fall back to the remote's default branch.
-  ref="$(git -C "$PHASEKIT_HOME" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null \
-         | sed 's#^origin/##')"
-  ref="${ref:-master}"
-  say "no release tags found; tracking '$ref'"
+# --- 3. resolve channel + ref, then check out -------------------------------
+# Channel model (docs/adr/ADR-0002-self-update-channels.md): the clone tracks a
+# stable (latest tag), edge (default-branch tip), or pinned ref, persisted in
+# <home>/.phasekit-channel and honored by `phasekit self-update`. The channel
+# library is vendored in the clone, so it is available after section 2 — except
+# on a one-time upgrade from a pre-ADR-0002 install, handled by the fallback.
+if [[ -f "$PHASEKIT_HOME/scripts/phasekit-channel.sh" ]]; then
+  # shellcheck source=scripts/phasekit-channel.sh
+  source "$PHASEKIT_HOME/scripts/phasekit-channel.sh"
+  if [[ -n "$PHASEKIT_REF" ]]; then
+    # Explicit ref wins; classify it into the channel to remember going forward.
+    channel="$(pk_channel_classify_ref "$PHASEKIT_HOME" "$PHASEKIT_REF")"
+    say "checking out '$PHASEKIT_REF' (channel: $channel)"
+    git -C "$PHASEKIT_HOME" checkout --quiet "$PHASEKIT_REF"
+    git -C "$PHASEKIT_HOME" merge --ff-only --quiet "origin/$PHASEKIT_REF" 2>/dev/null || true
+  else
+    # No explicit ref: follow the persisted channel (default stable on a fresh
+    # install), so re-running the installer respects a previously-set 'edge'.
+    channel="$(pk_channel_read "$PHASEKIT_HOME")"
+    say "channel: $channel"
+    pk_channel_checkout "$PHASEKIT_HOME" "$channel" \
+      || die "no ref resolved for channel '$channel' (empty remote?)."
+  fi
+  pk_channel_write "$PHASEKIT_HOME" "$channel"
+  if pk_channel_is_edge "$channel"; then
+    say "NOTE: channel '$channel' tracks unreleased phasekit; downstream upgrades may get pre-release scaffold."
+  fi
 else
-  say "checking out release $ref"
+  # Legacy fallback: upgrading a clone that predates the channel library. Use the
+  # original resolve-and-checkout; the next run will have the library and honor
+  # channels. Keep in sync with pk_channel_resolve_ref's stable/edge mapping.
+  ref="$PHASEKIT_REF"
+  if [[ -z "$ref" ]]; then
+    ref="$(git -C "$PHASEKIT_HOME" tag -l 'v*' | sort -V | tail -n1)"
+  fi
+  if [[ -z "$ref" ]]; then
+    ref="$(git -C "$PHASEKIT_HOME" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null \
+           | sed 's#^origin/##')"
+    ref="${ref:-master}"
+    say "no release tags found; tracking '$ref'"
+  else
+    say "checking out release $ref"
+  fi
+  git -C "$PHASEKIT_HOME" checkout --quiet "$ref"
+  git -C "$PHASEKIT_HOME" merge --ff-only --quiet "origin/$ref" 2>/dev/null || true
 fi
-
-git -C "$PHASEKIT_HOME" checkout --quiet "$ref"
-# If $ref names a branch, fast-forward it to the remote tip so a re-run picks up
-# new commits (e.g. PHASEKIT_REF=master, or the default-branch fallback) instead
-# of stranding the install on a stale local branch. The fetch above only updates
-# remote-tracking refs, so a bare `checkout master` leaves local master behind.
-# No-op for tags and detached SHAs: `origin/<tag-or-sha>` doesn't exist, so the
-# merge fails and is swallowed, leaving the exact ref checked out.
-git -C "$PHASEKIT_HOME" merge --ff-only --quiet "origin/$ref" 2>/dev/null || true
 
 # --- 4. isolated venv with the one dependency (pyyaml) ----------------------
 if [[ ! -x "$PHASEKIT_HOME/.venv/bin/python" ]]; then

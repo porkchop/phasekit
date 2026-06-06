@@ -28,7 +28,7 @@ Each phase ends with `artifacts/phase-approval.json` and an external commit. The
 curl -fsSL https://raw.githubusercontent.com/porkchop/phasekit/master/install.sh | bash
 ```
 
-This installs a canonical phasekit clone to `~/.local/share/phasekit` (with an isolated venv for its one dependency) and puts a `phasekit` command on your PATH. It tracks the latest release tag and **does not touch any project** — you enrich a project explicitly afterwards. Re-run it (or `phasekit self-update`) to move to the newest release.
+This installs a canonical phasekit clone to `~/.local/share/phasekit` (with an isolated venv for its one dependency) and puts a `phasekit` command on your PATH. It tracks the latest release tag (the `stable` channel) and **does not touch any project** — you enrich a project explicitly afterwards. Re-run it (or `phasekit self-update`) to move to the newest release; `phasekit channel edge` switches to tracking `origin/master` (see `docs/INSTALL_LIFECYCLE.md`).
 
 Prefer to read before running? Download and inspect first:
 
@@ -81,7 +81,8 @@ phasekit check-version          # is a newer scaffold release available?
 phasekit upgrade --dry-run      # plan an upgrade
 phasekit upgrade --yes          # apply scaffold updates
 phasekit upgrade --keep-local docs/X.md   # preserve specific project edits
-phasekit self-update            # move the phasekit install to the latest release tag
+phasekit channel [name]         # show/set self-update channel (stable|edge|<ref>)
+phasekit self-update            # move the phasekit install along its channel
 ```
 
 Anything the engine supports is still available in raw-flag form (forwarded verbatim), which also lets you target a project by path from anywhere:

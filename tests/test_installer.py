@@ -13,6 +13,7 @@ Run from the repo root: `python3 -m unittest tests.test_installer`
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -166,6 +167,120 @@ class InstallerIntegration(unittest.TestCase):
                 cv = _run([str(shim), "check-version"], cwd=proj)
                 self.assertEqual(cv.returncode, 0, msg=cv.stderr)
                 self.assertIn("up to date", cv.stdout)
+
+
+class Channels(unittest.TestCase):
+    """ADR-0002 self-update channels: the `channel` verb and install.sh
+    persistence/honoring. Fully offline — the channel is written before the
+    network-dependent venv step, so we assert on git/file state regardless of
+    the installer's exit code."""
+
+    IDENT = ["-c", "user.email=t@t", "-c", "user.name=t"]
+
+    def _commit(self, repo, name, content="x"):
+        (Path(repo) / name).write_text(content)
+        _git(repo, "add", "-A")
+        _run(["git", "-C", str(repo), *self.IDENT, "commit", "-q", "-m", name])
+        return _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    def _make_remote(self, d):
+        """A remote that is a minimal but canonical phasekit clone source: the
+        real channel library + wrapper, guard stubs, a v0.1.0 tag on an early
+        commit, and a later master tip (so stable != edge)."""
+        remote = Path(d) / "remote"
+        (remote / "scripts").mkdir(parents=True)
+        (remote / "capabilities").mkdir(parents=True)
+        for s in ("phasekit-channel.sh", "phasekit.sh"):
+            shutil.copy(REPO_ROOT / "scripts" / s, remote / "scripts" / s)
+        (remote / "scripts" / "enrich-project.py").write_text("# stub\n")
+        (remote / "capabilities" / "project-capabilities.yaml").write_text("# stub\n")
+        _git(remote, "init", "-q", "-b", "master")
+        _git(remote, "add", "-A")
+        _run(["git", "-C", str(remote), *self.IDENT, "commit", "-q", "-m", "A"])
+        a = _git(remote, "rev-parse", "HEAD").stdout.strip()
+        _git(remote, "tag", "v0.1.0")
+        b = self._commit(remote, "b.txt")
+        return remote, a, b
+
+    def _install(self, url, home, ref=None):
+        env = {**os.environ, "PHASEKIT_URL": str(url), "PHASEKIT_HOME": str(home),
+               "PHASEKIT_BIN": str(Path(home).parent / "bin")}
+        if ref is not None:
+            env["PHASEKIT_REF"] = ref
+        return _run(["bash", str(INSTALLER)], env=env)
+
+    def test_install_defaults_to_stable_then_edge_persists(self):
+        with tempfile.TemporaryDirectory() as d:
+            remote, tag_commit, tip = self._make_remote(d)
+            home = Path(d) / "share" / "phasekit"
+            chan = home / ".phasekit-channel"
+
+            # Fresh install, no ref → stable → latest tag (v0.1.0 commit).
+            self._install(remote, home)
+            self.assertEqual(chan.read_text().strip(), "stable")
+            self.assertEqual(_git(home, "rev-parse", "HEAD").stdout.strip(), tag_commit)
+
+            # Explicit PHASEKIT_REF=master → edge channel, master tip.
+            self._install(remote, home, ref="master")
+            self.assertEqual(chan.read_text().strip(), "edge")
+            self.assertEqual(_git(home, "rev-parse", "HEAD").stdout.strip(), tip)
+
+            # Append to remote; re-run with NO ref must honor persisted edge and advance.
+            new_tip = self._commit(remote, "c.txt")
+            self._install(remote, home)
+            self.assertEqual(chan.read_text().strip(), "edge")
+            self.assertEqual(_git(home, "rev-parse", "HEAD").stdout.strip(), new_tip)
+
+    def test_self_update_follows_channel(self):
+        with tempfile.TemporaryDirectory() as d:
+            remote, tag_commit, tip = self._make_remote(d)
+            home = Path(d) / "home"
+            _run(["git", "clone", "-q", str(remote), str(home)])
+            shim = home / "scripts" / "phasekit.sh"
+
+            # edge → advance to master tip, with the unreleased warning.
+            _run(["bash", str(shim), "channel", "edge"])
+            up = _run(["bash", str(shim), "self-update"])
+            self.assertEqual(up.returncode, 0, msg=up.stderr)
+            self.assertEqual(_git(home, "rev-parse", "HEAD").stdout.strip(), tip)
+            self.assertIn("UNRELEASED", up.stdout + up.stderr)
+
+            # stable → move to the latest tag, no warning.
+            _run(["bash", str(shim), "channel", "stable"])
+            up = _run(["bash", str(shim), "self-update"])
+            self.assertEqual(up.returncode, 0, msg=up.stderr)
+            self.assertEqual(_git(home, "rev-parse", "HEAD").stdout.strip(), tag_commit)
+            self.assertNotIn("UNRELEASED", up.stdout + up.stderr)
+
+    def _fake_clone(self, d, *, canonical):
+        """Minimal layout to drive scripts/phasekit.sh. With canonical=True it
+        satisfies require_canonical_clone; otherwise the guard files are absent."""
+        repo = Path(d) / "clone"
+        (repo / "scripts").mkdir(parents=True)
+        for s in ("phasekit.sh", "phasekit-channel.sh"):
+            shutil.copy(REPO_ROOT / "scripts" / s, repo / "scripts" / s)
+        _git(repo, "init", "-q")
+        if canonical:
+            (repo / "scripts" / "enrich-project.py").write_text("# stub\n")
+            (repo / "capabilities").mkdir()
+            (repo / "capabilities" / "project-capabilities.yaml").write_text("# stub\n")
+        return repo / "scripts" / "phasekit.sh"
+
+    def test_channel_verb_reads_default_and_sets(self):
+        with tempfile.TemporaryDirectory() as d:
+            shim = self._fake_clone(d, canonical=True)
+            self.assertEqual(_run(["bash", str(shim), "channel"]).stdout.strip(), "stable")
+            set_r = _run(["bash", str(shim), "channel", "edge"])
+            self.assertEqual(set_r.returncode, 0, msg=set_r.stderr)
+            self.assertEqual((shim.parent.parent / ".phasekit-channel").read_text().strip(), "edge")
+            self.assertEqual(_run(["bash", str(shim), "channel"]).stdout.strip(), "edge")
+
+    def test_channel_verb_refuses_outside_canonical_clone(self):
+        with tempfile.TemporaryDirectory() as d:
+            shim = self._fake_clone(d, canonical=False)
+            r = _run(["bash", str(shim), "channel", "edge"])
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("refusing", (r.stdout + r.stderr).lower())
 
 
 if __name__ == "__main__":
