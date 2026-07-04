@@ -123,7 +123,7 @@ run_container() {
   echo "Starting container from: $ROOT_DIR"
 
   local docker_args=(
-    --rm -it
+    --rm
     --cap-drop=ALL
     --cap-add=NET_ADMIN
     --cap-add=NET_RAW
@@ -134,6 +134,17 @@ run_container() {
     -e MAX_ITERATIONS="${MAX_ITERATIONS:-50}"
     -e CLAUDE_CONFIG_DIR=/home/node/.claude
   )
+
+  # Allocate an interactive TTY only when we actually have one. Under
+  # non-interactive invocation — OpenClaw over `ssh host '…'`, a cron/systemd
+  # unit, or any pipe — stdin/stdout are not terminals, and `docker run -t`
+  # aborts with "the input device is not a TTY" (requiring the `ssh -tt`
+  # workaround). The autonomous loop reads its prompt from a file (run-phase.sh)
+  # and pipes claude's output, so it needs neither -i nor -t. Interactive
+  # terminal use still gets both, preserving Ctrl-C and live output.
+  if [[ -t 0 && -t 1 ]]; then
+    docker_args+=(-it)
+  fi
 
   # Optional rootless-Docker mode: run as the requested container user (UID 0
   # for "root"). We deliberately keep HOME pointed at /home/node so every asset
@@ -151,6 +162,23 @@ run_container() {
     docker_args+=(--user "$user_spec")
     docker_args+=(-e HOME=/home/node)
     echo "Container user override: running as '$user_spec' (HOME=/home/node)"
+    # The image bakes /home/node (and its .gitconfig, caches, .claude mount)
+    # owned by the `node` user (UID 1000). Running as UID 0 does NOT bypass
+    # those permissions here because --cap-drop=ALL removes CAP_DAC_OVERRIDE —
+    # so container-root cannot write its own $HOME and git aborts with
+    # "could not lock config file /home/node/.gitconfig: Permission denied".
+    # Restore just that one capability for the root case. In rootless Docker,
+    # container UID 0 maps to the unprivileged host user, so DAC_OVERRIDE stays
+    # contained to that user's namespace and grants no host privilege.
+    if [[ "$user_spec" == "0:0" ]]; then
+      docker_args+=(--cap-add=DAC_OVERRIDE)
+      # Claude Code refuses --permission-mode bypassPermissions (the autonomous
+      # loop's mode, set in run-phase.sh) when running as UID 0, unless
+      # IS_SANDBOX=1 declares the environment sandboxed. This container is
+      # genuinely sandboxed (default-deny firewall + --cap-drop=ALL), so the
+      # declaration is honest and is required for root-mode autonomous runs.
+      docker_args+=(-e IS_SANDBOX=1)
+    fi
   fi
 
   # Pass API key only if set — omitting it lets Claude use stored subscription credentials.

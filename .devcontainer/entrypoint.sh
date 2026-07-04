@@ -14,6 +14,14 @@ if ! sudo /usr/local/bin/init-firewall.sh; then
     exit 1
 fi
 
+# Trust the bind-mounted workspace for git. When the container user differs from
+# the /workspace owner — e.g. UID 0 in rootless mode (see
+# scripts/container-setup.sh) — git otherwise aborts with "detected dubious
+# ownership in repository at '/workspace'". Idempotent across restarts.
+if ! git config --global --get-all safe.directory 2>/dev/null | grep -qx /workspace; then
+    git config --global --add safe.directory /workspace
+fi
+
 # Override default git identity if env vars are set
 if [[ -n "${GIT_USER_NAME:-}" ]]; then
     git config --global user.name "$GIT_USER_NAME"
