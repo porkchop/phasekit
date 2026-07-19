@@ -135,6 +135,16 @@ run_container() {
     -e CLAUDE_CONFIG_DIR=/home/node/.claude
   )
 
+  # Optional deterministic container name. An outer supervisor (e.g. the
+  # foundry orchestrator's run-session.sh) sets PHASEKIT_CONTAINER_NAME so it
+  # can `docker kill` the container if the bounded session times out — GNU
+  # `timeout` kills the wrapper process tree but NOT the docker-run child's
+  # container, which otherwise keeps running (and spending) as an orphan.
+  # Unset → docker assigns a random name, exactly as before.
+  if [[ -n "${PHASEKIT_CONTAINER_NAME:-}" ]]; then
+    docker_args+=(--name "$PHASEKIT_CONTAINER_NAME")
+  fi
+
   # Allocate an interactive TTY only when we actually have one. Under
   # non-interactive invocation — OpenClaw over `ssh host '…'`, a cron/systemd
   # unit, or any pipe — stdin/stdout are not terminals, and `docker run -t`
