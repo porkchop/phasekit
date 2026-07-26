@@ -79,6 +79,24 @@ check_for_scaffold_update() {
   return 0
 }
 
+ensure_logs_excluded() {
+  # The loop never commits artifacts/logs/* (see commit_from_artifact), but
+  # leaving them untracked-and-unignored makes every post-run `git status
+  # --porcelain` cleanliness check (e.g. an orchestrator's iterate/intake
+  # gate) see a dirty tree. Exclude them repo-locally via .git/info/exclude —
+  # unlike .gitignore this ships nothing downstream and can't collide with
+  # project-owned ignore rules. Best-effort: never blocks the loop.
+  local exclude_file
+  exclude_file="$(git -C "$ROOT_DIR" rev-parse --git-path info/exclude 2>/dev/null)" || return 0
+  [[ -n "$exclude_file" ]] || return 0
+  # rev-parse --git-path may return a relative path; resolve from ROOT_DIR.
+  [[ "$exclude_file" = /* ]] || exclude_file="$ROOT_DIR/$exclude_file"
+  grep -qxF "artifacts/logs/" "$exclude_file" 2>/dev/null && return 0
+  mkdir -p "$(dirname "$exclude_file")" 2>/dev/null || return 0
+  echo "artifacts/logs/" >> "$exclude_file" 2>/dev/null || true
+  return 0
+}
+
 cleanup_artifacts() {
   # Remove transient signal artifacts from the previous iteration.
   # phase-approval.json is NOT deleted — it persists as the durable
@@ -326,6 +344,9 @@ fi
 # Once-per-run, non-fatal nudge if a newer phasekit release is available.
 check_for_scaffold_update || true
 
+# Once-per-run: keep per-iteration logs out of git status (see function docs).
+ensure_logs_excluded || true
+
 while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   echo "=== Iteration $iteration ==="
   cleanup_artifacts
@@ -354,8 +375,34 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   if [[ -f "$ARTIFACTS_DIR/project-complete.json" ]]; then
     echo "Project complete artifact detected:"
     print_json_summary "$ARTIFACTS_DIR/project-complete.json"
-    echo "Run finished successfully."
-    exit 0
+    # Final-commit gate. The last iteration's work (and project-complete.json
+    # itself) must land in git before the loop exits — exiting here without
+    # committing left a dirty tree behind every completed run and forced a
+    # manual reconcile each time (5 reconciles on 2026-07-25/26).
+    crc=0
+    commit_from_artifact \
+      "$ARTIFACTS_DIR/project-complete.json" \
+      "chore(workflow): final session work + project completion record" || crc=$?
+    if [[ "$crc" -eq 0 || "$crc" -eq 2 ]]; then
+      # 0 = final work committed; 2 = nothing substantive left (already
+      # committed) — both are a clean finish.
+      echo "Run finished successfully."
+      exit 0
+    fi
+    # Verify gate failed on the final commit: the completion claim is not
+    # backed by passing checks. Re-enter the loop so the next iteration sees
+    # phase-verify-failed.json and fixes it (cleanup_artifacts clears the
+    # stale project-complete.json; the model re-emits it once green). The
+    # VERIFY_MAX_ATTEMPTS circuit breaker still bounds this via
+    # phase-blocked.json.
+    if [[ -f "$ARTIFACTS_DIR/phase-blocked.json" ]]; then
+      echo "Final commit blocked; completion not committed:"
+      print_json_summary "$ARTIFACTS_DIR/phase-blocked.json"
+      exit 2
+    fi
+    echo "Final commit failed verify — re-entering loop to fix before completing." >&2
+    iteration=$((iteration + 1))
+    continue
   fi
 
   if [[ -f "$ARTIFACTS_DIR/phase-approval.json" ]]; then
