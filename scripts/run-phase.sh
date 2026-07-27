@@ -69,6 +69,13 @@ CLAUDE_FLAGS=(--permission-mode bypassPermissions --verbose
 if [[ "$CLAUDE_MODE" == "continue" ]]; then
   CLAUDE_FLAGS+=(-c)
 fi
+# Per-project model choice (v0.4.5): ANTHROPIC_MODEL carries an alias
+# (fable/opus/sonnet/haiku) or a full claude-* id, set by the orchestrator
+# via build_env → run-session → container-setup. Passed explicitly as
+# --model rather than relying on env-var honoring. Empty/unset = CLI default.
+if [[ -n "${ANTHROPIC_MODEL:-}" ]]; then
+  CLAUDE_FLAGS+=(--model "$ANTHROPIC_MODEL")
+fi
 
 claude "${CLAUDE_FLAGS[@]}" -p "$PROMPT_CONTENT" 2>&1 \
   | tee "$RAW_LOG" \

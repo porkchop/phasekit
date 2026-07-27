@@ -212,6 +212,12 @@ run_container() {
     docker_args+=(-e AUTO_PUSH="$AUTO_PUSH")
   fi
 
+  # Per-project model choice (v0.4.5): forward so run-phase.sh can pass
+  # `--model` to the claude CLI. Empty/unset = CLI default.
+  if [[ -n "${ANTHROPIC_MODEL:-}" ]]; then
+    docker_args+=(-e ANTHROPIC_MODEL="$ANTHROPIC_MODEL")
+  fi
+
   # CLAUDE_MODE controls whether the inner loop starts a fresh session (`new`,
   # default) or resumes the most recent one (`continue`). Forward so users can
   # manually continue a run that crashed mid-iteration without editing scripts:
