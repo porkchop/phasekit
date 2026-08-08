@@ -78,8 +78,14 @@ done < <(echo "$gh_ranges" | jq -r '(.web + .api + .git)[]' | aggregate -q)
 # domain returns NXDOMAIN (verified 2026-05-03; upstream ships the entry
 # anyway and would also fail). Statsig telemetry continues to work via
 # `statsig.com`, which is the actual production endpoint.
+# DEVIATION FROM UPSTREAM: pypi.org + files.pythonhosted.org added so
+# Python projects' verify gates can `uv sync` wheels in-session (the managed
+# interpreter itself is baked into the image at build time; foundry
+# orchestrator self-management, 2026-08-08).
 for domain in \
     "registry.npmjs.org" \
+    "pypi.org" \
+    "files.pythonhosted.org" \
     "api.anthropic.com" \
     "claude.ai" \
     "sentry.io" \

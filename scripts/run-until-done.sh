@@ -184,13 +184,22 @@ run_verify_gate() {
   # Failure path. Capture context so the next iteration can diagnose.
   local exit_code="$verify_status"
   local prior_attempts=0
+  # A zero-byte artifact (crashed earlier writer) makes `jq -r` emit nothing
+  # with exit 0, so prior_attempts became "" and the arithmetic below aborted
+  # the whole capture under set -e — permanently re-poisoning the file and
+  # defeating the VERIFY_MAX_ATTEMPTS breaker (foundry-orchestrator run 49,
+  # 2026-08-08). Purge empty files and sanitize the read to digits.
+  if [[ -f "$ARTIFACTS_DIR/phase-verify-failed.json" && ! -s "$ARTIFACTS_DIR/phase-verify-failed.json" ]]; then
+    rm -f "$ARTIFACTS_DIR/phase-verify-failed.json"
+  fi
   if [[ -f "$ARTIFACTS_DIR/phase-verify-failed.json" ]]; then
     prior_attempts="$(jq -r '.attempts // 0' "$ARTIFACTS_DIR/phase-verify-failed.json" 2>/dev/null || echo 0)"
   fi
+  [[ "$prior_attempts" =~ ^[0-9]+$ ]] || prior_attempts=0
   local attempts=$((prior_attempts + 1))
   local tail_output
   tail_output="$(tail -n 200 "$log")"
-  jq -n \
+  if ! jq -n \
     --arg cmd "$cmd" \
     --arg label "$label" \
     --argjson exit_code "$exit_code" \
@@ -205,7 +214,13 @@ run_verify_gate() {
       attempts: $attempts,
       log_tail: $log,
       ts: $ts
-    }' > "$ARTIFACTS_DIR/phase-verify-failed.json"
+    }' > "$ARTIFACTS_DIR/phase-verify-failed.json" 2>/dev/null; then
+    # jq can choke on pathological log bytes; never leave a zero-byte
+    # artifact behind — write a minimal valid capture instead.
+    printf '{"verify_failed": true, "label": "%s", "exit_code": %s, "attempts": %s, "log_tail": "(unavailable: capture failed)", "ts": "%s"}\n' \
+      "$label" "$exit_code" "$attempts" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      > "$ARTIFACTS_DIR/phase-verify-failed.json"
+  fi
 
   echo "  Verify FAILED (attempt $attempts/$VERIFY_MAX_ATTEMPTS); see artifacts/phase-verify-failed.json" >&2
   echo "----- last 50 lines of verify output -----" >&2

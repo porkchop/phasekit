@@ -47,6 +47,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # SCAFFOLD: Install pyyaml for scaffold scripts
 RUN python3 -m pip install --break-system-packages pyyaml
 
+# SCAFFOLD: uv + a baked managed Python (for Python projects whose verify
+# gate runs `uv sync` — e.g. foundry-orchestrator requires-python >=3.12,
+# newer than bookworm's 3.11). Python is downloaded at image-build time so
+# sessions never need GitHub at runtime; wheels still need PyPI, which
+# init-firewall.sh allowlists. World-readable so both node and UID-0
+# (rootless) sessions can use it.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
+# copy mode: .venv lives on the /workspace bind mount (different fs from the
+# uv cache), where hardlinks fail; copy avoids per-session warnings/fallback.
+ENV UV_LINK_MODE=copy
+RUN uv python install 3.12 && chmod -R a+rX /opt/uv
+
 # Ensure default node user has access to /usr/local/share
 RUN mkdir -p /usr/local/share/npm-global && \
   chown -R node:node /usr/local/share
