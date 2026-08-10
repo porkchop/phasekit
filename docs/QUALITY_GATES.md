@@ -218,6 +218,22 @@ If required information is genuinely missing from the repo and cannot be resolve
 - write `artifacts/phase-blocked.json`
 - stop without writing `artifacts/phase-approval.json`
 
+### Scope containment + SPEC attestation (v0.4.8)
+
+The commit gate applies two observability checks (never blocking normal work,
+per the gate-recovery principle):
+
+- **Scope:** commits touching `.claude/settings.json` or `.github/workflows/`
+  are **refused** (security-critical pair; `artifacts/scope-refusal.json`
+  explains the fix — unstage/revert those files and re-write your signal
+  artifact). Commits touching other scaffold-class files **proceed with a
+  warning** recorded in `artifacts/scope-warning.json` (drift-check also
+  flags them; the orchestrator surfaces the warning to the operator).
+- **SPEC attestation:** any commit that changes `docs/SPEC.md` records the
+  added/removed line counts in `artifacts/spec-change.json`. SPEC evolution
+  is legitimate and expected (iterations extend acceptance criteria) — this
+  makes it *visible*, not forbidden.
+
 `phase-blocked.json` supports two optional operator-courtesy fields (v0.4.7):
 `unblock_command` — the exact ready-to-run one-liner that resolves the
 blocker, transcribed from something verified this session (never composed

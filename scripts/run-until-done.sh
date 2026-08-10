@@ -312,6 +312,52 @@ commit_from_artifact() {
     return 1
   fi
 
+  # Scope containment (v0.4.8, ADOPTIONS item 4 warn-first). Hard-refuse only
+  # the security pair where a bad commit IS the damage; scaffold-class edits
+  # warn via artifact (surfaced by the orchestrator) and proceed — per the
+  # gate-recovery principle, build-loop gates must not create stuck states.
+  local staged
+  staged="$(git diff --cached --name-only)"
+  if echo "$staged" | grep -qE '^\.claude/settings\.json$|^\.github/workflows/'; then
+    # Explain the refusal where the NEXT session will find it, so staged-but-
+    # uncommitted work is never a mystery state.
+    printf '{"scope_refused": true, "reason": "staged changes touch committed .claude/settings.json or .github/workflows/ — security-critical, never committed by the loop (docs/QUALITY_GATES.md scope containment)", "action": "git restore --staged <those files> (and revert them) then re-write your signal artifact; the wrapper will retry the commit", "ts": "%s"}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$ARTIFACTS_DIR/scope-refusal.json"
+    echo "run-until-done: REFUSED — staged changes touch committed .claude/settings.json or .github/workflows/ (security-critical). See artifacts/scope-refusal.json." >&2
+    return 1
+  fi
+  rm -f "$ARTIFACTS_DIR/scope-refusal.json"
+  if [[ -f "$ROOT_DIR/.scaffold/manifest.json" ]]; then
+    STAGED_FILES="$staged" python3 - "$ROOT_DIR/.scaffold/manifest.json" > "$ARTIFACTS_DIR/.scope-check.tmp" 2>/dev/null <<'PY' || true
+import json, os, sys
+manifest = json.load(open(sys.argv[1]))
+scaffold = {f["path"] for f in manifest.get("files", [])
+            if f.get("ownership") == "scaffold"}
+hits = sorted(set(os.environ.get("STAGED_FILES", "").split()) & scaffold)
+if hits:
+    from datetime import datetime, timezone
+    print(json.dumps({"scope_warning": True, "files": hits,
+                      "ts": datetime.now(timezone.utc).isoformat()}))
+PY
+    if [[ -s "$ARTIFACTS_DIR/.scope-check.tmp" ]]; then
+      mv "$ARTIFACTS_DIR/.scope-check.tmp" "$ARTIFACTS_DIR/scope-warning.json"
+      echo "run-until-done: WARNING — this commit edits scaffold-class files (recorded in artifacts/scope-warning.json; drift-check will also flag them). Proceeding." >&2
+    else
+      rm -f "$ARTIFACTS_DIR/.scope-check.tmp"
+    fi
+  fi
+
+  # SPEC change attestation (v0.4.8, ADOPTIONS item 2 simplified): make SPEC
+  # edits visible, never gated — record the staged numstat for the
+  # orchestrator to surface (brief line; advisory only above its threshold).
+  if echo "$staged" | grep -q '^docs/SPEC\.md$'; then
+    read -r spec_added spec_removed _ < <(git diff --cached --numstat -- docs/SPEC.md)
+    printf '{"spec_changed": true, "added_lines": %s, "removed_lines": %s, "ts": "%s"}\n' \
+      "${spec_added:-0}" "${spec_removed:-0}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      > "$ARTIFACTS_DIR/spec-change.json"
+    echo "run-until-done: note — docs/SPEC.md changed in this commit (+${spec_added:-0}/-${spec_removed:-0}); recorded in artifacts/spec-change.json" >&2
+  fi
+
   # Learnings secret scan (v0.4.7): docs/LEARNINGS.md is agent-appended free
   # text that ships in commits — refuse the commit if it matches obvious
   # credential shapes. Narrow patterns on purpose: false positives here block
