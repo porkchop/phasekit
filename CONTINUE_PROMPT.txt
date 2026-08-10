@@ -37,11 +37,17 @@ Operating rules:
 - In unattended mode, do not ask the user for confirmation merely to proceed with planning, red-team review, or internal phase decomposition
 - In unattended mode, do not ask for permission to write files — bypassPermissions is active, write directly to any file including .claude/agents/ and artifacts/
 - If new work is discovered and it is self-resolvable, update docs and phase structure as needed and continue or stop cleanly with a phase-update artifact
-- If genuine external input is required, write `artifacts/phase-blocked.json` and stop
+- If genuine external input is required, write `artifacts/phase-blocked.json` and stop. When you do, include two optional fields if you can: `unblock_command` (the EXACT ready-to-run one-liner that resolves the blocker — transcribed from something you verified in this session, never composed from memory) and `unblock_note` (one plain-language line on what it does; name any override or skip flag explicitly). Never place secrets, tokens, or credentials in these fields.
 - CRITICAL: Never exit without writing one of the four expected artifacts (phase-approval.json, phase-update.json, phase-blocked.json, project-complete.json) — the outer loop depends on finding one
 - Do not proceed past a completed phase without writing `artifacts/phase-approval.json`
 - If the project is complete, write `artifacts/project-complete.json`
 - Do not continue into the next phase until the repository has been committed externally
+
+Cross-session learnings (docs/LEARNINGS.md, if present):
+- Read it EARLY — it holds what previous sessions learned the hard way (env gotchas, build flakes, design context not obvious from code).
+- Before you finish, append any durable, non-obvious discovery from THIS session as a dated bullet: what + why it matters. Do NOT record progress notes ("implemented X") — phase artifacts carry those and they die with the session.
+- If the file exceeds ~150 lines, curate: merge related entries, tighten, drop what later work made obvious. Never blind oldest-first pruning.
+- Never write secrets, tokens, keys, or credentials into it — the commit gate scans it and will refuse.
 
 How to determine what is already approved:
 - Check `artifacts/phase-approval.json` — it records the most recently approved phase

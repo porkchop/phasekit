@@ -218,4 +218,12 @@ If required information is genuinely missing from the repo and cannot be resolve
 - write `artifacts/phase-blocked.json`
 - stop without writing `artifacts/phase-approval.json`
 
+`phase-blocked.json` supports two optional operator-courtesy fields (v0.4.7):
+`unblock_command` — the exact ready-to-run one-liner that resolves the
+blocker, transcribed from something verified this session (never composed
+from memory); and `unblock_note` — one plain-language line on what the
+command does, naming any override/skip flag explicitly. Downstream tooling
+renders these for the operator to copy; it never executes them. Secrets,
+tokens, and credentials are forbidden in both fields.
+
 Approved phase numbering must remain stable. Do not renumber already-approved phases retroactively.

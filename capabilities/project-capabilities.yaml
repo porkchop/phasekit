@@ -50,8 +50,10 @@ profiles:
       - ADR_TEMPLATE
       - CONTAINERIZATION
       - INSTALL_LIFECYCLE
+      - LEARNINGS
     include_hooks:
       - deny-dangerous-commands
+      - compact-reanchor
     include_scripts:
       - run-phase
       - run-until-done
@@ -245,6 +247,14 @@ docs:
     required: false
     ownership: scaffold
 
+  LEARNINGS:
+    path: docs/LEARNINGS.md
+    required: false
+    ownership: bootstrap-frozen
+    # v0.4.7 cross-session learnings loop (ADOPTIONS item 3v1): seeded from
+    # templates/learnings.template.md, then project-owned — sessions append
+    # durable discoveries; upgrade never overwrites.
+
   DESIGN:
     path: docs/DESIGN.md
     required: false
@@ -258,6 +268,14 @@ hooks:
     path: .claude/hooks/deny-dangerous-commands.sh
     required: true
     ownership: scaffold
+
+  compact-reanchor:
+    path: .claude/hooks/compact-reanchor.sh
+    required: false
+    ownership: scaffold
+    # v0.4.7 (ADOPTIONS item 1): SessionStart hook, fires ONLY on
+    # source=compact; re-anchors a compacted session with the earliest
+    # unapproved phase + SPEC acceptance criteria. Bounded, fail-open.
 
 scripts:
   run-phase:
@@ -410,6 +428,10 @@ files:
     ownership: scaffold-template
     # M10 — rendered into downstream docs/DESIGN.md when the with-design
     # profile is selected.
+
+  templates/learnings.template.md:
+    ownership: scaffold-template
+    # v0.4.7 — rendered into downstream docs/LEARNINGS.md (default profile).
 
   templates/adr.template.md:
     ownership: scaffold-template

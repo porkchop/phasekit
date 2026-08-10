@@ -312,6 +312,19 @@ commit_from_artifact() {
     return 1
   fi
 
+  # Learnings secret scan (v0.4.7): docs/LEARNINGS.md is agent-appended free
+  # text that ships in commits — refuse the commit if it matches obvious
+  # credential shapes. Narrow patterns on purpose: false positives here block
+  # real work (gate-recovery principle); the promote/mirror gates carry the
+  # broad lint.
+  if [[ -f "$ROOT_DIR/docs/LEARNINGS.md" ]] && git diff --cached --name-only | grep -q '^docs/LEARNINGS.md$'; then
+    if grep -nE 'sk-ant-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----' \
+        "$ROOT_DIR/docs/LEARNINGS.md" >&2; then
+      echo "run-until-done: REFUSED — docs/LEARNINGS.md matches a credential pattern (lines above). Remove the secret and retry." >&2
+      return 1
+    fi
+  fi
+
   git commit -m "$msg"
   auto_push_if_enabled
 }

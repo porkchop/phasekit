@@ -1438,6 +1438,7 @@ DOC_TEMPLATE_MAP = {
     "ARCHITECTURE": "templates/architecture.template.md",
     "PROD_REQUIREMENTS": "templates/prod-requirements.template.md",
     "DESIGN": "templates/design.template.md",  # M10 — opt-in via with-design profile
+    "LEARNINGS": "templates/learnings.template.md",  # v0.4.7 cross-session learnings
 }
 
 # Docs that exist in the scaffold but never install downstream (matches
