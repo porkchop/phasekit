@@ -149,6 +149,12 @@ Escape hatches:
 
 Configuration is project-owned: edit `scripts/phasekit-verify.sh` (rendered into the project at enrich time) to declare the right fast checks for the stack. Until configured, the gate fail-opens with a warning so un-instrumented projects continue to work.
 
+### Stack profiles seed a real gate (v0.5.0)
+
+Projects enriched with a **stack profile** (`python-uv`, `static-web`, `game-canvas`, `docs-only`) skip stub mode entirely: the verify script is rendered from that stack's template with working checks and `PHASEKIT_VERIFY_CONFIGURED=1` out of the box (uv sync → ruff → mypy → pytest for `python-uv`; node tests + no-dependency assertion + ESM import-graph check for `static-web`/`game-canvas`; an internal markdown link/reference checker for `docs-only`). The file is still project-owned after seeding — evolve it freely.
+
+On `--upgrade`, seeding fills stubs only: if the on-disk gate still carries `PHASEKIT_VERIFY_CONFIGURED=0`, the stack template replaces it (`stub-reseed` in the plan); any configured gate is never overwritten (`--keep-local` also forces preservation). Stack profiles additionally install `docs/CONVENTIONS.md` (scaffold-owned, drift-checked) describing the stack's conventions.
+
 ### Self-hosting gap (phasekit on phasekit)
 
 The verify script is *rendered* into downstream projects from `templates/phasekit-verify.template.sh`; the phasekit source repo deliberately does not carry a rendered `scripts/phasekit-verify.sh` (it would shadow the template). So when the autonomous loop runs **on phasekit itself** (self-improvement runs), the gate fail-opens with a warning — phasekit does not currently enforce its own pre-commit checks. This is a known gap, not a bug: every enriched downstream project still gets a working gate.

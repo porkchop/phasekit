@@ -94,11 +94,17 @@ Use this matrix to choose a starting profile based on your project characteristi
 
 | Project type | Recommended profile | Key agents | Notes |
 |---|---|---|---|
-| General web app or service | `default` | project-lead, strategy-planner, code-reviewer, qa-playwright | Good starting point for most projects |
-| Game or interactive simulation | `game-project` | adds engine-builder, frontend-builder, backend-builder, release-hardening | Deterministic core logic + UI separation |
+| Python service, API, or tool (uv) | `python-uv` | default set | Stack profile: seeds a uv/ruff/mypy/pytest verify gate + conventions doc |
+| Static site / vanilla-JS web app | `static-web` | default set | Stack profile: seeds node:test + no-dependency + import-graph gate + conventions doc |
+| Browser/canvas game | `game-canvas` | adds engine-builder, frontend-builder, backend-builder, release-hardening | Stack profile: game agents + static-web gate; successor to `game-project` |
+| Documentation repo | `docs-only` | default set | Stack profile: seeds a markdown internal link/reference checker |
+| General web app or service | `default` | project-lead, strategy-planner, code-reviewer, qa-playwright | Good starting point when no stack profile fits |
+| Game or interactive simulation (non-canvas) | `game-project` | adds engine-builder, frontend-builder, backend-builder, release-hardening | Deterministic core logic + UI separation; no stack contract |
 | SaaS product | `saas-project` | adds frontend-builder, backend-builder, release-hardening | API/persistence focus, no engine-builder |
 | CLI tool or library | Create custom extending `default` | project-lead, strategy-planner, code-reviewer | Extend default without qa-playwright if no browser UI |
 | Data pipeline | Create custom | project-lead, code-reviewer + custom data-engineer | Extend default, add domain-specific agents |
+
+Stack profiles (v0.5.0) add a per-stack contract on top of agents: a working pre-commit verify gate (`PHASEKIT_VERIFY_CONFIGURED=1` out of the box, project-owned after seeding, re-seeded on upgrade only while still the stub) and a scaffold-owned `docs/CONVENTIONS.md`. A custom profile opts in by setting `stack: python-uv | static-web | game-canvas | docs-only` (inherited through `extends`; child overrides parent).
 
 **When to create a custom profile:**
 - Your project needs agents not in any existing profile

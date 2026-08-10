@@ -87,6 +87,37 @@ profiles:
     include_docs:
       - DESIGN
 
+  # --- v0.5.0 stack profiles ------------------------------------------------
+  # A stack profile adds a per-stack contract on top of its base profile:
+  #   1. verify seeding — scripts/phasekit-verify.sh is rendered from
+  #      templates/phasekit-verify.template.<stack>.sh with real checks
+  #      (PHASEKIT_VERIFY_CONFIGURED=1 out of the box). The file stays
+  #      project-owned after seeding; upgrade re-seeds ONLY while the on-disk
+  #      gate is still the stub (PHASEKIT_VERIFY_CONFIGURED=0) and never
+  #      overwrites a configured gate.
+  #   2. conventions doc — docs/CONVENTIONS.md installed scaffold-class
+  #      (fleet-consistent, upgrade-propagated, drift-checked) from
+  #      templates/conventions.<stack>.md.
+  # `default` keeps the stub verify behavior; stack profiles are opt-in via
+  # --profile at enrich time or re-profile at upgrade.
+  python-uv:
+    extends: default
+    stack: python-uv
+
+  static-web:
+    extends: default
+    stack: static-web
+
+  # game-canvas = static-web contract + the game agents (successor to
+  # game-project, which stays valid for backward compatibility).
+  game-canvas:
+    extends: game-project
+    stack: game-canvas
+
+  docs-only:
+    extends: default
+    stack: docs-only
+
 agents:
   project-lead:
     enabled: true
@@ -454,6 +485,38 @@ files:
     # Rendered into downstream scripts/phasekit-verify.sh as
     # bootstrap-with-template-tracking. Sourced by run-until-done.sh's
     # pre-commit verify gate (see docs/QUALITY_GATES.md).
+
+  # v0.5.0 stack-profile verify templates. The active stack profile picks one
+  # of these instead of the stub above; rendered file is project-owned
+  # (bootstrap-with-template-tracking) and ships PHASEKIT_VERIFY_CONFIGURED=1.
+  templates/phasekit-verify.template.python-uv.sh:
+    ownership: scaffold-template
+
+  templates/phasekit-verify.template.static-web.sh:
+    ownership: scaffold-template
+
+  templates/phasekit-verify.template.game-canvas.sh:
+    ownership: scaffold-template
+
+  templates/phasekit-verify.template.docs-only.sh:
+    ownership: scaffold-template
+
+  # v0.5.0 stack-profile conventions docs. Installed downstream as
+  # docs/CONVENTIONS.md with `scaffold` ownership (fleet-consistent,
+  # upgrade-propagated, drift-checked). Placeholder-free by design: the
+  # rendered output must hash identically to the template so scaffold-class
+  # update detection works.
+  templates/conventions.python-uv.md:
+    ownership: scaffold-template
+
+  templates/conventions.static-web.md:
+    ownership: scaffold-template
+
+  templates/conventions.game-canvas.md:
+    ownership: scaffold-template
+
+  templates/conventions.docs-only.md:
+    ownership: scaffold-template
 
   templates/skill/SKILL.template.md:
     ownership: scaffold-template

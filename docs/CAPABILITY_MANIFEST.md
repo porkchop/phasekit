@@ -67,6 +67,7 @@ Profiles define named bundles of capabilities for different downstream project t
 profiles:
   <profile-name>:
     extends: <other-profile>     # optional, inherit from another profile
+    stack: <stack-name>          # optional, v0.5.0 stack contract (see below)
     include_agents: [<agent-key>, ...]
     include_skills: [<skill-key>, ...]
     include_docs: [<doc-key>, ...]
@@ -76,6 +77,7 @@ profiles:
 
 - `extends` merges the parent profile's includes before applying the current profile's includes.
 - Each `include_*` list references keys defined in the corresponding top-level section.
+- `stack` (v0.5.0) attaches a per-stack contract: `scripts/phasekit-verify.sh` is seeded from `templates/phasekit-verify.template.<stack>.sh` with real checks (`PHASEKIT_VERIFY_CONFIGURED=1`, project-owned after seeding; upgrades re-seed only while the on-disk gate is still the stub), and `docs/CONVENTIONS.md` is installed scaffold-class from `templates/conventions.<stack>.md`. Inherited via `extends`; a child's `stack` overrides the parent's.
 
 Built-in profiles:
 
@@ -85,6 +87,10 @@ Built-in profiles:
 | `game-project` | `default` | `engine-builder`, `frontend-builder`, `backend-builder`, `release-hardening` |
 | `saas-project` | `default` | `frontend-builder`, `backend-builder`, `release-hardening` |
 | `with-design` | `default` | the optional `DESIGN` doc (M10). Opt-in only. Combine with another profile by setting `extends: with-design` on a custom profile, or run `--upgrade` after editing the manifest's `profile` field. |
+| `python-uv` | `default` | stack contract: uv/ruff/mypy/pytest verify gate + Python conventions doc |
+| `static-web` | `default` | stack contract: node:test + no-dependency assertion + ESM import-graph verify gate + static-web conventions doc |
+| `game-canvas` | `game-project` | the game agents plus the static-web stack contract with game-flavored conventions. Successor to `game-project` for browser/canvas games. |
+| `docs-only` | `default` | stack contract: markdown internal link/reference checker + docs conventions doc |
 
 ### `agents`
 

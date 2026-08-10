@@ -108,14 +108,25 @@ def resolve_profile(profiles, profile_name, _seen=None):
         "include_docs": [],
         "include_hooks": [],
         "include_scripts": [],
+        # v0.5.0 stack contract: name of the stack whose verify template +
+        # conventions doc this profile seeds (None = no stack contract; the
+        # stub verify template is used and no CONVENTIONS.md is installed).
+        "stack": None,
     }
 
     if "extends" in profile:
         parent = resolve_profile(profiles, profile["extends"], _seen)
         for key in result:
-            result[key] = list(parent.get(key, []))
+            if key == "stack":
+                result[key] = parent.get(key)
+            else:
+                result[key] = list(parent.get(key, []))
 
     for key in result:
+        if key == "stack":
+            if profile.get("stack") is not None:
+                result[key] = profile["stack"]
+            continue
         if key in profile:
             for item in profile[key]:
                 if item not in result[key]:
@@ -744,9 +755,25 @@ def compute_upgrade_plan(
                 action = ACTION_INSTALL
         else:
             # Tracked
+            #
+            # v0.5.0 stub-reseed: when a stack profile supplies a real verify
+            # gate and the on-disk gate is still the configure-me stub
+            # (PHASEKIT_VERIFY_CONFIGURED=0), take the stack template even
+            # though bootstrap-* files are normally never overwritten. A
+            # configured gate (sentinel flipped or script rewritten) never
+            # matches and is always kept — seeding fills stubs only.
+            stub_reseed = (
+                path == VERIFY_DEST_PATH
+                and rendered_from in STACK_VERIFY_TEMPLATES.values()
+                and current_sha is not None
+                and verify_gate_is_stub(on_disk)
+            )
             if current_sha is None:
                 state = "missing"
                 action = ACTION_INSTALL
+            elif stub_reseed:
+                state = "stub-reseed"
+                action = ACTION_KEEP_LOCAL if path in keep_local else ACTION_TAKE_NEW
             elif current_sha == manifest_sha:
                 # local == manifest. For `scaffold` class, also compare
                 # scaffold-new sha to surface an "update available". For
@@ -847,6 +874,8 @@ def print_upgrade_plan(plans):
                 note = "  (scaffold has a newer canonical version)"
             elif p["state"] == "update-available-advisory":
                 note = "  (scaffold updated but bootstrap-* never auto-overwritten)"
+            elif p["state"] == "stub-reseed":
+                note = "  (verify gate still in stub mode; seeding the stack profile's real gate)"
             elif p["state"] == "collision-novel":
                 note = "  (scaffold v2 declares an existing project path)"
             elif p["state"] == "removed":
@@ -1449,6 +1478,43 @@ SCAFFOLD_ONLY_DOCS = {"META_SPEC", "META_PHASES", "CAPABILITY_MANIFEST"}
 # downstream (not all scaffold scripts; matches cmd_enrich's filter).
 WORKFLOW_SCRIPTS = ("run-phase", "run-until-done")
 
+# === v0.5.0 stack profiles ==================================================
+# A profile carrying `stack: <name>` seeds a real verify gate and installs a
+# fleet-consistent conventions doc. See capabilities yaml `profiles:` comments.
+
+DEFAULT_VERIFY_TEMPLATE = "templates/phasekit-verify.template.sh"
+VERIFY_DEST_PATH = "scripts/phasekit-verify.sh"
+CONVENTIONS_DEST_PATH = "docs/CONVENTIONS.md"
+
+STACK_VERIFY_TEMPLATES = {
+    "python-uv": "templates/phasekit-verify.template.python-uv.sh",
+    "static-web": "templates/phasekit-verify.template.static-web.sh",
+    "game-canvas": "templates/phasekit-verify.template.game-canvas.sh",
+    "docs-only": "templates/phasekit-verify.template.docs-only.sh",
+}
+
+STACK_CONVENTIONS_TEMPLATES = {
+    "python-uv": "templates/conventions.python-uv.md",
+    "static-web": "templates/conventions.static-web.md",
+    "game-canvas": "templates/conventions.game-canvas.md",
+    "docs-only": "templates/conventions.docs-only.md",
+}
+
+# Stub-mode sentinel as rendered by DEFAULT_VERIFY_TEMPLATE. While the on-disk
+# verify script still carries this line, `--upgrade` under a stack profile
+# re-seeds it from the stack template; once flipped to =1 (or rewritten), the
+# gate is configured and is NEVER overwritten by the scaffold.
+VERIFY_STUB_SENTINEL = re.compile(r"(?m)^PHASEKIT_VERIFY_CONFIGURED=0\b")
+
+
+def verify_gate_is_stub(verify_path):
+    """True if the on-disk verify script is still in stub mode."""
+    try:
+        return bool(VERIFY_STUB_SENTINEL.search(Path(verify_path).read_text(
+            encoding="utf-8", errors="replace")))
+    except OSError:
+        return False
+
 # Always-installed files that aren't enumerated by the typed sections of the
 # scaffold manifest (scaffold root + container files).
 ALWAYS_INSTALLED_FILE_PATHS = (
@@ -1558,16 +1624,30 @@ def enumerate_install_targets(scaffold_manifest, resolved_profile):
         "rendered_from": "templates/AGENTS.template.md",
     })
 
-    # Downstream scripts/phasekit-verify.sh (rendered from
-    # templates/phasekit-verify.template.sh). Backs the pre-commit
-    # verification gate in run-until-done.sh; project owns the file
-    # after install (bootstrap-with-template-tracking).
+    # Downstream scripts/phasekit-verify.sh. Backs the pre-commit verification
+    # gate in run-until-done.sh; project owns the file after install
+    # (bootstrap-with-template-tracking). Stack profiles (v0.5.0) seed a real
+    # per-stack gate; profiles without a stack render the configure-me stub.
+    stack = resolved_profile.get("stack")
     specs.append({
-        "path": "scripts/phasekit-verify.sh",
+        "path": VERIFY_DEST_PATH,
         "ownership": "bootstrap-with-template-tracking",
         "text": True,
-        "rendered_from": "templates/phasekit-verify.template.sh",
+        "rendered_from": STACK_VERIFY_TEMPLATES.get(stack, DEFAULT_VERIFY_TEMPLATE),
     })
+
+    # Stack conventions doc (v0.5.0): docs/CONVENTIONS.md, scaffold class —
+    # fleet-consistent, upgrade-propagated, drift-checked. The conventions
+    # templates are placeholder-free, so rendering is an identity copy and the
+    # template's sha doubles as the canonical content sha for update
+    # detection in compute_upgrade_plan.
+    if stack:
+        specs.append({
+            "path": CONVENTIONS_DEST_PATH,
+            "ownership": "scaffold",
+            "text": True,
+            "rendered_from": STACK_CONVENTIONS_TEMPLATES[stack],
+        })
 
     # Always-installed flat files
     for path in ALWAYS_INSTALLED_FILE_PATHS:

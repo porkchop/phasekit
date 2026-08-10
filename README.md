@@ -173,7 +173,7 @@ Confirm it's active from the startup line `Container user override: running as '
 
 The wrapper runs `scripts/phasekit-verify.sh` before every phase commit (whether or not AUTO_PUSH is set). A non-zero exit blocks the commit, writes `artifacts/phase-verify-failed.json`, and the next iteration directs Claude to fix the failure before doing new work. After three consecutive failures the loop stops with `phase-blocked.json`.
 
-Enrichment renders a stub at `scripts/phasekit-verify.sh` — edit it to call your stack's fast checks (lint, typecheck, unit tests). Aim for under ~30 seconds; full E2E belongs to the verification-sprint gate, not this one.
+Enrichment with a **stack profile** (`python-uv`, `static-web`, `game-canvas`, `docs-only`) seeds a working gate for that stack out of the box (plus a fleet-consistent `docs/CONVENTIONS.md`); the file is project-owned after seeding, and upgrades only ever re-seed it while it is still the stub. Under other profiles, enrichment renders a stub at `scripts/phasekit-verify.sh` — edit it to call your stack's fast checks (lint, typecheck, unit tests). Aim for under ~30 seconds; full E2E belongs to the verification-sprint gate, not this one.
 
 Overrides:
 - `PHASEKIT_VERIFY_CMD="..."` — one-shot override, bypasses the script
