@@ -738,6 +738,44 @@ check_for_scaffold_update || true
 # status (see function docs).
 ensure_transients_excluded || true
 
+# Stranded-artifact recovery (v0.6.3). v0.6.0's atomicity gate correctly
+# refuses to let a stale phase-approval.json drive a commit — but a session
+# killed AFTER the artifact write and BEFORE its commit leaves the approval
+# stranded: later sessions see approved-artifact + finished work, re-validate
+# it (verify green!), end without rewriting the artifact, and the loop exits 1
+# uncommitted. Five sessions burned that way on 2026-08-11 before the
+# quiet-stall guard fired. Recover mechanically — never depend on the model
+# noticing. The stranded signature is git's, not mtime's (clones and rsync
+# skew mtimes): an artifact with uncommitted changes IS an approval/completion
+# that never got its commit; a landed one is clean in git status.
+artifact_never_landed() {
+  [[ -f "$1" ]] || return 1
+  [[ -n "$(git status --porcelain --ignored=matching -- "$1" 2>/dev/null)" ]]
+}
+
+if artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then
+  # A stranded completion record would be deleted by the first iteration's
+  # cleanup_artifacts and silently re-done. Commit it now (all the usual
+  # gates apply) — on success the run is already complete, zero claude calls.
+  echo "Stranded project-complete.json from a prior session detected — attempting its final commit before starting."
+  print_json_summary "$ARTIFACTS_DIR/project-complete.json"
+  crc=0
+  commit_from_artifact \
+    "$ARTIFACTS_DIR/project-complete.json" \
+    "chore(workflow): final session work + project completion record" || crc=$?
+  if [[ "$crc" -eq 0 || "$crc" -eq 2 ]]; then
+    echo "Run finished successfully."
+    exit 0
+  fi
+  echo "Stranded completion did not pass the commit gates — entering the loop to fix and re-complete." >&2
+elif artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json"; then
+  # Schedule the existing verify-gated retry path so the first iteration
+  # boundary commits the approval under its own message (wrong-phase risk
+  # none: the artifact IS the phase being committed).
+  echo "Stranded phase-approval.json from a prior session detected — its commit will be retried at the first iteration boundary."
+  PENDING_COMMIT_RETRY="phase-approval"
+fi
+
 while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   # Pass-duration bookkeeping (v0.6.1): each trip through the loop top closes
   # the previous pass. Retried attempts count as passes too — that keeps the

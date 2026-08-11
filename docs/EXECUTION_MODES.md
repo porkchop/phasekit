@@ -165,6 +165,23 @@ Two timeout-waste levers added in v0.6.1, both riding the wrap-up path:
   reads it, then deletes it. Durable learnings belong in `docs/LEARNINGS.md`;
   `cleanup_artifacts` deliberately leaves the note alone.
 
+One recovery added in v0.6.3, closing the trap the atomicity fix created:
+
+- **Stranded-artifact recovery.** A session killed after writing
+  `phase-approval.json` (or `project-complete.json`) but before its commit
+  leaves the artifact stranded: the atomicity gate rightly refuses it in every
+  later session, but nothing told the model to rewrite it, so sessions
+  re-validated the finished work and exited 1 uncommitted (five sessions
+  burned this way on 2026-08-11). At loop start the wrapper now detects the
+  stranded signature — the artifact has uncommitted changes in git (a landed
+  one is clean; mtimes are deliberately not trusted) — and recovers
+  mechanically: a stranded approval is scheduled onto the existing
+  verify-gated retry path and lands at the first iteration boundary under its
+  own message; a stranded completion is committed immediately (all the usual
+  gates apply), finishing the run with zero claude calls. A landed-but-stale
+  artifact, clean or with a dirty tree, never triggers recovery — that is the
+  v0.6.0 guarantee, unchanged.
+
 ## Settings layering
 
 Claude Code resolves settings in this order (later wins):

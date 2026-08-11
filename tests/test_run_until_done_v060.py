@@ -90,6 +90,15 @@ class LoopStructuralTest(unittest.TestCase):
         # 1.2x average pass duration, integer arithmetic.
         self.assertIn("pass_elapsed_total * 12 / (passes_done * 10)", self.text)
 
+    def test_stranded_recovery_pins(self) -> None:
+        # v0.6.3: a stranded (written-but-never-committed) approval/completion
+        # is recovered mechanically at loop start. Detection is git-status
+        # based, not mtime based (clones/rsync skew mtimes).
+        self.assertIn("artifact_never_landed", self.text)
+        self.assertIn("--ignored=matching", self.text)
+        self.assertIn("Stranded phase-approval.json", self.text)
+        self.assertIn("Stranded project-complete.json", self.text)
+
     def test_session_handoff_pins(self) -> None:
         self.assertIn("write_session_handoff", self.text)
         self.assertIn("session-handoff.json", self.text)
@@ -506,6 +515,108 @@ class LoopV061FunctionalTest(LoopHarness):
         r = self._run_loop(scenario)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertTrue(os.path.exists(os.path.join(self.stub_dir, "handoff-seen")))
+
+
+class LoopV063FunctionalTest(LoopHarness):
+    # --- stranded-artifact recovery ---------------------------------------
+
+    def test_stranded_approval_committed_at_first_boundary(self) -> None:
+        # The live 2026-08-11 pathology: a prior session was killed after
+        # writing phase-approval.json but before its commit. The next session's
+        # model re-validates and writes nothing; the loop must still land the
+        # stranded work — under the approval's own message — at the first
+        # iteration boundary.
+        scenario = (
+            'case "$CALL_N" in\n'
+            "  1) : ;;\n"  # model re-validates, writes no artifact
+            "  2) jq -n '{suggested_commit_message: \"final: done\"}'"
+            " > artifacts/project-complete.json ;;\n"
+            "esac\n"
+        )
+        self._prepare_scenario(scenario)
+        # Simulate the guillotine: work + approval on disk, never committed.
+        self._write("src.txt", "base\nstranded work\n")
+        self._write("artifacts/phase-approval.json",
+                    '{"suggested_commit_message": "phase-7: stranded"}\n')
+        r = self._run_loop(None)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Stranded phase-approval.json", r.stdout)
+        self.assertIn("phase-7: stranded", self._messages())
+        self.assertIn("final: done", self._messages())
+        committed = self._git("show", "--name-only", "--format=",
+                              "HEAD~1")
+        self.assertIn("src.txt", committed)
+
+    def test_landed_approval_with_dirty_tree_not_retried(self) -> None:
+        # The inverse guard: an approval that DID land (clean in git status)
+        # must never drive a commit of later in-flight work, even with a dirty
+        # tree at startup — that is exactly the v0.6.0 wrong-message bug.
+        self._write("artifacts/phase-approval.json",
+                    '{"suggested_commit_message": "OLD PHASE MESSAGE"}\n')
+        self._prepare_scenario('echo w >> src.txt\n')  # commits the approval
+        self._write("src.txt", "base\nleftover in-flight work\n")
+        before = self._messages()
+        r = self._run_loop(None)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertNotIn("Stranded", r.stdout)
+        self.assertIn("No expected artifact", r.stdout)
+        self.assertEqual(before, self._messages())
+        self.assertNotIn("OLD PHASE MESSAGE", self._messages())
+
+    def test_landed_approval_clean_tree_unchanged(self) -> None:
+        # Clean tree + committed (stale) approval: no recovery triggers, the
+        # run proceeds exactly as before.
+        self._write("artifacts/phase-approval.json",
+                    '{"suggested_commit_message": "OLD PHASE MESSAGE"}\n')
+        scenario = (
+            "jq -n '{suggested_commit_message: \"final: done\"}'"
+            " > artifacts/project-complete.json\n"
+        )
+        r = self._run_loop(scenario)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("Stranded", r.stdout)
+        self.assertEqual(self._calls(), 1)
+
+    def test_stranded_completion_commits_without_claude(self) -> None:
+        # A stranded project-complete.json would be deleted by iteration 1's
+        # cleanup_artifacts and silently re-done; the startup recovery must
+        # land it (verify-gated) with zero claude calls.
+        self._write("scripts/phasekit-verify.sh", VERIFY_OK, executable=True)
+        self._prepare_scenario('echo ran > "$STUB_DIR/ran"\n')
+        self._write("src.txt", "base\nfinished work\n")
+        self._write("artifacts/project-complete.json",
+                    '{"suggested_commit_message": "final: stranded completion"}\n')
+        r = self._run_loop(None)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Stranded project-complete.json", r.stdout)
+        self.assertEqual(self._calls(), 0)
+        self.assertIn("final: stranded completion", self._messages())
+        committed = self._git("show", "--name-only", "--format=", "HEAD")
+        self.assertIn("src.txt", committed)
+        self.assertIn("artifacts/project-complete.json", committed)
+
+    def test_stranded_completion_verify_failure_reenters_loop(self) -> None:
+        # Startup recovery never lowers the bar: if the stranded completion
+        # fails verify, no commit is made and the loop runs so the model can
+        # fix and re-complete.
+        self._write("scripts/phasekit-verify.sh", VERIFY_BAD_FILE, executable=True)
+        scenario = (
+            "rm -f BAD\n"
+            "jq -n '{suggested_commit_message: \"final: fixed\"}'"
+            " > artifacts/project-complete.json\n"
+        )
+        self._prepare_scenario(scenario)
+        self._write("BAD", "")
+        self._write("artifacts/project-complete.json",
+                    '{"suggested_commit_message": "final: stranded red"}\n')
+        r = self._run_loop(None)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Stranded project-complete.json", r.stdout)
+        self.assertIn("did not pass the commit gates", r.stdout + r.stderr)
+        self.assertEqual(self._calls(), 1)
+        self.assertIn("final: fixed", self._messages())
+        self.assertNotIn("final: stranded red", self._messages())
+        self.assertNotIn("BAD", self._git("ls-files"))
 
 
 if __name__ == "__main__":
