@@ -127,6 +127,27 @@ Two kinds of churn are explicitly excluded:
   if `phase-blocked.json` is present it stops cleanly (exit 2) for operator
   handoff rather than committing an empty-progress change.
 
+## Evidence integrity gate
+
+Gate results and citations are claims about a *specific tree*; they rot silently when the tree moves. (Upstreamed 2026-08-11 from foundry-dashboard, which adopted these rules at its iteration-10 close after stale evidence decided three consecutive signoffs — the phase numbers cited below are that project's, kept as the motivating record.)
+
+### Evidence must name the tree it judged
+Adopted at the iteration-10 close, after it decided three consecutive signoffs. A gate result is a claim about a *specific tree*, and it stops being true the moment that tree changes — but nothing about a stale result looks stale, so it gets cited long after it expired.
+
+- **Every gate records the md5 of the files it judged.** A browser pass records the md5 of every file the browser fetched, at the START and again at the END of the run (the second catches a tree that shifted under the gate). Put them in the gate's own evidence file, not in prose.
+- **Before citing a gate result, compare — do not infer.** Recompute the md5s and diff them against the record. "Is this evidence still valid?" then has a yes/no answer instead of an argument.
+- **A fix round that touches a file the gate judged INVALIDATES that gate.** Either keep fix rounds to tests, docs and artifacts — which is what makes the original evidence still citable — or re-run the gate. Do not reason that a change "cannot have affected" what was measured.
+- **Never stitch a partial run into a signoff.** An interrupted gate with no verdict is VOID; re-run it. Overlapping numbers from the dead run are not a verdict, and salvaging them is how a phase gets signed off on evidence nobody ever finished producing.
+
+Why this is a gate and not a nicety: at Phase 29 a memo cited a browser round that predated its own final source edits, *in the same paragraph* that explained why superseded evidence must not be cited. At Phase 30 the identical defect recurred one phase later — a session updated the memo to say "all 23 md5s matched", then changed three of the 23 files before it was interrupted. Both were caught by comparison, and neither would have been caught by reading.
+
+### A `path:line` citation is a claim about a tree, too
+Same failure, cheaper instrument. Every phase that edits a source file shifts the lines below its edit, silently invalidating citations elsewhere in the repo — this is what blocked Phases 27, 28, 29 and 30, each time via the diff's *own* edits.
+
+- **After editing source, sweep the citations that edit moved** — programmatically, then read each target line to confirm it still says what the citing text claims. "The line exists" is not the check; "the line means what I said" is.
+- **A citation in a PRESENT-TENSE claim must resolve against the current tree.** If it describes what the code does *today*, re-point it.
+- **A citation in a frozen record is left alone, and the record says so.** Intake documents (`docs/change-requests/*.md`), the decision log (`artifacts/decision-memo.md`), signoff artifacts (`artifacts/phase-approval.json`, `artifacts/iterations/*`), and phase blocks explicitly marked as HISTORY describe the tree *as it was*; re-pointing them would falsely imply the code still reads that way. These are exempt by virtue of being dated records — but the exemption has to be *stated in the document*, or the next reader cannot tell a frozen citation from a rotted one. A frozen record is still corrected when it was wrong **when written**, or when a later phase falsifies a standing claim it makes — in place, with the correction marked.
+
 ## Pre-commit verification gate
 The wrapper runs a project-defined fast-check command before creating any phase commit, regardless of whether `AUTO_PUSH` is enabled. Mechanism lives in the scaffold (`scripts/run-until-done.sh`); policy lives in the project (`scripts/phasekit-verify.sh`).
 
