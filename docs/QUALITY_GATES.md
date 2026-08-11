@@ -155,6 +155,20 @@ Projects enriched with a **stack profile** (`python-uv`, `static-web`, `game-can
 
 On `--upgrade`, seeding fills stubs only: if the on-disk gate still carries `PHASEKIT_VERIFY_CONFIGURED=0`, the stack template replaces it (`stub-reseed` in the plan); any configured gate is never overwritten (`--keep-local` also forces preservation). Stack profiles additionally install `docs/CONVENTIONS.md` (scaffold-owned, drift-checked) describing the stack's conventions.
 
+### Light execution mode leans on this gate (v0.6.0)
+
+`PHASEKIT_ITERATION_MODE=light` (see `docs/EXECUTION_MODES.md`) trades phase
+ceremony — planner, red-team, multi-phase decomposition — for a tighter
+mechanical leash: eligibility **requires** a configured (non-stub) verify
+gate, the breaker drops to 2 attempts, the iteration cap is 2, and one
+default-model review pass runs before the final commit. The gate itself is
+unchanged and mandatory; a light run that trips the breaker, writes a blocked
+artifact, or makes a scaffold-class (out-of-scope) edit ends with
+`artifacts/light-escalation.json` so the orchestrator can re-queue the task as
+a standard full-ceremony iteration. Stub-gate projects are refused light mode
+with a plain log line. Principle: *reduced ceremony only where mechanical
+verification is strong.*
+
 ### Self-hosting gap (phasekit on phasekit)
 
 The verify script is *rendered* into downstream projects from `templates/phasekit-verify.template.sh`; the phasekit source repo deliberately does not carry a rendered `scripts/phasekit-verify.sh` (it would shadow the template). So when the autonomous loop runs **on phasekit itself** (self-improvement runs), the gate fail-opens with a warning — phasekit does not currently enforce its own pre-commit checks. This is a known gap, not a bug: every enriched downstream project still gets a working gate.

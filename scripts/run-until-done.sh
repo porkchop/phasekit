@@ -13,12 +13,23 @@ RUN_PHASE_SCRIPT="$ROOT_DIR/scripts/run-phase.sh"
 # META_KICKOFF_PROMPT.txt exist for legacy/manual use but are not
 # used by the autonomous loop since they target specific phases.
 PROMPT_FILE="${1:-$ROOT_DIR/CONTINUE_PROMPT.txt}"
-MAX_ITERATIONS="${MAX_ITERATIONS:-50}"
 CLAUDE_MODE="${CLAUDE_MODE:-new}"
+
+# Iteration mode (v0.6.0): "standard" (default) or "light". Light mode is the
+# reduced-ceremony path for small, triaged tasks: one collapsed phase (build +
+# verify + review), no strategy-planner/architecture-red-team, iteration cap 2,
+# a default-model review pass before the final commit, and escalation instead
+# of grinding. Set per-session by the outer supervisor via container env
+# (PHASEKIT_ITERATION_MODE=light) — never a committed setting. Eligibility
+# requires a configured (non-stub) verify gate; see docs/EXECUTION_MODES.md.
+ITERATION_MODE="${PHASEKIT_ITERATION_MODE:-standard}"
+
 # Circuit breaker for the pre-commit verify gate. After this many consecutive
 # failures on the same approval artifact, the loop writes phase-blocked.json
 # and exits so a human can intervene. Override with VERIFY_MAX_ATTEMPTS.
-VERIFY_MAX_ATTEMPTS="${VERIFY_MAX_ATTEMPTS:-3}"
+# Both this and MAX_ITERATIONS get their defaults in the iteration-mode
+# resolution block below (standard: 50/3; light: 2/2 per the 2026-08-10
+# design decision — escalate after 2 verify failures).
 
 mkdir -p "$ARTIFACTS_DIR"
 
@@ -79,21 +90,26 @@ check_for_scaffold_update() {
   return 0
 }
 
-ensure_logs_excluded() {
-  # The loop never commits artifacts/logs/* (see commit_from_artifact), but
-  # leaving them untracked-and-unignored makes every post-run `git status
+ensure_transients_excluded() {
+  # The loop never commits artifacts/logs/* (see commit_from_artifact), and the
+  # wrap-up sentinel (v0.6.0) is an outer-supervisor signal file, but leaving
+  # either untracked-and-unignored makes every post-run `git status
   # --porcelain` cleanliness check (e.g. an orchestrator's iterate/intake
   # gate) see a dirty tree. Exclude them repo-locally via .git/info/exclude —
   # unlike .gitignore this ships nothing downstream and can't collide with
   # project-owned ignore rules. Best-effort: never blocks the loop.
-  local exclude_file
+  # (A custom PHASEKIT_WRAPUP_SENTINEL path outside artifacts/ is the
+  # overrider's responsibility to keep out of git status.)
+  local exclude_file line
   exclude_file="$(git -C "$ROOT_DIR" rev-parse --git-path info/exclude 2>/dev/null)" || return 0
   [[ -n "$exclude_file" ]] || return 0
   # rev-parse --git-path may return a relative path; resolve from ROOT_DIR.
   [[ "$exclude_file" = /* ]] || exclude_file="$ROOT_DIR/$exclude_file"
-  grep -qxF "artifacts/logs/" "$exclude_file" 2>/dev/null && return 0
   mkdir -p "$(dirname "$exclude_file")" 2>/dev/null || return 0
-  echo "artifacts/logs/" >> "$exclude_file" 2>/dev/null || true
+  for line in "artifacts/logs/" "artifacts/wrapup-requested"; do
+    grep -qxF "$line" "$exclude_file" 2>/dev/null && continue
+    echo "$line" >> "$exclude_file" 2>/dev/null || true
+  done
   return 0
 }
 
@@ -109,7 +125,8 @@ cleanup_artifacts() {
   rm -f \
     "$ARTIFACTS_DIR/phase-update.json" \
     "$ARTIFACTS_DIR/phase-blocked.json" \
-    "$ARTIFACTS_DIR/project-complete.json"
+    "$ARTIFACTS_DIR/project-complete.json" \
+    "$ARTIFACTS_DIR/light-escalation.json"
 }
 
 print_json_summary() {
@@ -341,6 +358,14 @@ if hits:
 PY
     if [[ -s "$ARTIFACTS_DIR/.scope-check.tmp" ]]; then
       mv "$ARTIFACTS_DIR/.scope-check.tmp" "$ARTIFACTS_DIR/scope-warning.json"
+      if [[ "$ITERATION_MODE" == "light" ]]; then
+        # Light tasks are triaged as low-blast-radius; a scaffold-class edit is
+        # out-of-scope by definition and escalates instead of warning-and-
+        # continuing (DESIGN-light-pipeline.md guardrails). No commit is made;
+        # the caller turns rc=4 into a light-escalation exit.
+        echo "run-until-done: light mode — staged changes touch scaffold-class files; escalating to a standard iteration instead of committing." >&2
+        return 4
+      fi
       echo "run-until-done: WARNING — this commit edits scaffold-class files (recorded in artifacts/scope-warning.json; drift-check will also flag them). Proceeding." >&2
     else
       rm -f "$ARTIFACTS_DIR/.scope-check.tmp"
@@ -375,6 +400,196 @@ PY
   auto_push_if_enabled
 }
 
+artifact_written_this_iteration() {
+  # Phase-commit atomicity (v0.6.0). phase-approval.json persists across
+  # iterations as the durable record of the last approved phase, so its mere
+  # existence must never drive a commit — that is exactly how later in-flight
+  # work got committed under the WRONG phase's message (nine consecutive
+  # instances documented in foundry-dashboard's iteration-11 forensics, one of
+  # which carried an ungated user-visible defect into the repo). Only an
+  # artifact (re)written during THIS iteration may drive a commit and supply
+  # its message. ITER_START_MARKER is touched immediately before each claude
+  # invocation.
+  [[ -f "$1" && "$1" -nt "$ITER_START_MARKER" ]]
+}
+
+wrapup_commit() {
+  # Soft wrap-up (v0.6.0). When the outer supervisor signals imminent shutdown
+  # (see WRAPUP_SENTINEL below), commit whatever stands — verify-gated — so a
+  # session's end no longer depends on the hard kill that loses in-flight
+  # context (every 2026-08-10 session ended exit_reason: timeout). Never
+  # creates a commit the normal gates would refuse: verify must pass and the
+  # security-critical pair stays uncommittable. On refusal the work is left in
+  # the tree for the next session (and the scheduler's complete-but-dirty
+  # backstop) to reconcile.
+  git add -A
+  git reset -q -- "$ARTIFACTS_DIR/logs" 2>/dev/null || true
+  git reset -q -- "$WRAPUP_SENTINEL" 2>/dev/null || true
+  if git diff --cached --quiet -- ':/' \
+       ":(exclude)$ARTIFACTS_DIR/phase-blocked.json" \
+       ":(exclude)$ARTIFACTS_DIR/phase-verify-failed.json"; then
+    echo "Wrap-up: tree already clean — nothing substantive to commit."
+    return 0
+  fi
+  if git diff --cached --name-only | grep -qE '^\.claude/settings\.json$|^\.github/workflows/'; then
+    echo "Wrap-up: staged changes touch committed .claude/settings.json or .github/workflows/ — leaving work uncommitted (security-critical, never committed by the loop)." >&2
+    return 0
+  fi
+  if ! run_verify_gate; then
+    echo "Wrap-up: verify failed — leaving work uncommitted (phase-verify-failed.json records the failure for the next session)." >&2
+    return 0
+  fi
+  git commit -m "chore(workflow): session wrap-up — soft stop before session end"
+  auto_push_if_enabled
+}
+
+light_verify_configured() {
+  # Light-mode eligibility: reduced ceremony only where mechanical verification
+  # is strong (DESIGN-light-pipeline.md guardrail #1). An explicit
+  # PHASEKIT_VERIFY_CMD counts as configured; otherwise the project's verify
+  # script must exist and must not still carry the stub sentinel that
+  # stack-profile seeding replaces.
+  [[ -n "${PHASEKIT_VERIFY_CMD:-}" ]] && return 0
+  local vs="$ROOT_DIR/scripts/phasekit-verify.sh"
+  [[ -f "$vs" ]] || return 1
+  if grep -qE '^PHASEKIT_VERIFY_CONFIGURED=0' "$vs"; then
+    return 1
+  fi
+  return 0
+}
+
+compose_light_prompt() {
+  # Prepend the light-mode overrides to the standard prompt. Composed at
+  # runtime into a temp file so no new file ships downstream — the semantics
+  # live here, next to the loop that enforces them.
+  local base_prompt="$1"
+  cat <<'LIGHT_EOF'
+=== PHASEKIT LIGHT MODE (this session) ===
+This session runs in LIGHT execution mode: the task was triaged as small
+(single-surface, low blast radius). Reduced ceremony applies. These rules
+OVERRIDE the standard operating rules below wherever they conflict:
+- Treat the whole task as ONE collapsed phase: build + verify + review in a
+  single pass. Do not decompose it into multiple phases.
+- Do NOT use the strategy-planner or architecture-red-team subagents.
+- The code-reviewer subagent still reviews the change before you finish.
+- The pre-commit verify gate is unchanged and mandatory: run the project's
+  verify (scripts/phasekit-verify.sh) yourself and make it pass before
+  finishing.
+- Stay strictly inside the task's scope. Scaffold-class or config-surface
+  edits beyond the task escalate the run instead of committing.
+- Mark the task's phase complete in docs/PHASES.md as part of the change.
+- When the task is done and verify passes, write
+  artifacts/project-complete.json (do not write phase-approval.json for
+  intermediate ceremony).
+- If you are blocked, or the task turns out bigger than triaged (schema, API
+  contract, or dependency changes; multi-surface edits; unclear acceptance),
+  write artifacts/phase-blocked.json and stop. Escalation to a standard
+  full-ceremony run is automatic — do not grind.
+=== END LIGHT MODE OVERRIDES ===
+
+LIGHT_EOF
+  cat "$base_prompt"
+}
+
+write_light_escalation() {
+  # Escalation record (v0.6.0, decided fork C). Light mode never grinds: on
+  # 2 verify failures, any blocked artifact, an out-of-scope edit, or the
+  # iteration cap, write a plain artifact and stop honestly. The orchestrator
+  # re-queues the remainder as a standard (full-ceremony, default-model)
+  # iteration and carries this record forward — that half is orchestrator
+  # work, not phasekit's.
+  local trigger="$1"
+  local reason="$2"
+  local detail=""
+  if [[ -f "$ARTIFACTS_DIR/phase-verify-failed.json" ]]; then
+    detail="$(jq -r '.log_tail // ""' "$ARTIFACTS_DIR/phase-verify-failed.json" 2>/dev/null | tail -c 2000)" || detail=""
+  elif [[ -f "$ARTIFACTS_DIR/phase-blocked.json" ]]; then
+    detail="$(jq -r '.reason // ""' "$ARTIFACTS_DIR/phase-blocked.json" 2>/dev/null)" || detail=""
+  fi
+  jq -n \
+    --arg trigger "$trigger" \
+    --arg reason "$reason" \
+    --arg detail "$detail" \
+    --arg model "${ANTHROPIC_MODEL:-default}" \
+    --argjson iterations "${iteration:-0}" \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{
+      light_escalation: true,
+      trigger: $trigger,
+      reason: $reason,
+      detail: $detail,
+      model: $model,
+      iterations_used: $iterations,
+      next_step: "re-queue as a standard (full-ceremony, default-model) iteration",
+      ts: $ts
+    }' > "$ARTIFACTS_DIR/light-escalation.json"
+  echo "run-until-done: LIGHT ESCALATION ($trigger) — $reason. See artifacts/light-escalation.json; the task should be re-queued as standard." >&2
+}
+
+maybe_escalate_light_commit() {
+  # After a failed commit in light mode, decide whether the failure is
+  # terminal. Verify failures below VERIFY_MAX_ATTEMPTS are not — the next
+  # iteration gets to fix them (the breaker and the iteration cap bound the
+  # total attempts). Exits the loop on escalation.
+  local rc="$1"
+  [[ "$ITERATION_MODE" == "light" ]] || return 0
+  if [[ "$rc" -eq 4 || -f "$ARTIFACTS_DIR/scope-refusal.json" ]]; then
+    write_light_escalation "scope" "out-of-scope edit during a light task (scope containment escalates instead of warning)"
+    exit 2
+  fi
+  if [[ -f "$ARTIFACTS_DIR/phase-blocked.json" ]]; then
+    write_light_escalation "verify_failures" "pre-commit verify failed $VERIFY_MAX_ATTEMPTS times"
+    exit 2
+  fi
+  return 0
+}
+
+run_light_final_review() {
+  # Model split (v0.6.0, decided fork A): build iterations run the cheap model
+  # the supervisor set via ANTHROPIC_MODEL; before the final commit, exactly
+  # one review pass runs on the DEFAULT model (ANTHROPIC_MODEL dropped so
+  # run-phase.sh omits --model). Two claude invocations with different models
+  # — deliberately not a new agent framework. A failed review invocation is
+  # non-fatal: the verify gate remains the hard gate on the commit.
+  local review_prompt
+  review_prompt="$(mktemp)"
+  cat > "$review_prompt" <<'REVIEW_EOF'
+You are the FINAL REVIEWER for a phasekit LIGHT-mode task, running on the
+default model. A cheaper model built the change now sitting uncommitted in
+this working tree; your review is the last gate before the wrapper creates
+the final commit.
+
+Do, in order:
+1. Read artifacts/project-complete.json, docs/PHASES.md (the current task),
+   and the uncommitted work: git status, git diff HEAD, and untracked files.
+2. Review the change for correctness, completeness against the task, scope
+   containment, and quality. Fix any defect you find directly in the working
+   tree with minimal edits. Do NOT expand scope or refactor beyond the task.
+3. Run the project's pre-commit verify (scripts/phasekit-verify.sh, or the
+   configured verify command) and make sure it passes.
+4. If the work is sound (with your fixes, if any), re-write
+   artifacts/project-complete.json — keep its shape, update the summary if
+   you changed anything — so the wrapper can commit.
+5. If the work is fundamentally unsound or clearly outgrew a light task,
+   delete artifacts/project-complete.json, write artifacts/phase-blocked.json
+   explaining why, and stop.
+
+Never run git commit or git push — the wrapper owns commits.
+REVIEW_EOF
+  echo "Light mode: final review pass on the default model before the final commit."
+  local rrc=0
+  (
+    ANTHROPIC_MODEL=""
+    export ANTHROPIC_MODEL
+    run_once "$review_prompt" "new" "light-review" 0
+  ) || rrc=$?
+  rm -f "$review_prompt"
+  if [[ "$rrc" -ne 0 ]]; then
+    echo "WARN: light final-review pass exited $rrc — proceeding to the verify-gated final commit anyway." >&2
+  fi
+  return 0
+}
+
 run_once() {
   local prompt_file="$1"
   local mode="$2"
@@ -395,6 +610,45 @@ run_once() {
 }
 
 iteration=1
+
+# --- Iteration-mode resolution (v0.6.0) -------------------------------------
+# Eligibility guard: light mode with a stub/absent verify gate is refused —
+# reduced ceremony only where mechanical verification is strong. Fall back to
+# standard with one plain log line.
+if [[ "$ITERATION_MODE" == "light" ]] && ! light_verify_configured; then
+  echo "run-until-done: light mode requested but the verify gate is absent or still the stub (PHASEKIT_VERIFY_CONFIGURED=1 required) — running standard mode instead."
+  ITERATION_MODE="standard"
+fi
+if [[ "$ITERATION_MODE" == "light" ]]; then
+  MAX_ITERATIONS="${MAX_ITERATIONS:-2}"
+  VERIFY_MAX_ATTEMPTS="${VERIFY_MAX_ATTEMPTS:-2}"
+  LIGHT_PROMPT_FILE="$(mktemp)"
+  compose_light_prompt "$PROMPT_FILE" > "$LIGHT_PROMPT_FILE"
+  PROMPT_FILE="$LIGHT_PROMPT_FILE"
+  echo "Light execution mode: single collapsed phase, iteration cap $MAX_ITERATIONS, verify breaker $VERIFY_MAX_ATTEMPTS, default-model review before the final commit."
+else
+  MAX_ITERATIONS="${MAX_ITERATIONS:-50}"
+  VERIFY_MAX_ATTEMPTS="${VERIFY_MAX_ATTEMPTS:-3}"
+fi
+light_review_done=0
+
+# Phase-commit atomicity marker: touched immediately before each claude
+# invocation; only artifacts newer than it may drive a commit. PENDING_COMMIT_RETRY
+# preserves the one legitimate stale-artifact commit: retrying a phase-approval
+# whose verify gate failed (the staged work belongs to that same phase, so its
+# message is the right one).
+ITER_START_MARKER="$(mktemp)"
+PENDING_COMMIT_RETRY=""
+
+# Soft wrap-up sentinel: an outer supervisor (e.g. the orchestrator's
+# run-session.sh) touches this file at T-minus-N minutes before its hard kill.
+# Between iterations the loop honors it: commit what stands (verify-gated) and
+# exit 0 instead of starting an iteration the guillotine would truncate.
+WRAPUP_SENTINEL="${PHASEKIT_WRAPUP_SENTINEL:-$ARTIFACTS_DIR/wrapup-requested}"
+if [[ -f "$WRAPUP_SENTINEL" ]]; then
+  echo "Clearing stale wrap-up sentinel from a prior run: $WRAPUP_SENTINEL"
+  rm -f "$WRAPUP_SENTINEL"
+fi
 
 # Per-iteration retry budget for transient claude CLI failures (e.g. an
 # API-side content-filter trip that aborts a response mid-stream, a 5xx, or
@@ -418,12 +672,23 @@ fi
 # Once-per-run, non-fatal nudge if a newer phasekit release is available.
 check_for_scaffold_update || true
 
-# Once-per-run: keep per-iteration logs out of git status (see function docs).
-ensure_logs_excluded || true
+# Once-per-run: keep per-iteration logs and the wrap-up sentinel out of git
+# status (see function docs).
+ensure_transients_excluded || true
 
 while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
+  # Soft wrap-up check (v0.6.0): honored between iterations, never mid-flight.
+  if [[ -f "$WRAPUP_SENTINEL" ]]; then
+    echo "=== Wrap-up requested (sentinel present) — not starting iteration $iteration ==="
+    rm -f "$WRAPUP_SENTINEL"
+    wrapup_commit
+    echo "Run wrapped up cleanly (soft stop)."
+    exit 0
+  fi
+
   echo "=== Iteration $iteration ==="
   cleanup_artifacts
+  touch "$ITER_START_MARKER"
 
   # First attempt of iteration 1 in `new` mode uses fresh-session semantics;
   # retries (and every later iteration) use `continue` so they resume the
@@ -449,6 +714,21 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   if [[ -f "$ARTIFACTS_DIR/project-complete.json" ]]; then
     echo "Project complete artifact detected:"
     print_json_summary "$ARTIFACTS_DIR/project-complete.json"
+    # Light mode: one review pass on the default model BEFORE the final commit
+    # (decided fork A). The reviewer may fix defects in place, or withdraw the
+    # completion by swapping the artifact for phase-blocked.json.
+    if [[ "$ITERATION_MODE" == "light" && "$light_review_done" -eq 0 ]]; then
+      light_review_done=1
+      run_light_final_review
+      if [[ ! -f "$ARTIFACTS_DIR/project-complete.json" ]]; then
+        if [[ -f "$ARTIFACTS_DIR/phase-blocked.json" ]]; then
+          write_light_escalation "review_blocked" "final review pass rejected the work (phase-blocked.json written)"
+        else
+          write_light_escalation "review_not_reconfirmed" "final review pass did not re-confirm completion"
+        fi
+        exit 2
+      fi
+    fi
     # Final-commit gate. The last iteration's work (and project-complete.json
     # itself) must land in git before the loop exits — exiting here without
     # committing left a dirty tree behind every completed run and forced a
@@ -463,6 +743,7 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
       echo "Run finished successfully."
       exit 0
     fi
+    maybe_escalate_light_commit "$crc"
     # Verify gate failed on the final commit: the completion claim is not
     # backed by passing checks. Re-enter the loop so the next iteration sees
     # phase-verify-failed.json and fixes it (cleanup_artifacts clears the
@@ -479,21 +760,43 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
     continue
   fi
 
-  if [[ -f "$ARTIFACTS_DIR/phase-approval.json" ]]; then
+  # Phase-commit atomicity (v0.6.0): phase-approval.json persists on disk as
+  # the durable record of the last approved phase, so this branch fires only
+  # when the artifact was (re)written during THIS iteration — or when a commit
+  # for it failed verify last iteration and is being retried (the staged work
+  # belongs to that same phase, so its message is the right one). A stale
+  # approval never drives a commit of later in-flight work again.
+  approval_retry_pending=0
+  if [[ "$PENDING_COMMIT_RETRY" == "phase-approval" && -f "$ARTIFACTS_DIR/phase-approval.json" ]]; then
+    approval_retry_pending=1
+  fi
+  if artifact_written_this_iteration "$ARTIFACTS_DIR/phase-approval.json" \
+     || [[ "$approval_retry_pending" -eq 1 ]]; then
     echo "Phase approval artifact detected:"
     print_json_summary "$ARTIFACTS_DIR/phase-approval.json"
-    if commit_from_artifact \
+    crc=0
+    commit_from_artifact \
       "$ARTIFACTS_DIR/phase-approval.json" \
-      "chore(workflow): approve completed phase"; then
+      "chore(workflow): approve completed phase" || crc=$?
+    if [[ "$crc" -eq 0 ]]; then
+      PENDING_COMMIT_RETRY=""
       iteration=$((iteration + 1))
       continue
     fi
-    # No commit was made: either the verify gate failed, or there was no
-    # substantive change to commit (only logs/transient signals). In both
-    # cases, if phase-blocked.json is present the iteration is genuinely
-    # blocked — stop cleanly rather than spinning to MAX_ITERATIONS or
-    # committing churn. Otherwise re-enter so Claude can make progress
-    # (or fix a verify failure) on the next iteration.
+    maybe_escalate_light_commit "$crc"
+    # No commit was made: either the verify gate failed (rc 1 — mark the
+    # approval for a commit retry next iteration, even if the model forgets to
+    # re-touch it after fixing), or there was no substantive change to commit
+    # (rc 2, only logs/transient signals). In both cases, if
+    # phase-blocked.json is present the iteration is genuinely blocked — stop
+    # cleanly rather than spinning to MAX_ITERATIONS or committing churn.
+    # Otherwise re-enter so Claude can make progress (or fix a verify failure)
+    # on the next iteration.
+    if [[ "$crc" -eq 1 ]]; then
+      PENDING_COMMIT_RETRY="phase-approval"
+    else
+      PENDING_COMMIT_RETRY=""
+    fi
     if [[ -f "$ARTIFACTS_DIR/phase-blocked.json" ]]; then
       echo "Phase blocked; no substantive change to commit:"
       print_json_summary "$ARTIFACTS_DIR/phase-blocked.json"
@@ -504,14 +807,19 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   fi
 
   if [[ -f "$ARTIFACTS_DIR/phase-update.json" ]]; then
+    # phase-update.json is transient (cleared by cleanup_artifacts each
+    # iteration), so its existence here means it was written this iteration.
     echo "Phase update artifact detected:"
     print_json_summary "$ARTIFACTS_DIR/phase-update.json"
-    if commit_from_artifact \
+    crc=0
+    commit_from_artifact \
       "$ARTIFACTS_DIR/phase-update.json" \
-      "chore(workflow): update phase plan and roadmap"; then
+      "chore(workflow): update phase plan and roadmap" || crc=$?
+    if [[ "$crc" -eq 0 ]]; then
       iteration=$((iteration + 1))
       continue
     fi
+    maybe_escalate_light_commit "$crc"
     if [[ -f "$ARTIFACTS_DIR/phase-blocked.json" ]]; then
       echo "Phase blocked; no substantive change to commit:"
       print_json_summary "$ARTIFACTS_DIR/phase-blocked.json"
@@ -524,6 +832,10 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   if [[ -f "$ARTIFACTS_DIR/phase-blocked.json" ]]; then
     echo "Phase blocked artifact detected:"
     print_json_summary "$ARTIFACTS_DIR/phase-blocked.json"
+    if [[ "$ITERATION_MODE" == "light" ]]; then
+      write_light_escalation "phase_blocked" "the session wrote phase-blocked.json"
+      exit 2
+    fi
     echo "Stopping because external input is required."
     exit 2
   fi
@@ -534,8 +846,14 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   echo "  - phase-update.json"
   echo "  - phase-blocked.json"
   echo "  - project-complete.json"
+  if [[ -f "$ARTIFACTS_DIR/phase-approval.json" ]]; then
+    echo "(a phase-approval.json exists but predates this iteration — the durable record of a previously approved phase never drives a new commit)"
+  fi
   exit 1
 done
 
 echo "Reached MAX_ITERATIONS=$MAX_ITERATIONS without project completion."
+if [[ "$ITERATION_MODE" == "light" ]]; then
+  write_light_escalation "iteration_cap" "light iteration cap ($MAX_ITERATIONS) reached without completion"
+fi
 exit 3

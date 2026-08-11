@@ -33,7 +33,10 @@ set -euo pipefail
 #
 # Environment:
 #   ANTHROPIC_API_KEY   Optional — API key for pay-per-token auth
-#   MAX_ITERATIONS      Phase loop iteration limit (default: 50)
+#   MAX_ITERATIONS      Phase loop iteration limit (default: run-until-done.sh's
+#                       — 50 standard, 2 light; forwarded only when set)
+#   PHASEKIT_ITERATION_MODE  "light" = reduced-ceremony loop for small triaged
+#                       tasks (v0.6.0; see docs/EXECUTION_MODES.md)
 #   IMAGE_NAME          Docker image name (default: scaffold-runner)
 #   CLAUDE_VOLUME       Named volume for ~/.claude credentials (default: scaffold-claude-config)
 #   GIT_USER_NAME       Git author name (default: Scaffold Runner)
@@ -131,9 +134,15 @@ run_container() {
     --cap-add=SETGID
     -v "$CLAUDE_VOLUME":/home/node/.claude
     -v "$ROOT_DIR":/workspace
-    -e MAX_ITERATIONS="${MAX_ITERATIONS:-50}"
     -e CLAUDE_CONFIG_DIR=/home/node/.claude
   )
+
+  # Forward MAX_ITERATIONS only when the caller set it — run-until-done.sh
+  # owns the default (50 standard, 2 light). Unconditionally injecting 50 here
+  # would silently defeat light mode's iteration cap.
+  if [[ -n "${MAX_ITERATIONS:-}" ]]; then
+    docker_args+=(-e MAX_ITERATIONS="$MAX_ITERATIONS")
+  fi
 
   # Optional deterministic container name. An outer supervisor (e.g. the
   # foundry orchestrator's run-session.sh) sets PHASEKIT_CONTAINER_NAME so it
@@ -216,6 +225,13 @@ run_container() {
   # `--model` to the claude CLI. Empty/unset = CLI default.
   if [[ -n "${ANTHROPIC_MODEL:-}" ]]; then
     docker_args+=(-e ANTHROPIC_MODEL="$ANTHROPIC_MODEL")
+  fi
+
+  # Per-iteration execution mode (v0.6.0): light = reduced ceremony for small
+  # triaged tasks. Forwarded like ANTHROPIC_MODEL — set per-session by the
+  # orchestrator, never a committed setting. See docs/EXECUTION_MODES.md.
+  if [[ -n "${PHASEKIT_ITERATION_MODE:-}" ]]; then
+    docker_args+=(-e PHASEKIT_ITERATION_MODE="$PHASEKIT_ITERATION_MODE")
   fi
 
   # CLAUDE_MODE controls whether the inner loop starts a fresh session (`new`,

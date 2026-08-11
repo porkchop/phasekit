@@ -58,6 +58,9 @@ These scripts pass `--permission-mode bypassPermissions` to Claude. This flag on
 | `PHASEKIT_ITER_RETRY` | `1` | Per-iteration retry budget when the `claude` CLI exits non-zero (e.g. an API-side content-filter trip mid-response, a 5xx, or a transient network failure). Retries reuse the current session via `continue` mode and do not advance the iteration counter. Set to `0` to disable. |
 | `PHASEKIT_TRACE` | (unset) | Set to `1` to enable `set -x` xtrace in the wrapper scripts (`container-setup.sh`, `run-until-done.sh`, `run-phase.sh`). Every shell command is printed before execution — loud, but useful when diagnosing why the loop took an unexpected branch. Forwarded into the container by `container-setup.sh run`. |
 | `AUTO_PUSH` | (unset) | Set to `1` to push after each phase commit. Useful when the project needs CI to fire on each phase, github-pages-as-progress-mirror, or deploy previews. Pushes to the current branch's upstream (`git push` with no args). Push failures are non-fatal — the loop continues; the commit is already local. |
+| `PHASEKIT_ITERATION_MODE` | `standard` | Set to `light` for the reduced-ceremony loop (v0.6.0) — see "Light execution mode" below. Set per-session by the outer supervisor (forwarded into the container like `ANTHROPIC_MODEL`); never a committed setting. |
+| `PHASEKIT_WRAPUP_SENTINEL` | `artifacts/wrapup-requested` | Path of the soft wrap-up sentinel (v0.6.0). An outer supervisor touches this file a few minutes before its hard session kill; between iterations the loop honors it — commits what stands (verify-gated) and exits 0 instead of starting an iteration the kill would truncate. Stale sentinels are cleared at loop start. |
+| `VERIFY_MAX_ATTEMPTS` | `3` (standard), `2` (light) | Circuit breaker for the pre-commit verify gate: after this many consecutive failures the loop writes `phase-blocked.json` (light: escalates) and stops. |
 | `SSH_AUTH_SOCK` | (host's value) | When invoked via `container-setup.sh run`, the host's SSH agent socket is forwarded into the container so `git push` to SSH remotes works. Run `ssh-add` on the host first. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | (unset) | Passed through to the container if set, for HTTPS-remote push workflows that use a Personal Access Token. |
 
@@ -90,6 +93,56 @@ jq -c 'select(.type == "assistant")' artifacts/logs/claude-iter-1.jsonl
 ```
 
 `PHASEKIT_TRACE=1` additionally enables `set -x` in the wrapper scripts themselves, so every shell command they run (git commits, verify-gate invocations, artifact cleanup) is printed before execution.
+
+## Light execution mode (v0.6.0)
+
+`PHASEKIT_ITERATION_MODE=light` turns one loop run into the reduced-ceremony
+path for small, pre-triaged tasks (single-surface change, low blast radius,
+acceptance stateable in a few bullets). Triage happens upstream (the
+orchestrator's scoping session); phasekit only executes the grade.
+
+Semantics, relative to a standard run:
+
+- **One collapsed phase.** The prompt is prefixed at runtime with light-mode
+  overrides: build + verify + review in a single pass, no strategy-planner or
+  architecture-red-team subagents, the code-reviewer still runs inside the
+  phase. The session finishes by writing `artifacts/project-complete.json`.
+- **Iteration cap 2, verify breaker 2** (`MAX_ITERATIONS` / `VERIFY_MAX_ATTEMPTS`
+  defaults; both still overridable).
+- **Model split.** Build iterations run whatever `ANTHROPIC_MODEL` the
+  supervisor set (typically a cheaper model). Before the final commit, exactly
+  one review pass runs on the **default** model (`ANTHROPIC_MODEL` dropped for
+  that invocation, logged as `claude-iter-light-review.*`). The reviewer may
+  fix defects in place or withdraw the completion.
+- **Eligibility requires a real verify gate.** If `scripts/phasekit-verify.sh`
+  is absent or still the stub (`PHASEKIT_VERIFY_CONFIGURED` sentinel at `0`),
+  light mode is refused with one log line and the run proceeds in standard
+  mode. Reduced ceremony only where mechanical verification is strong.
+- **Escalation, never grinding.** Two verify-gate failures, any
+  `phase-blocked.json`, an out-of-scope (scaffold-class) edit, or the
+  iteration cap ends the run with `artifacts/light-escalation.json`
+  (trigger + reason + detail + model + iterations used). The orchestrator
+  re-queues the remainder as a standard full-ceremony iteration; phasekit just
+  stops honestly and leaves the record. Exit codes keep their usual meanings
+  (2 = blocked-class, 3 = cap).
+- **The verify gate itself is unchanged and mandatory.** Promote gate,
+  secret-lint, and scope containment all stay on.
+
+## Loop integrity (v0.6.0)
+
+Two guarantees added to `run-until-done.sh`:
+
+- **Phase-commit atomicity.** `phase-approval.json` persists on disk as the
+  durable record of the last approved phase; the loop now commits only
+  artifacts (re)written during the current iteration (mtime marker), so a
+  stale approval can never sweep later in-flight work into a commit under the
+  wrong phase's message. The one exception is deliberate: retrying an
+  approval whose verify gate failed last iteration — that staged work belongs
+  to the same phase. An iteration that writes no fresh artifact now trips the
+  loop contract (exit 1) instead of committing mislabeled work.
+- **Soft wrap-up.** See `PHASEKIT_WRAPUP_SENTINEL` above — sessions get a
+  chance to end cleanly (commit what stands, verify-gated) instead of only
+  ever ending by the supervisor's hard kill.
 
 ## Settings layering
 
