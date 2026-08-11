@@ -37,6 +37,8 @@ set -euo pipefail
 #                       — 50 standard, 2 light; forwarded only when set)
 #   PHASEKIT_ITERATION_MODE  "light" = reduced-ceremony loop for small triaged
 #                       tasks (v0.6.0; see docs/EXECUTION_MODES.md)
+#   PHASEKIT_SESSION_DEADLINE  Epoch seconds of the supervisor's hard kill;
+#                       enables deadline-aware iteration pacing (v0.6.1)
 #   IMAGE_NAME          Docker image name (default: scaffold-runner)
 #   CLAUDE_VOLUME       Named volume for ~/.claude credentials (default: scaffold-claude-config)
 #   GIT_USER_NAME       Git author name (default: Scaffold Runner)
@@ -232,6 +234,13 @@ run_container() {
   # orchestrator, never a committed setting. See docs/EXECUTION_MODES.md.
   if [[ -n "${PHASEKIT_ITERATION_MODE:-}" ]]; then
     docker_args+=(-e PHASEKIT_ITERATION_MODE="$PHASEKIT_ITERATION_MODE")
+  fi
+
+  # Session deadline for iteration pacing (v0.6.1): epoch seconds of the
+  # supervisor's hard kill (run-session computes start + MAX_MINUTES). The
+  # loop refuses to start an iteration it likely can't finish before this.
+  if [[ -n "${PHASEKIT_SESSION_DEADLINE:-}" ]]; then
+    docker_args+=(-e PHASEKIT_SESSION_DEADLINE="$PHASEKIT_SESSION_DEADLINE")
   fi
 
   # CLAUDE_MODE controls whether the inner loop starts a fresh session (`new`,

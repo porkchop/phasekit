@@ -122,6 +122,10 @@ cleanup_artifacts() {
   # phase-verify-failed.json is NOT deleted here either — it's the
   # signal Claude needs to see at the start of the next iteration.
   # It is cleared after a successful verify run.
+  # session-handoff.json (v0.6.1) is deliberately NOT removed here — it is the
+  # previous session's wrap-up baton and must survive into the next session's
+  # first iteration; the next session's orientation (CONTINUE_PROMPT) deletes
+  # it after reading.
   rm -f \
     "$ARTIFACTS_DIR/phase-update.json" \
     "$ARTIFACTS_DIR/phase-blocked.json" \
@@ -413,14 +417,49 @@ artifact_written_this_iteration() {
   [[ -f "$1" && "$1" -nt "$ITER_START_MARKER" ]]
 }
 
+write_session_handoff() {
+  # Handoff baton (v0.6.1): composed by the loop from what it already knows —
+  # never by invoking claude again (zero extra tokens). Written on every
+  # wrap-up path that leaves standing work, BEFORE the wrap-up commit so it
+  # lands inside it (or stays untracked when no commit is made — the case
+  # where next-session orientation matters most). Ephemeral: the next
+  # session's CONTINUE_PROMPT orientation reads then deletes it; durable
+  # learnings belong in docs/LEARNINGS.md.
+  local verified="$1"
+  local next_step="$2"
+  local phase="unknown"
+  if [[ -f "$ARTIFACTS_DIR/phase-approval.json" ]]; then
+    phase="$(jq -r '.phase // "unknown"' "$ARTIFACTS_DIR/phase-approval.json" 2>/dev/null)" || phase="unknown"
+    [[ -n "$phase" ]] || phase="unknown"
+  fi
+  local files in_flight
+  files="$(git diff --cached --name-only | grep -v '^artifacts/' | head -8 | tr '\n' ' ')" || files=""
+  in_flight="uncommitted work in: ${files:-(only artifacts/ signals)}"
+  jq -n \
+    --arg phase "$phase" \
+    --arg in_flight "$in_flight" \
+    --argjson verified "$verified" \
+    --arg next_step "$next_step" \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{
+      stopped_at_phase: $phase,
+      in_flight: $in_flight,
+      verified: $verified,
+      next_step: $next_step,
+      note: "ephemeral wrap-up baton: read to orient, then delete (stopped_at_phase = last APPROVED phase; the session stopped somewhere after it)",
+      ts: $ts
+    }' > "$ARTIFACTS_DIR/session-handoff.json"
+}
+
 wrapup_commit() {
   # Soft wrap-up (v0.6.0). When the outer supervisor signals imminent shutdown
-  # (see WRAPUP_SENTINEL below), commit whatever stands — verify-gated — so a
-  # session's end no longer depends on the hard kill that loses in-flight
-  # context (every 2026-08-10 session ended exit_reason: timeout). Never
-  # creates a commit the normal gates would refuse: verify must pass and the
-  # security-critical pair stays uncommittable. On refusal the work is left in
-  # the tree for the next session (and the scheduler's complete-but-dirty
+  # (see WRAPUP_SENTINEL below) or deadline pacing fires (v0.6.1), commit
+  # whatever stands — verify-gated — so a session's end no longer depends on
+  # the hard kill that loses in-flight context (every 2026-08-10 session ended
+  # exit_reason: timeout). Never creates a commit the normal gates would
+  # refuse: verify must pass and the security-critical pair stays
+  # uncommittable. On refusal the work is left in the tree — with a handoff
+  # baton — for the next session (and the scheduler's complete-but-dirty
   # backstop) to reconcile.
   git add -A
   git reset -q -- "$ARTIFACTS_DIR/logs" 2>/dev/null || true
@@ -432,13 +471,17 @@ wrapup_commit() {
     return 0
   fi
   if git diff --cached --name-only | grep -qE '^\.claude/settings\.json$|^\.github/workflows/'; then
-    echo "Wrap-up: staged changes touch committed .claude/settings.json or .github/workflows/ — leaving work uncommitted (security-critical, never committed by the loop)." >&2
+    write_session_handoff false "unstage and revert the staged .claude/settings.json / .github/workflows/ changes — the loop never commits them — then redo the phase work without touching them"
+    echo "Wrap-up: staged changes touch committed .claude/settings.json or .github/workflows/ — leaving work uncommitted (security-critical, never committed by the loop). Handoff note written." >&2
     return 0
   fi
   if ! run_verify_gate; then
-    echo "Wrap-up: verify failed — leaving work uncommitted (phase-verify-failed.json records the failure for the next session)." >&2
+    write_session_handoff false "fix the verify failure recorded in artifacts/phase-verify-failed.json, then re-commit the standing work"
+    echo "Wrap-up: verify failed — leaving work uncommitted (phase-verify-failed.json + session-handoff.json record the state for the next session)." >&2
     return 0
   fi
+  write_session_handoff true "standing work was committed at wrap-up; re-orient and continue from the next unapproved phase"
+  git add -f "$ARTIFACTS_DIR/session-handoff.json" 2>/dev/null || true
   git commit -m "chore(workflow): session wrap-up — soft stop before session end"
   auto_push_if_enabled
 }
@@ -650,6 +693,25 @@ if [[ -f "$WRAPUP_SENTINEL" ]]; then
   rm -f "$WRAPUP_SENTINEL"
 fi
 
+# Deadline-aware iteration pacing (v0.6.1): the supervisor forwards the
+# session's hard-kill time as PHASEKIT_SESSION_DEADLINE (epoch seconds;
+# run-session.sh computes start + MAX_MINUTES). Between iterations the loop
+# refuses to start one it likely can't finish — remaining time below ~1.2× the
+# average pass so far (floor: 3 minutes) triggers the same path as the wrap-up
+# sentinel. No deadline env ⇒ behavior unchanged. Averages are per-run only —
+# deliberately no persistence across sessions.
+SESSION_DEADLINE="${PHASEKIT_SESSION_DEADLINE:-}"
+if [[ -n "$SESSION_DEADLINE" && ! "$SESSION_DEADLINE" =~ ^[0-9]+$ ]]; then
+  echo "WARN: ignoring non-numeric PHASEKIT_SESSION_DEADLINE='$SESSION_DEADLINE'" >&2
+  SESSION_DEADLINE=""
+fi
+# Floor override is a test/tuning knob; production default is 3 minutes.
+PACING_FLOOR_SECONDS="${PHASEKIT_PACING_FLOOR_SECONDS:-180}"
+[[ "$PACING_FLOOR_SECONDS" =~ ^[0-9]+$ ]] || PACING_FLOOR_SECONDS=180
+pass_elapsed_total=0
+passes_done=0
+last_pass_start=""
+
 # Per-iteration retry budget for transient claude CLI failures (e.g. an
 # API-side content-filter trip that aborts a response mid-stream, a 5xx, or
 # a transient network blip). On a non-zero exit from claude we re-attempt
@@ -677,6 +739,16 @@ check_for_scaffold_update || true
 ensure_transients_excluded || true
 
 while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
+  # Pass-duration bookkeeping (v0.6.1): each trip through the loop top closes
+  # the previous pass. Retried attempts count as passes too — that keeps the
+  # average conservative, which is the right direction for pacing.
+  now_ts="$(date +%s)"
+  if [[ -n "$last_pass_start" ]]; then
+    pass_elapsed_total=$((pass_elapsed_total + now_ts - last_pass_start))
+    passes_done=$((passes_done + 1))
+  fi
+  last_pass_start="$now_ts"
+
   # Soft wrap-up check (v0.6.0): honored between iterations, never mid-flight.
   if [[ -f "$WRAPUP_SENTINEL" ]]; then
     echo "=== Wrap-up requested (sentinel present) — not starting iteration $iteration ==="
@@ -684,6 +756,23 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
     wrapup_commit
     echo "Run wrapped up cleanly (soft stop)."
     exit 0
+  fi
+
+  # Deadline pacing check (v0.6.1): same wrap-up path, triggered by time math
+  # instead of the supervisor's sentinel.
+  if [[ -n "$SESSION_DEADLINE" ]]; then
+    remaining=$((SESSION_DEADLINE - now_ts))
+    pacing_threshold="$PACING_FLOOR_SECONDS"
+    if [[ "$passes_done" -gt 0 ]]; then
+      pacing_estimate=$((pass_elapsed_total * 12 / (passes_done * 10)))
+      [[ "$pacing_estimate" -gt "$pacing_threshold" ]] && pacing_threshold="$pacing_estimate"
+    fi
+    if [[ "$remaining" -lt "$pacing_threshold" ]]; then
+      echo "deadline pacing: not starting iteration $iteration (${remaining}s remain, threshold ${pacing_threshold}s from $passes_done completed passes)"
+      wrapup_commit
+      echo "Run wrapped up cleanly (deadline pacing)."
+      exit 0
+    fi
   fi
 
   echo "=== Iteration $iteration ==="

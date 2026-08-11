@@ -60,6 +60,7 @@ These scripts pass `--permission-mode bypassPermissions` to Claude. This flag on
 | `AUTO_PUSH` | (unset) | Set to `1` to push after each phase commit. Useful when the project needs CI to fire on each phase, github-pages-as-progress-mirror, or deploy previews. Pushes to the current branch's upstream (`git push` with no args). Push failures are non-fatal — the loop continues; the commit is already local. |
 | `PHASEKIT_ITERATION_MODE` | `standard` | Set to `light` for the reduced-ceremony loop (v0.6.0) — see "Light execution mode" below. Set per-session by the outer supervisor (forwarded into the container like `ANTHROPIC_MODEL`); never a committed setting. |
 | `PHASEKIT_WRAPUP_SENTINEL` | `artifacts/wrapup-requested` | Path of the soft wrap-up sentinel (v0.6.0). An outer supervisor touches this file a few minutes before its hard session kill; between iterations the loop honors it — commits what stands (verify-gated) and exits 0 instead of starting an iteration the kill would truncate. Stale sentinels are cleared at loop start. |
+| `PHASEKIT_SESSION_DEADLINE` | (unset) | Epoch seconds of the supervisor's hard kill (v0.6.1; run-session computes start + MAX_MINUTES and forwards it). Enables deadline-aware pacing: between iterations, if remaining time < max(1.2 × average pass duration this run, 3 min), the loop takes the wrap-up path instead of starting an iteration it likely can't finish. Unset ⇒ behavior unchanged. |
 | `VERIFY_MAX_ATTEMPTS` | `3` (standard), `2` (light) | Circuit breaker for the pre-commit verify gate: after this many consecutive failures the loop writes `phase-blocked.json` (light: escalates) and stops. |
 | `SSH_AUTH_SOCK` | (host's value) | When invoked via `container-setup.sh run`, the host's SSH agent socket is forwarded into the container so `git push` to SSH remotes works. Run `ssh-add` on the host first. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | (unset) | Passed through to the container if set, for HTTPS-remote push workflows that use a Personal Access Token. |
@@ -143,6 +144,26 @@ Two guarantees added to `run-until-done.sh`:
 - **Soft wrap-up.** See `PHASEKIT_WRAPUP_SENTINEL` above — sessions get a
   chance to end cleanly (commit what stands, verify-gated) instead of only
   ever ending by the supervisor's hard kill.
+
+Two timeout-waste levers added in v0.6.1, both riding the wrap-up path:
+
+- **Deadline-aware pacing.** With `PHASEKIT_SESSION_DEADLINE` set (see the
+  env table), the loop refuses to start an iteration it likely can't finish:
+  remaining time below max(1.2 × the average pass duration this run, 3 min)
+  triggers the same commit-what-stands wrap-up. Simple by design — pass
+  durations are tracked per-run only, retried attempts count as passes (a
+  conservative average is the right direction), and a missing or malformed
+  deadline changes nothing.
+- **Wrap-up handoff note.** Every wrap-up that leaves standing work writes
+  `artifacts/session-handoff.json` first — `stopped_at_phase` (the last
+  *approved* phase), `in_flight` (a one-line summary of the standing paths),
+  `verified` (whether the wrap-up verify passed), `next_step` — composed by
+  the loop itself, zero extra tokens. When the wrap-up commit happens the
+  note lands inside it; when the commit is refused (verify failure, security
+  pair) it stays on disk where the next session needs it most. It is an
+  ephemeral baton: the next session's orientation (CONTINUE_PROMPT step 1)
+  reads it, then deletes it. Durable learnings belong in `docs/LEARNINGS.md`;
+  `cleanup_artifacts` deliberately leaves the note alone.
 
 ## Settings layering
 

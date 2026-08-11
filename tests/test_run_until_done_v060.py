@@ -1,4 +1,4 @@
-"""v0.6.0 loop checks: light execution mode, phase-commit atomicity, soft wrap-up.
+"""v0.6.x loop checks: light mode, commit atomicity, wrap-up, pacing, handoff.
 
 Two layers:
 - Structural pins on run-until-done.sh / container-setup.sh (delete a
@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -83,6 +84,30 @@ class LoopStructuralTest(unittest.TestCase):
         cleanup = self.text.split("cleanup_artifacts() {", 1)[1].split("}", 1)[0]
         self.assertIn("light-escalation.json", cleanup)
 
+    def test_deadline_pacing_pins(self) -> None:
+        self.assertIn("PHASEKIT_SESSION_DEADLINE", self.text)
+        self.assertIn("deadline pacing: not starting iteration", self.text)
+        # 1.2x average pass duration, integer arithmetic.
+        self.assertIn("pass_elapsed_total * 12 / (passes_done * 10)", self.text)
+
+    def test_session_handoff_pins(self) -> None:
+        self.assertIn("write_session_handoff", self.text)
+        self.assertIn("session-handoff.json", self.text)
+        # cleanup_artifacts must NOT delete the baton (comment lines aside).
+        cleanup = self.text.split("cleanup_artifacts() {", 1)[1].split("}", 1)[0]
+        rm_lines = [ln for ln in cleanup.splitlines()
+                    if "ARTIFACTS_DIR/" in ln and not ln.strip().startswith("#")]
+        self.assertTrue(rm_lines)
+        self.assertFalse(any("session-handoff.json" in ln for ln in rm_lines))
+
+
+class ContinuePromptStructuralTest(unittest.TestCase):
+    def test_orientation_reads_then_deletes_handoff(self) -> None:
+        with open(os.path.join(REPO_ROOT, "CONTINUE_PROMPT.txt")) as f:
+            text = f.read()
+        self.assertIn("session-handoff.json", text)
+        self.assertIn("DELETE the file after orienting", text)
+
 
 class ContainerStructuralTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -101,9 +126,15 @@ class ContainerStructuralTest(unittest.TestCase):
         self.assertNotIn('-e MAX_ITERATIONS="${MAX_ITERATIONS:-50}"', self.text)
         self.assertIn('-e MAX_ITERATIONS="$MAX_ITERATIONS"', self.text)
 
+    def test_forwards_session_deadline(self) -> None:
+        self.assertIn('-e PHASEKIT_SESSION_DEADLINE="$PHASEKIT_SESSION_DEADLINE"',
+                      self.text)
+
 
 @unittest.skipUnless(HAVE_TOOLS, "bash+git+jq required")
-class LoopFunctionalTest(unittest.TestCase):
+class LoopHarness(unittest.TestCase):
+    """Fixture repo + stub run-phase.sh; subclasses hold the actual tests."""
+
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="pk-v060-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -149,7 +180,8 @@ class LoopFunctionalTest(unittest.TestCase):
         run_env = dict(os.environ)
         for var in ("ANTHROPIC_MODEL", "PHASEKIT_ITERATION_MODE", "MAX_ITERATIONS",
                     "VERIFY_MAX_ATTEMPTS", "CLAUDE_MODE", "AUTO_PUSH",
-                    "PHASEKIT_VERIFY_CMD", "VERIFY_SKIP", "PHASEKIT_WRAPUP_SENTINEL"):
+                    "PHASEKIT_VERIFY_CMD", "VERIFY_SKIP", "PHASEKIT_WRAPUP_SENTINEL",
+                    "PHASEKIT_SESSION_DEADLINE", "PHASEKIT_PACING_FLOOR_SECONDS"):
             run_env.pop(var, None)
         run_env.update({
             "PHASEKIT_NO_UPDATE_CHECK": "1",
@@ -179,6 +211,8 @@ class LoopFunctionalTest(unittest.TestCase):
         with open(os.path.join(self.stub_dir, f"prompt-{n}.txt")) as f:
             return f.read()
 
+
+class LoopFunctionalTest(LoopHarness):
     # --- phase-commit atomicity ------------------------------------------
 
     def test_stale_approval_never_drives_a_commit(self) -> None:
@@ -372,6 +406,106 @@ class LoopFunctionalTest(unittest.TestCase):
         esc = os.path.join(self.repo, "artifacts", "light-escalation.json")
         with open(esc) as f:
             self.assertIn('"iteration_cap"', f.read())
+
+
+class LoopV061FunctionalTest(LoopHarness):
+    # --- deadline-aware pacing --------------------------------------------
+
+    def test_pacing_refuses_start_below_floor(self) -> None:
+        # Deadline closer than the 3-minute floor: the loop must not start
+        # iteration 1 at all — wrap-up path, clean exit, zero claude calls.
+        scenario = 'echo ran > "$STUB_DIR/ran"\n'
+        deadline = int(time.time()) + 60
+        r = self._run_loop(scenario,
+                           env={"PHASEKIT_SESSION_DEADLINE": str(deadline)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("deadline pacing: not starting iteration 1", r.stdout)
+        self.assertIn("Run wrapped up cleanly (deadline pacing).", r.stdout)
+        self.assertEqual(self._calls(), 0)
+
+    def test_far_deadline_changes_nothing(self) -> None:
+        scenario = (
+            "jq -n '{suggested_commit_message: \"final: done\"}'"
+            " > artifacts/project-complete.json\n"
+        )
+        deadline = int(time.time()) + 3600
+        r = self._run_loop(scenario,
+                           env={"PHASEKIT_SESSION_DEADLINE": str(deadline)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("deadline pacing", r.stdout)
+        self.assertEqual(self._calls(), 1)
+
+    def test_malformed_deadline_ignored(self) -> None:
+        scenario = (
+            "jq -n '{suggested_commit_message: \"final: done\"}'"
+            " > artifacts/project-complete.json\n"
+        )
+        r = self._run_loop(scenario,
+                           env={"PHASEKIT_SESSION_DEADLINE": "five-minutes"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("ignoring non-numeric PHASEKIT_SESSION_DEADLINE",
+                      r.stdout + r.stderr)
+        self.assertEqual(self._calls(), 1)
+
+    # --- wrap-up handoff baton --------------------------------------------
+
+    def test_handoff_committed_when_wrapup_rescues_interrupted_work(self) -> None:
+        # claude "dies" mid-iteration after doing verify-green work; the
+        # supervisor's sentinel arrives; the retry pass hits the wrap-up,
+        # which must commit the standing work WITH the handoff baton inside.
+        self._write("scripts/phasekit-verify.sh", VERIFY_OK, executable=True)
+        scenario = (
+            "echo rescued-work >> src.txt\n"
+            "touch artifacts/wrapup-requested\n"
+            "exit 7\n"
+        )
+        r = self._run_loop(scenario, env={"PHASEKIT_ITER_RETRY": "1"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Wrap-up requested", r.stdout)
+        self.assertIn("session wrap-up", self._messages())
+        committed = self._git("show", "--name-only", "--format=", "HEAD")
+        self.assertIn("src.txt", committed)
+        self.assertIn("artifacts/session-handoff.json", committed)
+        with open(os.path.join(self.repo, "artifacts", "session-handoff.json")) as f:
+            handoff = f.read()
+        self.assertIn('"verified": true', handoff)
+        self.assertIn("src.txt", handoff)
+
+    def test_handoff_uncommitted_on_wrapup_verify_failure(self) -> None:
+        self._write("scripts/phasekit-verify.sh", VERIFY_BAD_FILE, executable=True)
+        scenario = (
+            "echo w >> src.txt; touch BAD\n"
+            "jq -n '{phase: \"phase-9\", suggested_commit_message: \"phase-9: red\"}'"
+            " > artifacts/phase-approval.json\n"
+            "touch artifacts/wrapup-requested\n"
+        )
+        self._prepare_scenario(scenario)
+        before = self._messages()
+        r = self._run_loop(None)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(before, self._messages())  # nothing committed
+        with open(os.path.join(self.repo, "artifacts", "session-handoff.json")) as f:
+            handoff = f.read()
+        self.assertIn('"verified": false', handoff)
+        self.assertIn("phase-9", handoff)
+        self.assertIn("phase-verify-failed.json", handoff)
+
+    def test_handoff_survives_cleanup_into_next_session(self) -> None:
+        # A baton left by a prior session must still exist when the next
+        # session's first iteration runs (cleanup_artifacts leaves it alone);
+        # the model, not the wrapper, deletes it after orienting.
+        self._write("artifacts/session-handoff.json",
+                    '{"stopped_at_phase": "phase-3"}\n')
+        scenario = (
+            "if [ -f artifacts/session-handoff.json ];"
+            ' then echo yes > "$STUB_DIR/handoff-seen"; fi\n'
+            "rm -f artifacts/session-handoff.json\n"
+            "jq -n '{suggested_commit_message: \"final: done\"}'"
+            " > artifacts/project-complete.json\n"
+        )
+        r = self._run_loop(scenario)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.stub_dir, "handoff-seen")))
 
 
 if __name__ == "__main__":
