@@ -688,5 +688,133 @@ class LoopV064FunctionalTest(LoopHarness):
         self.assertIn("final: done", self._messages())
 
 
+class LoopV065StructuralTest(unittest.TestCase):
+    def setUp(self) -> None:
+        with open(LOOP_SCRIPT) as f:
+            self.text = f.read()
+
+    def test_transient_family_pins(self) -> None:
+        self.assertIn("TRANSIENT_SIGNALS=(", self.text)
+        self.assertIn("HIDDEN_TRANSIENTS=(", self.text)
+        self.assertIn("unstage_transient_adds", self.text)
+        self.assertIn("heal_tracked_transients", self.text)
+        family = self.text.split("TRANSIENT_SIGNALS=(", 1)[1].split(")", 1)[0]
+        for sig in ("phase-blocked.json", "phase-verify-failed.json",
+                    "spec-change.json", "scope-warning.json",
+                    "scope-refusal.json", "light-escalation.json"):
+            self.assertIn(sig, family)
+        # Visible-on-purpose pair must NOT be status-hidden.
+        hidden = self.text.split("HIDDEN_TRANSIENTS=(", 1)[1].split(")", 1)[0]
+        self.assertNotIn("phase-blocked.json", hidden)
+        self.assertNotIn("phase-verify-failed.json", hidden)
+        self.assertIn("spec-change.json", hidden)
+
+    def test_both_commit_paths_unstage_transients(self) -> None:
+        commit_fn = self.text.split("commit_from_artifact() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("unstage_transient_adds", commit_fn)
+        wrapup_fn = self.text.split("wrapup_commit() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("unstage_transient_adds", wrapup_fn)
+
+
+class LoopV065FunctionalTest(LoopHarness):
+    # --- transient-signal family completion --------------------------------
+
+    COMPLETE_SCENARIO = (
+        "echo w >> src.txt\n"
+        "jq -n '{suggested_commit_message: \"final: done\"}'"
+        " > artifacts/project-complete.json\n"
+    )
+
+    def _porcelain(self) -> str:
+        return self._git("status", "--porcelain")
+
+    def test_spec_change_never_becomes_tracked(self) -> None:
+        # The real task-#100 tracking path: iteration 1's commit touches
+        # docs/SPEC.md, so the loop writes spec-change.json AFTER that commit;
+        # iteration 2's `git add -A` used to sweep it in. It must end the run
+        # untracked, still on disk (the orchestrator consumes it), and
+        # invisible to git status.
+        self._write("docs/SPEC.md", "# Spec\n")
+        scenario = (
+            'case "$CALL_N" in\n'
+            "  1) echo more >> docs/SPEC.md\n"
+            "     jq -n '{suggested_commit_message: \"phase-2: spec work\"}'"
+            " > artifacts/phase-approval.json ;;\n"
+            "  2) echo w2 >> src.txt\n"
+            "     jq -n '{suggested_commit_message: \"final: done\"}'"
+            " > artifacts/project-complete.json ;;\n"
+            "esac\n"
+        )
+        r = self._run_loop(scenario)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("spec-change.json", r.stdout + r.stderr)  # signal emitted
+        self.assertNotIn("artifacts/spec-change.json", self._git("ls-files"))
+        self.assertTrue(os.path.exists(
+            os.path.join(self.repo, "artifacts", "spec-change.json")))
+        self.assertEqual(self._porcelain(), "")
+
+    def test_tracked_then_deleted_transient_heals(self) -> None:
+        # The task-#100 stranding itself: a pre-v0.6.5 history tracks
+        # spec-change.json; the orchestrator deleted it from disk at session
+        # end. The next run must untrack it mechanically (heal commit) and end
+        # with a clean tree.
+        self._write("artifacts/spec-change.json", '{"spec_changed": true}\n')
+        self._prepare_scenario(self.COMPLETE_SCENARIO)  # commits it (legacy)
+        os.remove(os.path.join(self.repo, "artifacts", "spec-change.json"))
+        r = self._run_loop(None)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("untracking", (r.stdout + r.stderr).lower())
+        self.assertNotIn("artifacts/spec-change.json", self._git("ls-files"))
+        self.assertIn("untrack transient signal artifacts", self._messages())
+        self.assertEqual(self._porcelain(), "")
+
+    def test_tracked_phase_blocked_heals_without_hiding(self) -> None:
+        # The no-churn-exempt pair strands hardest (its staged deletion can
+        # never satisfy the gate alone). The heal must untrack it, and it must
+        # NOT be status-hidden: once back on disk it shows as untracked.
+        self._write("artifacts/phase-blocked.json", '{"blocked": true}\n')
+        self._prepare_scenario(self.COMPLETE_SCENARIO)  # commits it (legacy)
+        r = self._run_loop(None)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("artifacts/phase-blocked.json", self._git("ls-files"))
+        self.assertIn("untrack transient signal artifacts", self._messages())
+        self.assertEqual(self._porcelain(), "")
+        # Visible-on-purpose: a fresh blocker is not excluded from status.
+        self._write("artifacts/phase-blocked.json", '{"blocked": true}\n')
+        self.assertIn("phase-blocked.json", self._porcelain())
+
+    def test_leftover_scope_warning_not_committed(self) -> None:
+        # A scope-warning.json left on disk from a prior session: add -A must
+        # not sweep it into the next commit, and it must not dirty the tree.
+        self._write("artifacts/scope-warning.json",
+                    '{"scope_warning": true, "files": ["scripts/x.sh"]}\n')
+        r = self._run_loop(self.COMPLETE_SCENARIO)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("final: done", self._messages())
+        self.assertNotIn("artifacts/scope-warning.json", self._git("ls-files"))
+        self.assertEqual(self._porcelain(), "")
+
+    def test_heal_rides_with_stranded_recovery_when_index_dirty(self) -> None:
+        # Tracked transient + stranded completion: the heal must not create a
+        # commit that sweeps in unrelated staged work; the untracking rides
+        # with the stranded-recovery commit instead.
+        self._write("artifacts/light-escalation.json", '{"light_escalation": true}\n')
+        self._prepare_scenario('echo ran > "$STUB_DIR/ran"\n')  # commits it (legacy)
+        os.remove(os.path.join(self.repo, "artifacts", "light-escalation.json"))
+        self._write("src.txt", "base\nfinished work\n")
+        self._git("add", "src.txt")  # unrelated work already staged
+        self._write("artifacts/project-complete.json",
+                    '{"suggested_commit_message": "final: stranded completion"}\n')
+        r = self._run_loop(None)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self._calls(), 0)
+        self.assertIn("final: stranded completion", self._messages())
+        # No separate heal commit: the untracking landed inside the recovery
+        # commit, and unrelated staged work was never swept into a heal commit.
+        self.assertNotIn("untrack transient signal artifacts", self._messages())
+        self.assertNotIn("artifacts/light-escalation.json", self._git("ls-files"))
+        self.assertEqual(self._porcelain(), "")
+
+
 if __name__ == "__main__":
     unittest.main()

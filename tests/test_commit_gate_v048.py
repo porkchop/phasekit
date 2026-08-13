@@ -38,8 +38,11 @@ class CommitGateStructuralTest(unittest.TestCase):
         self.assertIn("spec-change.json", self.text)
         self.assertIn("--numstat -- docs/SPEC.md", self.text)
         # Attestation must never gate: no return-nonzero in its branch.
-        spec_block = self.text.split("spec-change.json")[0].rsplit("SPEC change attestation", 1)
-        self.assertEqual(len(spec_block), 2, "attestation comment anchor present")
+        # (Anchor on the comment, not on first mention of the filename — since
+        # v0.6.5 the transient-signal family list names it earlier in the file.)
+        parts = self.text.split("SPEC change attestation", 1)
+        self.assertEqual(len(parts), 2, "attestation comment anchor present")
+        self.assertIn("spec-change.json", parts[1])
 
 
 class ScopeScannerFunctionalTest(unittest.TestCase):

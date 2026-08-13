@@ -128,6 +128,37 @@ Two kinds of churn are explicitly excluded:
   if `phase-blocked.json` is present it stops cleanly (exit 2) for operator
   handoff rather than committing an empty-progress change.
 
+### Transient-signal family (v0.6.5)
+Every loop-emitted signal that the loop (or an orchestrator) later deletes
+behind git's back must never be committed: a tracked copy turns that deletion
+into a staged deletion the no-churn rule may refuse forever, leaving the tree
+permanently dirty and tripping every downstream clean-tree guard (the
+motivating incidents: a tracked `phase-blocked.json`, then a tracked
+`spec-change.json`).
+
+The full family: `phase-blocked.json`, `phase-verify-failed.json`,
+`spec-change.json`, `scope-warning.json`, `scope-refusal.json`,
+`light-escalation.json` (plus `artifacts/logs/` and the wrap-up sentinel).
+Deliberate absences — committed on purpose, not transient: `phase-approval`,
+`phase-update`, `project-complete`, `session-handoff`, `ready-to-deploy`, and
+an orchestrator's `iteration-mode.json`.
+
+Three mechanisms in `scripts/run-until-done.sh` keep the family uncommitted:
+- **Status-hidden signals** (`spec-change`, `scope-warning`, `scope-refusal`,
+  `light-escalation`) go into `.git/info/exclude` at loop start — they are
+  consumed from disk, so hiding them from `git status` hides nothing a human
+  needs. `phase-blocked.json` and `phase-verify-failed.json` deliberately stay
+  visible: a live blocker must show in `git status`.
+- **Never added**: after `git add -A`, the wrapper unstages any fresh add of a
+  family member (a staged *deletion* of a legacy tracked copy is left to ride
+  — that deletion is the heal).
+- **Self-heal**: at loop start, any family member tracked by a pre-v0.6.5
+  history is untracked (`git rm --cached`); when the index is otherwise clean
+  the untracking is committed immediately as an index-only chore commit
+  (working tree unchanged, so the verify gate's inputs are unchanged —
+  gating the heal would block it exactly when the tree is broken for
+  unrelated reasons), otherwise it rides with the session's next commit.
+
 ## Evidence integrity gate
 
 Gate results and citations are claims about a *specific tree*; they rot silently when the tree moves. (Upstreamed 2026-08-11 from foundry-dashboard, which adopted these rules at its iteration-10 close after stale evidence decided three consecutive signoffs — the phase numbers cited below are that project's, kept as the motivating record.)

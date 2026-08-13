@@ -99,26 +99,122 @@ check_for_scaffold_update() {
   return 0
 }
 
+# Transient-signal family (completed in v0.6.5). Every loop-emitted signal the
+# loop (or the orchestrator) later deletes behind git's back. None of these may
+# EVER be committed: a tracked copy turns that deletion into a staged deletion
+# the substantive-change gate may refuse forever — the tree goes permanently
+# dirty and every clean-tree guard downstream trips (foundry-dashboard task
+# #100: spec-change.json; the phase-blocked.json stranding before it).
+# Deliberate absences — committed on purpose, not transient: phase-approval,
+# phase-update, project-complete, session-handoff, ready-to-deploy, and the
+# orchestrator's iteration-mode.json (written INSIDE the iteration commit).
+TRANSIENT_SIGNALS=(
+  "phase-blocked.json"
+  "phase-verify-failed.json"
+  "spec-change.json"
+  "scope-warning.json"
+  "scope-refusal.json"
+  "light-escalation.json"
+  ".scope-check.tmp"
+)
+# The subset also hidden from `git status` via .git/info/exclude: consumed from
+# disk (the orchestrator's session_signals/record_run read-then-delete them, or
+# the commit path itself cleans them up), so hiding them hides nothing a human
+# needs. phase-blocked.json and phase-verify-failed.json are deliberately NOT
+# here — a live blocker must stay visible in `git status`; they are kept
+# uncommittable by unstage_transient_adds + the no-churn gate instead.
+HIDDEN_TRANSIENTS=(
+  "spec-change.json"
+  "scope-warning.json"
+  "scope-refusal.json"
+  "light-escalation.json"
+  ".scope-check.tmp"
+)
+
 ensure_transients_excluded() {
   # The loop never commits artifacts/logs/* (see commit_from_artifact), and the
   # wrap-up sentinel (v0.6.0) is an outer-supervisor signal file, but leaving
   # either untracked-and-unignored makes every post-run `git status
   # --porcelain` cleanliness check (e.g. an orchestrator's iterate/intake
-  # gate) see a dirty tree. Exclude them repo-locally via .git/info/exclude —
-  # unlike .gitignore this ships nothing downstream and can't collide with
+  # gate) see a dirty tree. Same for the HIDDEN_TRANSIENTS signal files
+  # (v0.6.5). Exclude them repo-locally via .git/info/exclude — unlike
+  # .gitignore this ships nothing downstream and can't collide with
   # project-owned ignore rules. Best-effort: never blocks the loop.
   # (A custom PHASEKIT_WRAPUP_SENTINEL path outside artifacts/ is the
   # overrider's responsibility to keep out of git status.)
-  local exclude_file line
+  local exclude_file line sig
   exclude_file="$(git -C "$ROOT_DIR" rev-parse --git-path info/exclude 2>/dev/null)" || return 0
   [[ -n "$exclude_file" ]] || return 0
   # rev-parse --git-path may return a relative path; resolve from ROOT_DIR.
   [[ "$exclude_file" = /* ]] || exclude_file="$ROOT_DIR/$exclude_file"
   mkdir -p "$(dirname "$exclude_file")" 2>/dev/null || return 0
-  for line in "artifacts/logs/" "artifacts/wrapup-requested"; do
+  local lines=("artifacts/logs/" "artifacts/wrapup-requested")
+  for sig in "${HIDDEN_TRANSIENTS[@]}"; do
+    lines+=("artifacts/$sig")
+  done
+  for line in "${lines[@]}"; do
     grep -qxF "$line" "$exclude_file" 2>/dev/null && continue
     echo "$line" >> "$exclude_file" 2>/dev/null || true
   done
+  return 0
+}
+
+unstage_transient_adds() {
+  # `git add -A` must never ADD a transient signal (v0.6.5) — that is exactly
+  # how spec-change.json became tracked in foundry-dashboard: written by the
+  # previous commit's own bookkeeping, still on disk at the next commit,
+  # swept in by add -A. The HIDDEN_TRANSIENTS are already invisible to add -A
+  # via info/exclude; this covers the visible pair (and belt-and-braces the
+  # rest, e.g. against a project .gitignore rule that re-includes artifacts/).
+  # A staged DELETION of a legacy tracked copy is deliberately left alone —
+  # that deletion IS the heal and must ride into the commit
+  # (see heal_tracked_transients).
+  local sig
+  for sig in "${TRANSIENT_SIGNALS[@]}"; do
+    if ! git cat-file -e "HEAD:artifacts/$sig" 2>/dev/null; then
+      git reset -q -- "$ARTIFACTS_DIR/$sig" 2>/dev/null || true
+    fi
+  done
+  return 0
+}
+
+heal_tracked_transients() {
+  # Self-heal for a pre-v0.6.5 history that already tracks a transient signal
+  # (v0.6.5). The loop/orchestrator deletes these files behind git's back, so
+  # a tracked copy strands the tree: for the no-churn-exempt pair the staged
+  # deletion can never satisfy the substantive-change gate on its own, and for
+  # the rest it only heals by riding along with unrelated work. Untrack them
+  # mechanically at loop start — never depend on the model noticing.
+  #
+  # The heal commit is index-only (files stay on disk where present) and runs
+  # WITHOUT the verify gate: the working tree is byte-identical before and
+  # after, so verify's inputs are unchanged, and gating it would block the
+  # heal exactly when the tree is broken for unrelated reasons (gate-recovery
+  # principle). It is only created when the index is clean apart from this
+  # family; otherwise the staged untracking rides with the session's next
+  # commit. Best-effort throughout: never blocks the loop.
+  local sig tracked=()
+  git cat-file -e HEAD 2>/dev/null || return 0
+  for sig in "${TRANSIENT_SIGNALS[@]}"; do
+    git cat-file -e "HEAD:artifacts/$sig" 2>/dev/null || continue
+    tracked+=("artifacts/$sig")
+  done
+  [[ ${#tracked[@]} -gt 0 ]] || return 0
+  echo "Transient signal artifact(s) are tracked from a pre-v0.6.5 history — untracking: ${tracked[*]}"
+  git rm --cached -q --ignore-unmatch -- "${tracked[@]}" 2>/dev/null || return 0
+  local excl=(':/')
+  for sig in "${TRANSIENT_SIGNALS[@]}"; do
+    excl+=(":(exclude)artifacts/$sig")
+  done
+  if git diff --cached --quiet -- "${excl[@]}"; then
+    if git commit -q -m "chore(workflow): untrack transient signal artifacts (phasekit v0.6.5 heal)"; then
+      echo "  Heal commit created (index-only; files remain on disk where present)."
+    else
+      echo "  WARN: heal commit failed — staged untracking left to ride with the next commit." >&2
+    fi
+  else
+    echo "  Index has other staged changes — the untracking will ride with the session's next commit."
+  fi
   return 0
 }
 
@@ -333,6 +429,10 @@ commit_from_artifact() {
   # stage them. (Autonomous-loop-only — logs only exist during loop runs.)
   git reset -q -- "$ARTIFACTS_DIR/logs" 2>/dev/null || true
 
+  # Never commit transient signals either (v0.6.5) — fresh adds only; a staged
+  # deletion of a legacy tracked copy rides so the untracking lands.
+  unstage_transient_adds
+
   # Substantive-change gate. A blocked or stalled iteration must still write
   # *some* signal artifact (the loop contract requires one), and a prior
   # phase-approval.json persists on disk as the durable approval record. Left
@@ -487,6 +587,7 @@ wrapup_commit() {
   git add -A
   git reset -q -- "$ARTIFACTS_DIR/logs" 2>/dev/null || true
   git reset -q -- "$WRAPUP_SENTINEL" 2>/dev/null || true
+  unstage_transient_adds
   if git diff --cached --quiet -- ':/' \
        ":(exclude)$ARTIFACTS_DIR/phase-blocked.json" \
        ":(exclude)$ARTIFACTS_DIR/phase-verify-failed.json"; then
@@ -757,9 +858,13 @@ fi
 # Once-per-run, non-fatal nudge if a newer phasekit release is available.
 check_for_scaffold_update || true
 
-# Once-per-run: keep per-iteration logs and the wrap-up sentinel out of git
-# status (see function docs).
+# Once-per-run: keep per-iteration logs, the wrap-up sentinel, and the hidden
+# transient signals out of git status, then untrack any transient signal a
+# pre-v0.6.5 history committed (see function docs). Exclude-before-untrack
+# order is deliberate: it fails closed (an exclude line for a still-tracked
+# path is inert; untracked-and-unexcluded is the state to avoid).
 ensure_transients_excluded || true
+heal_tracked_transients || true
 
 # Stranded-artifact recovery (v0.6.3). v0.6.0's atomicity gate correctly
 # refuses to let a stale phase-approval.json drive a commit — but a session
