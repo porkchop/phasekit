@@ -72,6 +72,27 @@ run "$UV_BIN" run ruff check .
 # Scope mypy to your package (e.g. `mypy src/`) if the tree-wide run is noisy,
 # or set `files = [...]` under [tool.mypy] in pyproject.toml and drop the dot.
 run "$UV_BIN" run mypy .
-run "$UV_BIN" run pytest -q
+
+# Verify budget (docs/QUALITY_GATES.md "Verify budget"): this gate runs before
+# every phase commit, so it targets ~30s (60s ceiling). The gate runs only the
+# FAST tier — tests marked `slow` are excluded here, and the full suite stays
+# mandatory at the verification-sprint gate. Splitting governs WHEN tests run,
+# never WHETHER.
+#
+# The marker convention as the suite grows:
+#   - register the marker in pyproject.toml:
+#       [tool.pytest.ini_options]
+#       markers = ["slow: excluded from the pre-commit gate; runs at the sprint"]
+#   - mark tests by MEASURED duration (`uv run pytest --durations=25`), not by
+#     module or intuition, using @pytest.mark.slow
+#
+# Completion runs full: once artifacts/project-complete.json exists, the gate
+# runs the complete suite — a project never reaches "done" on the fast tier
+# alone (fast tier per-commit; full suite at the sprint AND at completion).
+if [[ -f artifacts/project-complete.json ]]; then
+  run "$UV_BIN" run pytest -q
+else
+  run "$UV_BIN" run pytest -q -m "not slow"
+fi
 
 echo "phasekit-verify.sh: all checks passed."

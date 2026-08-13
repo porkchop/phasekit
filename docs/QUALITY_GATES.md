@@ -16,6 +16,7 @@ These are excuses agents (and humans) reach for when they want to skip a gate. E
 | "Code review can wait until after merge" | The review gate catches duplication, missed drift, and architecture violations the implementer is least likely to see. After-merge review is a documentation step, not a gate. |
 | "I'll push anyway, CI will catch it" | CI is shared infrastructure. Broken master pages humans, blocks deploys, and disrupts other consumers of the loop. The pre-commit verify gate exists so easy classes of failure are caught locally. |
 | "I'll skip the verification sprint — nothing changed there" | Cumulative regressions are the failure mode the sprint exists to catch. 'Nothing changed' is an assumption, not evidence. |
+| "The suite is too slow, I'll skip verify" | Split it instead; the budget is the fix, not the excuse. A fast tier keeps the gate under budget while the full suite still runs at the verification sprint and at completion — see "Verify budget" below. |
 | "Discovered work can wait for a later phase" | Discovered work that blocks the current phase is part of the current phase. Deferring it produces phases that pass review but don't actually deliver. |
 
 If you find yourself making one of these arguments, stop and re-read the relevant gate below.
@@ -169,6 +170,20 @@ Escape hatches:
 - `PHASEKIT_VERIFY_CMD="..."` overrides the script with a one-shot command
 
 Configuration is project-owned: edit `scripts/phasekit-verify.sh` (rendered into the project at enrich time) to declare the right fast checks for the stack. Until configured, the gate fail-opens with a warning so un-instrumented projects continue to work.
+
+### Verify budget (v0.6.4)
+
+The gate's speed is part of its correctness. Verify runs before *every* phase commit — often several times per session — so its wall time multiplies directly into session productivity: a suite that quietly grows past its budget turns build sessions into no-commit sessions (the motivating case burned three consecutive sessions on a suite that had grown to ~83s).
+
+- **Target ~30 seconds. 60 seconds is the ceiling** (the loop's advisory threshold, tunable via `PHASEKIT_VERIFY_BUDGET_SECONDS`).
+- When a growing suite outgrows the budget, the sanctioned escape is a **fast/slow split**, never a skipped gate:
+  - Register a `slow` marker (or the stack's equivalent) and mark tests by **measured** duration (`pytest --durations=25`), not by module or intuition.
+  - The pre-commit gate runs the fast tier (e.g. `pytest -q -m "not slow"`).
+  - The **full suite stays mandatory at the verification-sprint gate**, which already requires the complete suite — the split restores the two gates' intended roles; it invents nothing.
+  - **Completion runs full:** when `artifacts/project-complete.json` exists, verify runs the complete suite — a project never reaches "done" on the fast tier alone. (Quality decision 2026-08-13: fast tier per-commit; full suite at the sprint AND at completion.)
+- Splitting governs **when** tests run, never **whether**. A test that no gate ever runs has been deleted, not split.
+
+The loop watches for this drift mechanically: when verify exceeds the ceiling on 2+ runs in one session, it prints a one-line advisory pointing here. The advisory is fail-open — it never blocks a commit and never edits the project's gate (the v0.5.0 keep-local guarantee: phasekit never rewrites a configured `scripts/phasekit-verify.sh`).
 
 ### Stack profiles seed a real gate (v0.5.0)
 

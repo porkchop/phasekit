@@ -111,6 +111,17 @@ class TemplateHygiene(unittest.TestCase):
             self.assertIn("PHASEKIT_VERIFY_CONFIGURED=1", text)
             self.assertNotRegex(text, r"(?m)^PHASEKIT_VERIFY_CONFIGURED=0")
 
+    def test_python_uv_gate_runs_fast_tier_with_full_suite_at_completion(self):
+        # v0.6.4 verify budget: the seeded python-uv gate excludes `slow`-marked
+        # tests per-commit, and runs the complete suite once the completion
+        # record exists (fast tier per-commit; full suite at sprint AND
+        # completion). Other stack templates (node --test) have no marker idiom
+        # worth forcing — this pin is python-uv only.
+        text = (REPO_ROOT / "templates" / "phasekit-verify.template.python-uv.sh").read_text()
+        self.assertIn('pytest -q -m "not slow"', text)
+        self.assertIn("artifacts/project-complete.json", text)
+        self.assertIn("--durations", text)
+
     def test_conventions_templates_are_placeholder_free(self):
         # scaffold-class update detection hashes the template as if it were
         # the rendered output; any {{PLACEHOLDER}} would break that identity.

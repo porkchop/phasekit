@@ -31,6 +31,15 @@ ITERATION_MODE="${PHASEKIT_ITERATION_MODE:-standard}"
 # resolution block below (standard: 50/3; light: 2/2 per the 2026-08-10
 # design decision — escalate after 2 verify failures).
 
+# Verify-budget advisory (v0.6.4, fail-open). The gate targets ~30s with a
+# 60s ceiling (docs/QUALITY_GATES.md "Verify budget"); when a run exceeds the
+# ceiling on 2+ runs in one session, print ONE advisory line pointing at the
+# fast/slow split. Never blocks, never edits the project's gate.
+VERIFY_BUDGET_SECONDS="${PHASEKIT_VERIFY_BUDGET_SECONDS:-60}"
+[[ "$VERIFY_BUDGET_SECONDS" =~ ^[0-9]+$ ]] || VERIFY_BUDGET_SECONDS=60
+VERIFY_OVER_BUDGET_RUNS=0
+VERIFY_BUDGET_ADVISED=0
+
 mkdir -p "$ARTIFACTS_DIR"
 
 require_cmd() {
@@ -187,6 +196,8 @@ run_verify_gate() {
   local log
   log="$(mktemp)"
   local verify_status=0
+  local verify_start verify_elapsed
+  verify_start="$(date +%s)"
   if [[ "$invoke" == "bash" ]]; then
     # Project's script provides its own set -e/pipefail.
     bash "$cmd" >"$log" 2>&1 || verify_status=$?
@@ -196,6 +207,18 @@ run_verify_gate() {
     # command isn't masked by a successful tail.
     bash -eo pipefail -c "$cmd" >"$log" 2>&1 || verify_status=$?
   fi
+  verify_elapsed=$(( $(date +%s) - verify_start ))
+
+  # Verify-budget advisory (v0.6.4). Counts pass and fail alike — the drift
+  # being measured is suite growth, not correctness. Once per session.
+  if (( verify_elapsed > VERIFY_BUDGET_SECONDS )); then
+    VERIFY_OVER_BUDGET_RUNS=$((VERIFY_OVER_BUDGET_RUNS + 1))
+    if (( VERIFY_OVER_BUDGET_RUNS >= 2 && VERIFY_BUDGET_ADVISED == 0 )); then
+      VERIFY_BUDGET_ADVISED=1
+      echo "ADVISORY: verify exceeded its budget (${verify_elapsed}s > ${VERIFY_BUDGET_SECONDS}s, ${VERIFY_OVER_BUDGET_RUNS} runs this session) — see docs/QUALITY_GATES.md 'Verify budget' for the fast/slow split."
+    fi
+  fi
+
   if [[ "$verify_status" -eq 0 ]]; then
     echo "  Verify passed."
     rm -f "$log" "$ARTIFACTS_DIR/phase-verify-failed.json"

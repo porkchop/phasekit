@@ -99,6 +99,15 @@ class LoopStructuralTest(unittest.TestCase):
         self.assertIn("Stranded phase-approval.json", self.text)
         self.assertIn("Stranded project-complete.json", self.text)
 
+    def test_verify_budget_advisory_pins(self) -> None:
+        # v0.6.4: fail-open budget advisory — tunable ceiling, fires once per
+        # session after 2+ over-budget runs, points at the doctrine.
+        self.assertIn("PHASEKIT_VERIFY_BUDGET_SECONDS", self.text)
+        self.assertIn("ADVISORY: verify exceeded its budget", self.text)
+        self.assertIn("'Verify budget' for the fast/slow split", self.text)
+        self.assertIn("VERIFY_OVER_BUDGET_RUNS >= 2 && VERIFY_BUDGET_ADVISED == 0",
+                      self.text)
+
     def test_session_handoff_pins(self) -> None:
         self.assertIn("write_session_handoff", self.text)
         self.assertIn("session-handoff.json", self.text)
@@ -190,7 +199,8 @@ class LoopHarness(unittest.TestCase):
         for var in ("ANTHROPIC_MODEL", "PHASEKIT_ITERATION_MODE", "MAX_ITERATIONS",
                     "VERIFY_MAX_ATTEMPTS", "CLAUDE_MODE", "AUTO_PUSH",
                     "PHASEKIT_VERIFY_CMD", "VERIFY_SKIP", "PHASEKIT_WRAPUP_SENTINEL",
-                    "PHASEKIT_SESSION_DEADLINE", "PHASEKIT_PACING_FLOOR_SECONDS"):
+                    "PHASEKIT_SESSION_DEADLINE", "PHASEKIT_PACING_FLOOR_SECONDS",
+                    "PHASEKIT_VERIFY_BUDGET_SECONDS"):
             run_env.pop(var, None)
         run_env.update({
             "PHASEKIT_NO_UPDATE_CHECK": "1",
@@ -617,6 +627,65 @@ class LoopV063FunctionalTest(LoopHarness):
         self.assertIn("final: fixed", self._messages())
         self.assertNotIn("final: stranded red", self._messages())
         self.assertNotIn("BAD", self._git("ls-files"))
+
+
+class LoopV064FunctionalTest(LoopHarness):
+    # --- verify-budget advisory (fail-open) --------------------------------
+
+    ADVISORY = "ADVISORY: verify exceeded its budget"
+
+    TWO_COMMIT_SCENARIO = (
+        'case "$CALL_N" in\n'
+        "  1) echo w1 >> src.txt\n"
+        "     jq -n '{suggested_commit_message: \"phase-2: work\"}'"
+        " > artifacts/phase-approval.json ;;\n"
+        "  2) echo w2 >> src.txt\n"
+        "     jq -n '{suggested_commit_message: \"final: done\"}'"
+        " > artifacts/project-complete.json ;;\n"
+        "esac\n"
+    )
+
+    SLOW_VERIFY = (
+        "#!/usr/bin/env bash\nPHASEKIT_VERIFY_CONFIGURED=1\nsleep 2\nexit 0\n"
+    )
+
+    def test_advisory_fires_once_after_two_over_budget_runs(self) -> None:
+        self._write("scripts/phasekit-verify.sh", self.SLOW_VERIFY, executable=True)
+        r = self._run_loop(self.TWO_COMMIT_SCENARIO,
+                           env={"PHASEKIT_VERIFY_BUDGET_SECONDS": "1"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual((r.stdout + r.stderr).count(self.ADVISORY), 1)
+        self.assertIn("s > 1s", r.stdout)
+        # Fail-open: both commits still landed.
+        self.assertIn("phase-2: work", self._messages())
+        self.assertIn("final: done", self._messages())
+
+    def test_advisory_silent_on_single_over_budget_run(self) -> None:
+        self._write("scripts/phasekit-verify.sh", self.SLOW_VERIFY, executable=True)
+        scenario = (
+            "echo w >> src.txt\n"
+            "jq -n '{suggested_commit_message: \"final: done\"}'"
+            " > artifacts/project-complete.json\n"
+        )
+        r = self._run_loop(scenario, env={"PHASEKIT_VERIFY_BUDGET_SECONDS": "1"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn(self.ADVISORY, r.stdout + r.stderr)
+
+    def test_advisory_silent_under_budget(self) -> None:
+        self._write("scripts/phasekit-verify.sh", VERIFY_OK, executable=True)
+        r = self._run_loop(self.TWO_COMMIT_SCENARIO)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn(self.ADVISORY, r.stdout + r.stderr)
+
+    def test_malformed_budget_falls_back_to_default(self) -> None:
+        # A garbage env value must not abort the loop (set -e arithmetic) —
+        # it falls back to the 60s default and stays silent on fast verifies.
+        self._write("scripts/phasekit-verify.sh", VERIFY_OK, executable=True)
+        r = self._run_loop(self.TWO_COMMIT_SCENARIO,
+                           env={"PHASEKIT_VERIFY_BUDGET_SECONDS": "brisk"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn(self.ADVISORY, r.stdout + r.stderr)
+        self.assertIn("final: done", self._messages())
 
 
 if __name__ == "__main__":
