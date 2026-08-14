@@ -150,8 +150,10 @@ Three mechanisms in `scripts/run-until-done.sh` keep the family uncommitted:
   needs. `phase-blocked.json` and `phase-verify-failed.json` deliberately stay
   visible: a live blocker must show in `git status`.
 - **Never added**: after `git add -A`, the wrapper unstages any fresh add of a
-  family member (a staged *deletion* of a legacy tracked copy is left to ride
-  — that deletion is the heal).
+  family member; for a member a legacy history still tracks it re-stages the
+  untracking instead (v0.6.6) — `git add -A` cancels a heal deletion staged at
+  loop start whenever the file is still on disk, so the deletion is restored
+  at the last point before the commit rather than trusted to ride.
 - **Self-heal**: at loop start, any family member tracked by a pre-v0.6.5
   history is untracked (`git rm --cached`); when the index is otherwise clean
   the untracking is committed immediately as an index-only chore commit
@@ -320,6 +322,14 @@ per the gate-recovery principle):
   added/removed line counts in `artifacts/spec-change.json`. SPEC evolution
   is legitimate and expected (iterations extend acceptance criteria) — this
   makes it *visible*, not forbidden.
+
+These checks — plus the `docs/LEARNINGS.md` credential-shape scan (v0.4.7) —
+live in one shared `post_verify_commit_gates` helper that **every** commit
+surface runs after its verify gate (v0.6.6): the iteration commit path and
+the wrap-up commit path alike. Wrap-up once reimplemented the commit sequence
+without them, which let a credential-shaped LEARNINGS line land (and
+auto-push) via wrap-up when an identical iteration commit would have been
+refused. Any future commit path must call the same helper.
 
 `phase-blocked.json` supports two optional operator-courtesy fields (v0.4.7):
 `unblock_command` — the exact ready-to-run one-liner that resolves the

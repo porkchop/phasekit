@@ -166,12 +166,17 @@ unstage_transient_adds() {
   # swept in by add -A. The HIDDEN_TRANSIENTS are already invisible to add -A
   # via info/exclude; this covers the visible pair (and belt-and-braces the
   # rest, e.g. against a project .gitignore rule that re-includes artifacts/).
-  # A staged DELETION of a legacy tracked copy is deliberately left alone —
-  # that deletion IS the heal and must ride into the commit
+  # For a member a pre-v0.6.5 history still tracks, the just-run `git add -A`
+  # has CANCELLED any heal deletion staged at loop start (the on-disk copy
+  # re-enters the index byte-identical to HEAD), so re-stage the untracking
+  # here rather than trusting the deferred heal to survive (v0.6.6) — this is
+  # the last point before the commit where it can be restored
   # (see heal_tracked_transients).
   local sig
   for sig in "${TRANSIENT_SIGNALS[@]}"; do
-    if ! git cat-file -e "HEAD:artifacts/$sig" 2>/dev/null; then
+    if git cat-file -e "HEAD:artifacts/$sig" 2>/dev/null; then
+      git rm --cached -q --ignore-unmatch -- "$ARTIFACTS_DIR/$sig" 2>/dev/null || true
+    else
       git reset -q -- "$ARTIFACTS_DIR/$sig" 2>/dev/null || true
     fi
   done
@@ -192,7 +197,9 @@ heal_tracked_transients() {
   # heal exactly when the tree is broken for unrelated reasons (gate-recovery
   # principle). It is only created when the index is clean apart from this
   # family; otherwise the staged untracking rides with the session's next
-  # commit. Best-effort throughout: never blocks the loop.
+  # commit — whose own `git add -A` would cancel it if the file is still on
+  # disk, so unstage_transient_adds re-stages it there (v0.6.6).
+  # Best-effort throughout: never blocks the loop.
   local sig tracked=()
   git cat-file -e HEAD 2>/dev/null || return 0
   for sig in "${TRANSIENT_SIGNALS[@]}"; do
@@ -406,6 +413,86 @@ auto_push_if_enabled() {
   fi
 }
 
+staged_touches_security_pair() {
+  # Single source of truth for the scope-containment hard-refuse pair
+  # (v0.4.8): committed .claude/settings.json and .github/workflows/ are
+  # security-critical and never committed by the loop, on any commit path.
+  git diff --cached --name-only | grep -qE '^\.claude/settings\.json$|^\.github/workflows/'
+}
+
+post_verify_commit_gates() {
+  # Post-verify gates shared by EVERY commit surface (v0.6.6). wrapup_commit
+  # once reimplemented the commit sequence and silently dropped these — a
+  # credential-shaped line in docs/LEARNINGS.md could land (and auto-push)
+  # via wrap-up when an identical iteration commit would have been refused.
+  # Any future commit path must call this after its verify gate.
+  #   $1 = context: "iteration" (light-mode scaffold edits escalate, rc 4)
+  #        or "wrapup" (the session is ending — record the warning, proceed).
+  # Returns 0 to commit, 1 to refuse the commit, 4 to escalate a light task.
+  local context="${1:-iteration}"
+  local staged
+  staged="$(git diff --cached --name-only)"
+
+  # Scope containment warn-path (v0.4.8, ADOPTIONS item 4 warn-first):
+  # scaffold-class edits warn via artifact (surfaced by the orchestrator) and
+  # proceed — per the gate-recovery principle, build-loop gates must not
+  # create stuck states.
+  if [[ -f "$ROOT_DIR/.scaffold/manifest.json" ]]; then
+    STAGED_FILES="$staged" python3 - "$ROOT_DIR/.scaffold/manifest.json" > "$ARTIFACTS_DIR/.scope-check.tmp" 2>/dev/null <<'PY' || true
+import json, os, sys
+manifest = json.load(open(sys.argv[1]))
+scaffold = {f["path"] for f in manifest.get("files", [])
+            if f.get("ownership") == "scaffold"}
+hits = sorted(set(os.environ.get("STAGED_FILES", "").split()) & scaffold)
+if hits:
+    from datetime import datetime, timezone
+    print(json.dumps({"scope_warning": True, "files": hits,
+                      "ts": datetime.now(timezone.utc).isoformat()}))
+PY
+    if [[ -s "$ARTIFACTS_DIR/.scope-check.tmp" ]]; then
+      mv "$ARTIFACTS_DIR/.scope-check.tmp" "$ARTIFACTS_DIR/scope-warning.json"
+      if [[ "$context" == "iteration" && "$ITERATION_MODE" == "light" ]]; then
+        # Light tasks are triaged as low-blast-radius; a scaffold-class edit is
+        # out-of-scope by definition and escalates instead of warning-and-
+        # continuing (DESIGN-light-pipeline.md guardrails). No commit is made;
+        # the caller turns rc=4 into a light-escalation exit. (At wrap-up the
+        # session is ending anyway — record the warning and let the commit
+        # stand rather than strand the work.)
+        echo "run-until-done: light mode — staged changes touch scaffold-class files; escalating to a standard iteration instead of committing." >&2
+        return 4
+      fi
+      echo "run-until-done: WARNING — this commit edits scaffold-class files (recorded in artifacts/scope-warning.json; drift-check will also flag them). Proceeding." >&2
+    else
+      rm -f "$ARTIFACTS_DIR/.scope-check.tmp"
+    fi
+  fi
+
+  # SPEC change attestation (v0.4.8, ADOPTIONS item 2 simplified): make SPEC
+  # edits visible, never gated — record the staged numstat for the
+  # orchestrator to surface (brief line; advisory only above its threshold).
+  if echo "$staged" | grep -q '^docs/SPEC\.md$'; then
+    read -r spec_added spec_removed _ < <(git diff --cached --numstat -- docs/SPEC.md)
+    printf '{"spec_changed": true, "added_lines": %s, "removed_lines": %s, "ts": "%s"}\n' \
+      "${spec_added:-0}" "${spec_removed:-0}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      > "$ARTIFACTS_DIR/spec-change.json"
+    echo "run-until-done: note — docs/SPEC.md changed in this commit (+${spec_added:-0}/-${spec_removed:-0}); recorded in artifacts/spec-change.json" >&2
+  fi
+
+  # Learnings secret scan (v0.4.7): docs/LEARNINGS.md is agent-appended free
+  # text that ships in commits — refuse the commit if it matches obvious
+  # credential shapes. Narrow patterns on purpose: false positives here block
+  # real work (gate-recovery principle); the promote/mirror gates carry the
+  # broad lint.
+  if [[ -f "$ROOT_DIR/docs/LEARNINGS.md" ]] && echo "$staged" | grep -q '^docs/LEARNINGS\.md$'; then
+    if grep -nE 'sk-ant-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----' \
+        "$ROOT_DIR/docs/LEARNINGS.md" >&2; then
+      echo "run-until-done: REFUSED — docs/LEARNINGS.md matches a credential pattern (lines above). Remove the secret and retry." >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+
 commit_from_artifact() {
   local file="$1"
   local fallback_msg="$2"
@@ -457,12 +544,9 @@ commit_from_artifact() {
   fi
 
   # Scope containment (v0.4.8, ADOPTIONS item 4 warn-first). Hard-refuse only
-  # the security pair where a bad commit IS the damage; scaffold-class edits
-  # warn via artifact (surfaced by the orchestrator) and proceed — per the
-  # gate-recovery principle, build-loop gates must not create stuck states.
-  local staged
-  staged="$(git diff --cached --name-only)"
-  if echo "$staged" | grep -qE '^\.claude/settings\.json$|^\.github/workflows/'; then
+  # the security pair where a bad commit IS the damage; the remaining
+  # post-verify gates are shared with the wrap-up path (v0.6.6).
+  if staged_touches_security_pair; then
     # Explain the refusal where the NEXT session will find it, so staged-but-
     # uncommitted work is never a mystery state.
     printf '{"scope_refused": true, "reason": "staged changes touch committed .claude/settings.json or .github/workflows/ — security-critical, never committed by the loop (docs/QUALITY_GATES.md scope containment)", "action": "git restore --staged <those files> (and revert them) then re-write your signal artifact; the wrapper will retry the commit", "ts": "%s"}\n' \
@@ -471,57 +555,8 @@ commit_from_artifact() {
     return 1
   fi
   rm -f "$ARTIFACTS_DIR/scope-refusal.json"
-  if [[ -f "$ROOT_DIR/.scaffold/manifest.json" ]]; then
-    STAGED_FILES="$staged" python3 - "$ROOT_DIR/.scaffold/manifest.json" > "$ARTIFACTS_DIR/.scope-check.tmp" 2>/dev/null <<'PY' || true
-import json, os, sys
-manifest = json.load(open(sys.argv[1]))
-scaffold = {f["path"] for f in manifest.get("files", [])
-            if f.get("ownership") == "scaffold"}
-hits = sorted(set(os.environ.get("STAGED_FILES", "").split()) & scaffold)
-if hits:
-    from datetime import datetime, timezone
-    print(json.dumps({"scope_warning": True, "files": hits,
-                      "ts": datetime.now(timezone.utc).isoformat()}))
-PY
-    if [[ -s "$ARTIFACTS_DIR/.scope-check.tmp" ]]; then
-      mv "$ARTIFACTS_DIR/.scope-check.tmp" "$ARTIFACTS_DIR/scope-warning.json"
-      if [[ "$ITERATION_MODE" == "light" ]]; then
-        # Light tasks are triaged as low-blast-radius; a scaffold-class edit is
-        # out-of-scope by definition and escalates instead of warning-and-
-        # continuing (DESIGN-light-pipeline.md guardrails). No commit is made;
-        # the caller turns rc=4 into a light-escalation exit.
-        echo "run-until-done: light mode — staged changes touch scaffold-class files; escalating to a standard iteration instead of committing." >&2
-        return 4
-      fi
-      echo "run-until-done: WARNING — this commit edits scaffold-class files (recorded in artifacts/scope-warning.json; drift-check will also flag them). Proceeding." >&2
-    else
-      rm -f "$ARTIFACTS_DIR/.scope-check.tmp"
-    fi
-  fi
 
-  # SPEC change attestation (v0.4.8, ADOPTIONS item 2 simplified): make SPEC
-  # edits visible, never gated — record the staged numstat for the
-  # orchestrator to surface (brief line; advisory only above its threshold).
-  if echo "$staged" | grep -q '^docs/SPEC\.md$'; then
-    read -r spec_added spec_removed _ < <(git diff --cached --numstat -- docs/SPEC.md)
-    printf '{"spec_changed": true, "added_lines": %s, "removed_lines": %s, "ts": "%s"}\n' \
-      "${spec_added:-0}" "${spec_removed:-0}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      > "$ARTIFACTS_DIR/spec-change.json"
-    echo "run-until-done: note — docs/SPEC.md changed in this commit (+${spec_added:-0}/-${spec_removed:-0}); recorded in artifacts/spec-change.json" >&2
-  fi
-
-  # Learnings secret scan (v0.4.7): docs/LEARNINGS.md is agent-appended free
-  # text that ships in commits — refuse the commit if it matches obvious
-  # credential shapes. Narrow patterns on purpose: false positives here block
-  # real work (gate-recovery principle); the promote/mirror gates carry the
-  # broad lint.
-  if [[ -f "$ROOT_DIR/docs/LEARNINGS.md" ]] && git diff --cached --name-only | grep -q '^docs/LEARNINGS.md$'; then
-    if grep -nE 'sk-ant-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----' \
-        "$ROOT_DIR/docs/LEARNINGS.md" >&2; then
-      echo "run-until-done: REFUSED — docs/LEARNINGS.md matches a credential pattern (lines above). Remove the secret and retry." >&2
-      return 1
-    fi
-  fi
+  post_verify_commit_gates iteration || return $?
 
   git commit -m "$msg"
   auto_push_if_enabled
@@ -580,10 +615,11 @@ wrapup_commit() {
   # whatever stands — verify-gated — so a session's end no longer depends on
   # the hard kill that loses in-flight context (every 2026-08-10 session ended
   # exit_reason: timeout). Never creates a commit the normal gates would
-  # refuse: verify must pass and the security-critical pair stays
-  # uncommittable. On refusal the work is left in the tree — with a handoff
-  # baton — for the next session (and the scheduler's complete-but-dirty
-  # backstop) to reconcile.
+  # refuse: verify must pass and the same post-verify gates as an iteration
+  # commit apply (v0.6.6 — security pair, scope warning, SPEC attestation,
+  # LEARNINGS secret scan). On refusal the work is left in the tree — with a
+  # handoff baton — for the next session (and the scheduler's
+  # complete-but-dirty backstop) to reconcile.
   git add -A
   git reset -q -- "$ARTIFACTS_DIR/logs" 2>/dev/null || true
   git reset -q -- "$WRAPUP_SENTINEL" 2>/dev/null || true
@@ -594,7 +630,7 @@ wrapup_commit() {
     echo "Wrap-up: tree already clean — nothing substantive to commit."
     return 0
   fi
-  if git diff --cached --name-only | grep -qE '^\.claude/settings\.json$|^\.github/workflows/'; then
+  if staged_touches_security_pair; then
     write_session_handoff false "unstage and revert the staged .claude/settings.json / .github/workflows/ changes — the loop never commits them — then redo the phase work without touching them"
     echo "Wrap-up: staged changes touch committed .claude/settings.json or .github/workflows/ — leaving work uncommitted (security-critical, never committed by the loop). Handoff note written." >&2
     return 0
@@ -602,6 +638,11 @@ wrapup_commit() {
   if ! run_verify_gate; then
     write_session_handoff false "fix the verify failure recorded in artifacts/phase-verify-failed.json, then re-commit the standing work"
     echo "Wrap-up: verify failed — leaving work uncommitted (phase-verify-failed.json + session-handoff.json record the state for the next session)." >&2
+    return 0
+  fi
+  if ! post_verify_commit_gates wrapup; then
+    write_session_handoff false "the post-verify commit gates refused the staged work (see the REFUSED line in the session log — e.g. remove a credential-shaped line from docs/LEARNINGS.md), then re-commit the standing work"
+    echo "Wrap-up: post-verify gates refused the staged work — leaving it uncommitted (session-handoff.json records the state)." >&2
     return 0
   fi
   write_session_handoff true "standing work was committed at wrap-up; re-orient and continue from the next unapproved phase"
