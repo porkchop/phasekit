@@ -356,9 +356,23 @@ class LoopWiringTest(unittest.TestCase):
         # Exactly one writer of the failure artifact's `verify_failed` field.
         self.assertEqual(self.text.count("verify_failed: true"), 1)
 
-    def test_a_declaration_with_no_checker_warns_rather_than_passing_quietly(self):
+    def test_a_declaration_with_no_checker_refuses_and_names_the_repair(self):
+        """v0.7.1. This warned and returned 0 in v0.7.0 — the one fail-open
+        path in the feature, and one that contradicted the function's own
+        stated property that a repo must not be able to disable the check
+        policing it. The prior pin asserted only that a WARN string existed
+        and never looked at the return value, so it passed either way.
+
+        Assert the disposition, not the wording."""
         body = self._fn("run_contracts_gate")
-        self.assertIn("WARN: contracts.yaml is present but", body)
+        missing = body.split('if [[ ! -f "$checker" ]]; then', 1)[1].split("\n  fi", 1)[0]
+        self.assertIn("return 1", missing)
+        self.assertNotIn("return 0", missing)
+        # Recoverable in one named command — that is what makes refusing safe.
+        self.assertIn("phasekit upgrade", missing)
+        # And it flows through the shared failure capture like every other
+        # refusal, so the breaker and the next iteration's recovery apply.
+        self.assertIn("record_verify_failure", missing)
 
     def test_the_skip_hatch_is_separate_from_verify_skip_and_loud(self):
         body = self._fn("run_contracts_gate")
@@ -465,6 +479,41 @@ class LoopFunctionalContractsTest(LoopHarness):
         self._run_loop(None, env={"MAX_ITERATIONS": "1", "VERIFY_SKIP": "1"})
         self.assertEqual(before, self._messages())
         self.assertEqual(self._failure_artifact()["label"], "contracts")
+
+    def test_a_declaring_repo_with_no_checker_cannot_commit(self):
+        """v0.7.1, the finding this patch repairs, proven end-to-end.
+
+        The realistic trigger is the upgrade seam, not malice: a project can
+        acquire contracts.yaml from a build while its vendored scripts/ is
+        still pre-v0.7.0. In v0.7.0 that combination warned and committed —
+        the gate silently off in exactly the window where drift is most
+        likely. It must refuse."""
+        self._declare()
+        os.remove(os.path.join(self.repo, "scripts", "phasekit-contracts.py"))
+        self._prepare_scenario(APPROVE)
+        before = self._messages()
+        r = self._run_loop(None, env={"MAX_ITERATIONS": "1"})
+        self.assertEqual(before, self._messages(), "a declaring repo committed unverified")
+        self.assertIn("REFUSING", r.stdout + r.stderr)
+        artifact = self._failure_artifact()
+        self.assertEqual(artifact["label"], "contracts")
+        self.assertIn("phasekit upgrade", artifact["log_tail"])
+
+    def test_a_repo_with_no_checker_and_no_declaration_is_still_unaffected(self):
+        """The refusal must key off the DECLARATION, not the missing file —
+        otherwise every pre-v0.7.0 project on earth stops committing."""
+        os.remove(os.path.join(self.repo, "scripts", "phasekit-contracts.py"))
+        r = self._run_loop(APPROVE, env={"MAX_ITERATIONS": "1"})
+        self.assertIn("phase-1: work", self._messages(), r.stdout + r.stderr)
+        self.assertIsNone(self._failure_artifact())
+
+    def test_the_operator_hatch_still_wins_over_the_missing_checker(self):
+        """Refusing is safe because it stays escapable; pin that it is."""
+        self._declare()
+        os.remove(os.path.join(self.repo, "scripts", "phasekit-contracts.py"))
+        r = self._run_loop(APPROVE, env={
+            "MAX_ITERATIONS": "1", "PHASEKIT_CONTRACTS_SKIP": "1"})
+        self.assertIn("phase-1: work", self._messages(), r.stdout + r.stderr)
 
     def test_the_dedicated_hatch_does_switch_it_off(self):
         self._declare()

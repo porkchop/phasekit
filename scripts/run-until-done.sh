@@ -320,8 +320,9 @@ record_verify_failure() {
 
 run_contracts_gate() {
   # Cross-project contracts (v0.7.0). Refuses the commit when this repo's OWN
-  # contracts.yaml declares a dependency whose contract is unobtainable, or
-  # whose vendored copy has drifted from the provider's authoritative one.
+  # contracts.yaml declares a dependency whose contract is unobtainable, whose
+  # vendored copy has drifted from the provider's authoritative one, or which
+  # nothing present can verify at all (v0.7.1).
   #
   # Three deliberate properties:
   #
@@ -347,11 +348,38 @@ run_contracts_gate() {
   fi
 
   if [[ ! -f "$checker" ]]; then
-    # contracts.yaml present but the checker absent means a stale vendored
-    # scripts/ directory. Say so instead of silently passing: a declaration
-    # nobody checks is the failure this whole release exists to prevent.
-    echo "WARN: contracts.yaml is present but scripts/phasekit-contracts.py is missing — run 'phasekit upgrade'. Contract drift is NOT being checked." >&2
-    return 0
+    # contracts.yaml present but the checker absent = a stale vendored
+    # scripts/ directory. REFUSE (v0.7.1). This warned and passed in v0.7.0,
+    # which was the single fail-open path in the whole feature and contradicted
+    # property 3 above: a declaring repo could disable its own gate by deleting
+    # one file.
+    #
+    # The realistic trigger is not malice, it is the upgrade seam. The fleet
+    # upgrades project by project, so a project can acquire contracts.yaml from
+    # a build while its vendored scripts/ is still pre-v0.7.0 — leaving the gate
+    # silently off in exactly the window where drift is most likely.
+    #
+    # Recoverable in one command, which is why refusing is safe here: the
+    # message names `phasekit upgrade`, and PHASEKIT_CONTRACTS_SKIP=1 remains
+    # the operator hatch (checked above, so it still wins).
+    local log
+    log="$(mktemp)"
+    {
+      echo "phasekit-contracts: REFUSING — contracts.yaml declares contract dependencies"
+      echo "  but scripts/phasekit-contracts.py is missing, so nothing can verify them."
+      echo "  This repo's phasekit scaffold predates v0.7.0."
+      echo "  Fix with:  phasekit upgrade"
+      echo "  (Or remove contracts.yaml if this repo no longer depends on another"
+      echo "  project's interface. Committing with a declaration nobody checks is the"
+      echo "  exact failure this feature exists to prevent.)"
+    } >"$log"
+    cat "$log" >&2
+    # Exit code 5 is emitted by the LOOP, not by phasekit-contracts.py (whose
+    # table stops at 4). Kept distinct from 2 (malformed declaration) because
+    # the repair is different: 2 means fix your file, 5 means upgrade phasekit.
+    record_verify_failure "phasekit upgrade" "contracts" 5 "$log"
+    rm -f "$log"
+    return 1
   fi
 
   echo "Pre-commit verify: cross-project contracts (contracts.yaml)"

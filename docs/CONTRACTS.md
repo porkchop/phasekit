@@ -150,6 +150,7 @@ python3 scripts/phasekit-contracts.py check
 | 2 | the declaration or the provider manifest is malformed | fix the file named in the message |
 | 3 | **unobtainable** — no provider, or it does not offer the slug | fix the provider or the registry; refreshing cannot help |
 | 4 | **drift** — the vendored copy is missing or differs | run the refresh command the message names |
+| 5 | **unverifiable** — a declaration exists but `scripts/phasekit-contracts.py` does not (emitted by the loop, not by the checker) | `phasekit upgrade` |
 
 Comparison is byte-exact: sha256 over every file in the tree, recursively.
 mtimes, ownership and directory order are ignored, because a bind mount and a
@@ -166,6 +167,13 @@ inauthentic copy could hide in.
   edited away by the repo it polices.
 * **`scripts/phasekit-verify.sh`** (seeded by every stack profile) runs it too,
   so a human or a CI job running the gate directly gets the same answer.
+
+**Every path fails closed** (v0.7.1). In particular, a repo that has a
+`contracts.yaml` but whose vendored `scripts/` predates v0.7.0 — the realistic
+shape during a project-by-project fleet upgrade — is refused rather than waved
+through, because a declaration nobody checks is the failure this feature exists
+to prevent. The message names `phasekit upgrade`, so it is one command to
+recover.
 
 `VERIFY_SKIP=1` does **not** switch the contracts gate off. VERIFY_SKIP is the
 routine per-iteration hatch for red TDD commits and docs-only phases; letting it

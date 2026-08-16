@@ -1,49 +1,36 @@
 {
-  "phase": "v0.7.0-phase-4-awareness-packaging-release",
+  "phase": "v0.7.1-fail-closed-repair",
   "approved": true,
-  "summary": "Cross-project contracts, phase 4: the feature becomes visible and shippable. The loop composes a contracts block into the session prompt when (and only when) this repo declares dependencies — naming each one, stating the vendored contract is authoritative, forbidding guessing, forbidding edits to the vendored copy, and naming the refresh command. Every stack-profile verify template seeds the consumer check, positioned immediately after the `cd` so it runs ahead of any stack-specific fail-open. docs/CONTRACTS.md is the full reference, registered scaffold-class and in the default profile; QUALITY_GATES, CONTAINERIZATION, EXECUTION_MODES, META_SPEC and README cross-reference it.",
-  "decision_memo": "foundry-meta/KICKOFF-phasekit-v070-contracts.md phase 4; awareness rationale per DESIGN-cross-project-contracts.md ownership split ('a mount nobody is told about goes unread')",
-  "suggested_commit_message": "v0.7.0 phase 4: session awareness, stack seeding, docs",
+  "summary": "Repairs the single fail-open path in v0.7.0. run_contracts_gate warned and returned 0 when contracts.yaml existed but scripts/phasekit-contracts.py did not, so a declaring repo committed with no contract verification at all. It now refuses, routes the failure through the shared record_verify_failure() capture (exit code 5, emitted by the loop rather than by the checker), and names `phasekit upgrade` as the repair so it stays recoverable in one command. PHASEKIT_CONTRACTS_SKIP=1 is checked first and still wins.",
+  "decision_memo": "foundry-meta/KICKOFF-phasekit-v070-contracts.md, 'Post-release addendum 2026-08-16 — v0.7.1, one review finding'",
+  "suggested_commit_message": "v0.7.1: refuse when a declaring repo has no checker",
   "reviewer_notes": [
-    "Prompt composition runs AFTER light-mode composition, so both apply: a light task is exactly as capable of guessing a field name as a standard one. Pinned by test.",
-    "Prompt composition fails open — a malformed contracts.yaml adds nothing to the prompt rather than killing the session before it starts. The gate is where a bad declaration must be loud, and failing open here keeps the session reaching that gate, where the error is reported properly.",
-    "A repo declaring nothing (or declaring zero entries) gets the v0.6.6 prompt byte for byte, asserted by equality rather than by absence of a substring.",
-    "The seeded check moved from the tail of each template to immediately after the `cd`. Caught in end-to-end smoke: the python-uv template fail-opens when there is no pyproject.toml yet, so a tail-positioned check never ran on a young repo. A contract violation is not something to skip because the stack's own preconditions are not met. A test now pins that nothing exits between the `cd` and the check, in all five templates.",
-    "Five near-identical seeded blocks are the one real duplication this release adds. Consolidating them is not available — they are templates seeded once into project-owned files that then diverge by design — so the invariant is enforced by a test asserting all five blocks are byte-identical, the same pin-not-abstraction approach used for the '/contracts' path across the bash/python boundary.",
-    "docs/CONTRACTS.md states the CI boundary explicitly (a fork's green CI badge proves conformance but not freshness) so it is read rather than discovered. Doc assertions run against whitespace-collapsed prose, so they pin what the doc says rather than where its lines wrap.",
-    "docs/META_SPEC.md's standalone goal already anticipated this design in the abstract ('the thing that decides whether it is required must live in the project repo'); it now points at v0.7.0 as the worked example."
+    "Two reasons this was the wrong disposition, both from the addendum and both confirmed in the code: it contradicted the property stated three comment-lines above it (a repo that can edit away the check policing it is not policed), and the realistic trigger is the upgrade seam rather than malice — a project can acquire contracts.yaml from a build while its vendored scripts/ is still pre-v0.7.0, leaving the gate silently off in exactly the window where drift is most likely.",
+    "Exit code 5 is deliberately distinct from 2 (malformed declaration). Same reasoning that split 3 from 4 in v0.7.0: the two conditions have different repairs — 2 means fix your file, 5 means upgrade phasekit — and collapsing them sends people to the wrong place. Documented in docs/CONTRACTS.md as loop-emitted, since phasekit-contracts.py's own table stops at 4.",
+    "The old pin (test_a_declaration_with_no_checker_warns_rather_than_passing_quietly) asserted only that a WARN substring existed and never inspected the return value, so it passed either way — the addendum called this out and it is exactly why the defect survived review. Replaced with test_a_declaration_with_no_checker_refuses_and_names_the_repair, which asserts the DISPOSITION (return 1, no return 0 on that branch, names the repair, flows through the shared capture) rather than the wording.",
+    "A structural pin alone is what let this slip, so the repair also ships a functional pin: test_a_declaring_repo_with_no_checker_cannot_commit drives the real loop with the checker deleted and asserts no commit lands. Both new pins were verified to FAIL against the v0.7.0 script and pass against the fix (script reverted in isolation via git stash, tests kept) — they are not vacuous.",
+    "Two guardrails on the new refusal, both pinned: it keys off the DECLARATION and not the missing file, so every pre-v0.7.0 project without a contracts.yaml is unaffected (otherwise this patch would stop the entire fleet committing); and the operator hatch still wins, which is what makes refusing safe rather than wedging."
   ],
   "deferred_items": [
     {
-      "tag": "release",
-      "description": "Tag v0.7.0 and push. Minor bump per docs/RELEASING.md: additive (new files, new flags, new refusal path). Nothing downstream sees the change until the tag is pushed."
-    },
-    {
-      "tag": "orchestrator leg (queue #129)",
-      "description": "Registry `contracts:` field as slugs, the referenced-but-never-dispatched concept, mount composition in run-session.sh, always pass the mount plus index.json, cheap dispatch-time resolvability refusal."
-    },
-    {
-      "tag": "foundry-dashboard pilot",
-      "description": "Declare the dependency on foundry-orchestrator, vendor its openapi.json, wire conformance, and prove the gate catches a deliberate drift."
-    },
-    {
-      "tag": "out of scope, per the kickoff",
-      "description": "Auto-refresh at dispatch (would dirty the tree); the `meta:` mount for build sessions (DECLINED by design, do not 'finish' it); interface manifests for the phasekit<->orchestrator env/CLI/exit-code contracts (sequenced after this lands)."
+      "tag": "fleet upgrade",
+      "description": "Upgrade resting projects to v0.7.1 (self-update, then per-project upgrade + check). Partial is harmless: the mechanism is inert until a repo writes contracts.yaml, and none has one."
     }
   ],
   "verification": {
     "self_check_passes_on_master": true,
     "tracked_files_classified": 116,
-    "test_count": 253,
-    "new_tests": 21,
+    "test_count": 256,
+    "new_tests": 3,
     "test_status": "all green",
     "commands_run": [
-      "python3 -m unittest tests.test_contracts_awareness_v070  -> 21 tests OK",
-      "python3 -m unittest discover -s tests -p 'test_*.py'  -> 253 tests OK",
+      "python3 -m unittest tests.test_contracts_gate_v070  -> 40 tests OK",
+      "python3 -m unittest discover -s tests -p 'test_*.py'  -> 256 tests OK",
+      "git stash push -- scripts/run-until-done.sh && python3 -m unittest tests.test_contracts_gate_v070  -> 2 FAILURES (the new pins), confirming they are not vacuous",
       "python3 scripts/enrich-project.py --self-check  -> 116 tracked files, 0 unclassified, 0 double-classified",
-      "bash -n on run-until-done.sh, container-setup.sh and all five verify templates  -> clean",
-      "end-to-end smoke: fresh `enrich --profile python-uv` installs the checker and the doc, the gate is inert with no contracts.yaml, then declaring a dependency makes the seeded verify gate refuse with the refresh command, and refresh turns it green"
+      "bash -n scripts/run-until-done.sh  -> clean",
+      "smoke: a declaring repo with no checker refuses, does not commit, and writes phase-verify-failed.json with exit_code 5 / label contracts / command 'phasekit upgrade'"
     ],
-    "acceptance_criteria_met": "session prompt names mounted contracts as authoritative and forbids guessing; every stack profile seeds the consumer check; docs written and cross-referenced; every new tracked file registered. Remaining: tag and push v0.7.0."
+    "acceptance_criteria_met": "the one fail-open path in v0.7.0 now fails closed, recoverably; the weak pin that let it through is replaced by one that asserts the disposition, backed by an end-to-end pin"
   }
 }
