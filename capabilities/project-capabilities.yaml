@@ -49,6 +49,7 @@ profiles:
       - REASONING_PROFILES
       - ADR_TEMPLATE
       - CONTAINERIZATION
+      - CONTRACTS
       - INSTALL_LIFECYCLE
       - LEARNINGS
     include_hooks:
@@ -272,6 +273,14 @@ docs:
     path: docs/CONTAINERIZATION.md
     required: false
     ownership: scaffold
+
+  CONTRACTS:
+    path: docs/CONTRACTS.md
+    required: false
+    ownership: scaffold
+    # v0.7.0 cross-project contracts. Ships to every project (the mechanism is
+    # inert until a repo writes contracts.yaml) so the rules are readable at
+    # the moment someone declares a dependency, not one release later.
 
   INSTALL_LIFECYCLE:
     path: docs/INSTALL_LIFECYCLE.md

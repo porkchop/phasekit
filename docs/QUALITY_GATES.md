@@ -202,6 +202,32 @@ Escape hatches:
 - `VERIFY_SKIP=1` bypasses the gate for one iteration (use sparingly — docs-only phases or TDD phases that intentionally commit a red test)
 - `PHASEKIT_VERIFY_CMD="..."` overrides the script with a one-shot command
 
+### Cross-project contracts gate (v0.7.0)
+
+Before the project's verify command, the wrapper runs the contracts gate. It is
+**inert unless the repo has a `contracts.yaml`** declaring dependencies on other
+projects' interfaces; a repo that declares nothing never sees it mentioned.
+
+When a repo does declare, the gate refuses the commit if a declared contract is
+unreadable, or if the vendored copy has drifted byte-for-byte from the
+provider's authoritative one. The failure flows through the same
+`phase-verify-failed.json` / `VERIFY_MAX_ATTEMPTS` machinery as any other verify
+failure, and the drift message names the one command that fixes it.
+
+Two deliberate properties, both load-bearing:
+
+- It runs **before** the `VERIFY_SKIP` bypass. VERIFY_SKIP is set routinely for
+  red TDD commits; letting it also disable contract authenticity would turn the
+  gate off exactly when a red gate is applying the pressure to cheat. The
+  separate hatch is `PHASEKIT_CONTRACTS_SKIP=1`, and it announces itself.
+- It lives in **scaffold-owned** code (`scripts/phasekit-contracts.py`, invoked
+  by `run-until-done.sh`), not only in the project-owned
+  `scripts/phasekit-verify.sh`. A check the policed repo can edit away is not a
+  check — the same reason the secret-lint allowlist lives on the operator side
+  of the deploy boundary.
+
+Full mechanism, file formats and the standalone story: `docs/CONTRACTS.md`.
+
 Configuration is project-owned: edit `scripts/phasekit-verify.sh` (rendered into the project at enrich time) to declare the right fast checks for the stack. Until configured, the gate fail-opens with a warning so un-instrumented projects continue to work.
 
 ### Verify budget (v0.6.4)

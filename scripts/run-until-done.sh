@@ -767,6 +767,56 @@ LIGHT_EOF
   cat "$base_prompt"
 }
 
+compose_contracts_prompt() {
+  # Session awareness for cross-project contracts (v0.7.0). A mount nobody is
+  # told about goes unread — that is half of why META_REPO_PATH dangled for
+  # months — so when this repo declares dependencies the session is told, in
+  # its prompt, that the mounted contract is authoritative and guessing is
+  # forbidden. Composed at runtime into a temp file, exactly like light mode:
+  # no new file ships downstream and the semantics live next to the gate that
+  # enforces them.
+  local base_prompt="$1"
+  local decl="$ROOT_DIR/contracts.yaml"
+  local checker="$ROOT_DIR/scripts/phasekit-contracts.py"
+  local listing=""
+  if [[ -f "$decl" && -f "$checker" ]]; then
+    listing="$(python3 "$checker" --repo "$ROOT_DIR" status 2>/dev/null || true)"
+  fi
+  # Only speak when there is something to say: a repo that declares nothing
+  # (or declares zero entries) gets the v0.6.6 prompt, byte for byte.
+  if [[ -z "$listing" ]] || ! grep -q "dependency(ies) declared" <<<"$listing"; then
+    cat "$base_prompt"
+    return 0
+  fi
+
+  cat <<CONTRACTS_EOF
+=== CROSS-PROJECT CONTRACTS (this repo declares dependencies) ===
+This repo's contracts.yaml declares dependencies on other projects'
+interfaces. Their authoritative contracts are vendored in this repo and
+mirrored read-only under \${PHASEKIT_CONTRACTS_DIR:-/contracts}:
+
+${listing}
+
+Rules for this session, which OVERRIDE any inference you would otherwise make:
+- The vendored contract is AUTHORITATIVE. Read it before writing any code that
+  crosses that boundary — field names, types, status codes, exit codes,
+  env var names, artifact shapes.
+- GUESSING IS FORBIDDEN. Do not infer a field name from a variable name, a
+  fixture, a task description, or an older version of the interface. Three
+  shipped defects in one week came from exactly that.
+- Do NOT edit a vendored contract to make your code or tests pass. It is a
+  cache of someone else's file; the pre-commit gate compares it byte-for-byte
+  against the mounted original and will refuse the commit.
+- If the contract genuinely changed, run:
+    python3 scripts/phasekit-contracts.py refresh
+  then reconcile this repo's code and tests with the refreshed contract and
+  commit both together.
+=== END CONTRACTS ===
+
+CONTRACTS_EOF
+  cat "$base_prompt"
+}
+
 write_light_escalation() {
   # Escalation record (v0.6.0, decided fork C). Light mode never grinds: on
   # 2 verify failures, any blocked artifact, an out-of-scope edit, or the
@@ -906,6 +956,19 @@ else
   MAX_ITERATIONS="${MAX_ITERATIONS:-50}"
   VERIFY_MAX_ATTEMPTS="${VERIFY_MAX_ATTEMPTS:-3}"
 fi
+
+# Contracts awareness (v0.7.0) is composed AFTER light mode so it applies to
+# both execution modes — a light task is exactly as capable of guessing a
+# field name as a standard one. No-op unless this repo declares dependencies.
+CONTRACTS_PROMPT_FILE="$(mktemp)"
+compose_contracts_prompt "$PROMPT_FILE" > "$CONTRACTS_PROMPT_FILE"
+if ! cmp -s "$CONTRACTS_PROMPT_FILE" "$PROMPT_FILE"; then
+  PROMPT_FILE="$CONTRACTS_PROMPT_FILE"
+  echo "Cross-project contracts: this repo declares dependencies — the session prompt names them as authoritative."
+else
+  rm -f "$CONTRACTS_PROMPT_FILE"
+fi
+
 light_review_done=0
 
 # Phase-commit atomicity marker: touched immediately before each claude

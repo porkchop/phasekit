@@ -32,6 +32,10 @@ These assets include:
   When a feature needs data from outside the repo, the thing that decides
   whether it is *required* must live **in the project repo**, so it travels
   with the project and a standalone user can satisfy it by hand.
+  Worked example (v0.7.0): cross-project contracts refuse a build only when
+  the repo's own `contracts.yaml` declares a dependency — never because a
+  mount is absent, which would yell at every standalone user on every run.
+  See `docs/CONTRACTS.md`.
 - Improve itself safely through audited, phase-gated changes
 - Support both greenfield setup and adoption of existing repos
 - Generate capability assets from a clear source of truth

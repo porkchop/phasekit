@@ -31,6 +31,23 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# --- Cross-project contracts (phasekit v0.7.0) -----------------------------
+# No-op unless this repo has a contracts.yaml declaring dependencies on other
+# projects' interfaces. When it does, this refuses if a declared contract is
+# unreadable or its vendored copy has drifted from the provider's. The
+# autonomous loop runs the same check itself and that call is the
+# authoritative one -- this file is project-owned, so a check living only here
+# could be edited away by the repo it polices. The call is repeated here so a
+# human or a CI job running the gate directly sees the same answer.
+#
+# Runs FIRST, before any stack check that may fail open on a young repo: a
+# contract violation is not something to skip because pyproject.toml is absent.
+# See docs/CONTRACTS.md.
+if [[ -f contracts.yaml && -f scripts/phasekit-contracts.py ]]; then
+  python3 scripts/phasekit-contracts.py check
+fi
+
+
 # Sentinel consumed by phasekit tooling: this profile seeds a real gate.
 PHASEKIT_VERIFY_CONFIGURED=1
 

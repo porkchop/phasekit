@@ -1,38 +1,49 @@
 {
-  "phase": "v0.7.0-phase-3-the-gate",
+  "phase": "v0.7.0-phase-4-awareness-packaging-release",
   "approved": true,
-  "summary": "Cross-project contracts, phase 3: the gate bites. `phasekit-contracts.py check` refuses when a declared contract is unobtainable (exit 3 — no provider, or the provider does not offer it) and when the vendored copy has drifted from the mounted one (exit 4 — byte-exact tree comparison over sha256 digests). `refresh` is the one command that fixes drift, and every drift message names it verbatim. run-until-done.sh calls the gate from inside run_verify_gate, before the VERIFY_SKIP bypass, and both gates now share one record_verify_failure() writer so the artifact, the attempts counter and the VERIFY_MAX_ATTEMPTS breaker behave identically whichever gate refused.",
-  "decision_memo": "foundry-meta/KICKOFF-phasekit-v070-contracts.md phase 3; enforcement per DESIGN-cross-project-contracts.md fork C and the 'Amended 2026-08-16 (later)' lockfile pattern",
-  "suggested_commit_message": "v0.7.0 phase 3: the contracts gate — vendored == mounted, or refuse",
+  "summary": "Cross-project contracts, phase 4: the feature becomes visible and shippable. The loop composes a contracts block into the session prompt when (and only when) this repo declares dependencies — naming each one, stating the vendored contract is authoritative, forbidding guessing, forbidding edits to the vendored copy, and naming the refresh command. Every stack-profile verify template seeds the consumer check, positioned immediately after the `cd` so it runs ahead of any stack-specific fail-open. docs/CONTRACTS.md is the full reference, registered scaffold-class and in the default profile; QUALITY_GATES, CONTAINERIZATION, EXECUTION_MODES, META_SPEC and README cross-reference it.",
+  "decision_memo": "foundry-meta/KICKOFF-phasekit-v070-contracts.md phase 4; awareness rationale per DESIGN-cross-project-contracts.md ownership split ('a mount nobody is told about goes unread')",
+  "suggested_commit_message": "v0.7.0 phase 4: session awareness, stack seeding, docs",
   "reviewer_notes": [
-    "The gate lives in a phasekit-owned script invoked by the loop, NOT only in the project-owned scripts/phasekit-verify.sh. A repo that can edit away the check that polices it is not policed — the same principle that puts the secret-lint allowlist on the operator side of the deploy boundary.",
-    "Scoping decision: the contracts gate runs BEFORE the VERIFY_SKIP bypass. VERIFY_SKIP is the routine per-iteration hatch for red TDD commits and docs-only phases; if it also switched off contract authenticity, the gate would be off exactly when a red gate is applying the pressure to cheat. PHASEKIT_CONTRACTS_SKIP=1 is a separate, loud, operator-only hatch. Both halves are proven end-to-end against the real loop, not just grepped.",
-    "Distinct exit codes because the two failures need different human actions: DRIFT (4) is fixed by one command in this repo; UNOBTAINABLE (3) is fixed somewhere else entirely (the provider, or the project registry). Collapsing them would send people to the wrong place.",
-    "Refusal messages state the boundary rather than leaving it to be discovered: they name PHASEKIT_CONTRACTS_DIR for standalone use and say explicitly that the ordinary test suite does NOT need a provider. The 'the command named by the failure message is the one that works' test parses the command out of the message and runs it, so the two cannot drift apart.",
-    "Comparison recipe is content-only (sha256 over bytes, recursive): mtimes, ownership and directory order are ignored because a bind mount and a git checkout will never agree on those, and a pin that fires on them is noise that teaches people to bypass the gate. Non-regular files are a hard error rather than a skip — a skipped symlink is a hole an inauthentic copy could hide in.",
-    "refresh replaces rather than merges, so a file the producer deleted disappears here too; otherwise the vendored copy slowly becomes a superset nobody notices. It stays manual by design — auto-refresh at dispatch would dirty the tree and trip clean-tree guards.",
-    "contracts.yaml present but the checker missing (a stale vendored scripts/ dir) WARNs loudly rather than passing quietly: a declaration nobody checks is the failure this release exists to prevent.",
-    "The kickoff's ownership trap is now pinned by test: contracts.yaml is registered nowhere, and a real enrich-then-upgrade cycle is asserted to leave the file byte-identical while still installing the checker that reads it."
+    "Prompt composition runs AFTER light-mode composition, so both apply: a light task is exactly as capable of guessing a field name as a standard one. Pinned by test.",
+    "Prompt composition fails open — a malformed contracts.yaml adds nothing to the prompt rather than killing the session before it starts. The gate is where a bad declaration must be loud, and failing open here keeps the session reaching that gate, where the error is reported properly.",
+    "A repo declaring nothing (or declaring zero entries) gets the v0.6.6 prompt byte for byte, asserted by equality rather than by absence of a substring.",
+    "The seeded check moved from the tail of each template to immediately after the `cd`. Caught in end-to-end smoke: the python-uv template fail-opens when there is no pyproject.toml yet, so a tail-positioned check never ran on a young repo. A contract violation is not something to skip because the stack's own preconditions are not met. A test now pins that nothing exits between the `cd` and the check, in all five templates.",
+    "Five near-identical seeded blocks are the one real duplication this release adds. Consolidating them is not available — they are templates seeded once into project-owned files that then diverge by design — so the invariant is enforced by a test asserting all five blocks are byte-identical, the same pin-not-abstraction approach used for the '/contracts' path across the bash/python boundary.",
+    "docs/CONTRACTS.md states the CI boundary explicitly (a fork's green CI badge proves conformance but not freshness) so it is read rather than discovered. Doc assertions run against whitespace-collapsed prose, so they pin what the doc says rather than where its lines wrap.",
+    "docs/META_SPEC.md's standalone goal already anticipated this design in the abstract ('the thing that decides whether it is required must live in the project repo'); it now points at v0.7.0 as the worked example."
   ],
   "deferred_items": [
     {
-      "tag": "phase 4",
-      "description": "Session-prompt awareness (a mount nobody is told about goes unread), stack-profile seeding of the consumer check, docs/CONTRACTS.md + CONTAINERIZATION + QUALITY_GATES + README, capability registration review, tag and push v0.7.0."
+      "tag": "release",
+      "description": "Tag v0.7.0 and push. Minor bump per docs/RELEASING.md: additive (new files, new flags, new refusal path). Nothing downstream sees the change until the tag is pushed."
+    },
+    {
+      "tag": "orchestrator leg (queue #129)",
+      "description": "Registry `contracts:` field as slugs, the referenced-but-never-dispatched concept, mount composition in run-session.sh, always pass the mount plus index.json, cheap dispatch-time resolvability refusal."
+    },
+    {
+      "tag": "foundry-dashboard pilot",
+      "description": "Declare the dependency on foundry-orchestrator, vendor its openapi.json, wire conformance, and prove the gate catches a deliberate drift."
+    },
+    {
+      "tag": "out of scope, per the kickoff",
+      "description": "Auto-refresh at dispatch (would dirty the tree); the `meta:` mount for build sessions (DECLINED by design, do not 'finish' it); interface manifests for the phasekit<->orchestrator env/CLI/exit-code contracts (sequenced after this lands)."
     }
   ],
   "verification": {
     "self_check_passes_on_master": true,
-    "tracked_files_classified": 112,
-    "test_count": 232,
-    "new_tests": 37,
+    "tracked_files_classified": 116,
+    "test_count": 253,
+    "new_tests": 21,
     "test_status": "all green",
     "commands_run": [
-      "python3 -m unittest tests.test_contracts_gate_v070  -> 37 tests OK",
-      "python3 -m unittest discover -s tests -p 'test_*.py'  -> 232 tests OK",
-      "python3 scripts/enrich-project.py --self-check  -> 0 unclassified, 0 double-classified",
-      "bash -n scripts/run-until-done.sh  -> clean",
-      "manual smoke: drift / no-provider / refresh-then-pass messages read correctly in a scratch consumer repo"
+      "python3 -m unittest tests.test_contracts_awareness_v070  -> 21 tests OK",
+      "python3 -m unittest discover -s tests -p 'test_*.py'  -> 253 tests OK",
+      "python3 scripts/enrich-project.py --self-check  -> 116 tracked files, 0 unclassified, 0 double-classified",
+      "bash -n on run-until-done.sh, container-setup.sh and all five verify templates  -> clean",
+      "end-to-end smoke: fresh `enrich --profile python-uv` installs the checker and the doc, the gate is inert with no contracts.yaml, then declaring a dependency makes the seeded verify gate refuse with the refresh command, and refresh turns it green"
     ],
-    "acceptance_criteria_met": "a deliberately edited vendored copy fails the gate; a deliberately stale one fails with the exact refresh command in the message; a repo declaring nothing is entirely unaffected (the loop never even mentions contracts)"
+    "acceptance_criteria_met": "session prompt names mounted contracts as authoritative and forbids guessing; every stack profile seeds the consumer check; docs written and cross-referenced; every new tracked file registered. Remaining: tag and push v0.7.0."
   }
 }

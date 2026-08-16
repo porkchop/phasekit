@@ -169,6 +169,39 @@ This registers the server in your user-level Claude configuration. Add `--headle
 | `PLAYWRIGHT_MCP_VERSION` | `0.0.70` | Override `@playwright/mcp` version at build time |
 | `PHASEKIT_ROOTLESS_DOCKER` | (unset) | Set to `1` to run the container as UID 0 for rootless Docker bind mounts; see [Rootless Docker](#rootless-docker) |
 | `PHASEKIT_CONTAINER_USER` | (unset) | Lower-level override for `docker run --user` (`root` or `uid:gid`); takes precedence over `PHASEKIT_ROOTLESS_DOCKER` |
+| `PHASEKIT_CONTRACTS_MOUNT` | (unset) | Host path to a provider's contracts tree; bind-mounted read-only at `/contracts`; see [Cross-project contracts mount](#cross-project-contracts-mount) |
+
+## Cross-project contracts mount
+
+*v0.7.0. Optional — unset is the normal case and changes nothing.*
+
+A provider (the Foundry orchestrator, or a human working by hand) sets
+`PHASEKIT_CONTRACTS_MOUNT` to a host directory containing `index.json` plus one
+directory per dependency slug. `container-setup.sh` bind-mounts it **read-only**
+at the fixed container path `/contracts` and sets `PHASEKIT_CONTRACTS_DIR` so
+the in-container tooling can find it.
+
+```bash
+PHASEKIT_CONTRACTS_MOUNT=/srv/foundry/contracts \
+  bash scripts/container-setup.sh run
+```
+
+Two rules govern the mount, and they pull in opposite directions on purpose:
+
+- **Unset is a no-op.** phasekit works with no orchestrator at all, so a missing
+  mount can never be an error here. The refusal is triggered by the consumer
+  repo's own `contracts.yaml`, never by the mount's absence.
+- **Set-but-unusable is a hard error**, before the container starts. If the path
+  is not a directory, or has no readable `index.json`, `container-setup.sh`
+  exits non-zero. A provider passing a path the consumer silently drops is
+  exactly the `META_REPO_PATH` failure — an export with no consumer, unnoticed
+  for months — and this feature exists to prevent that class.
+
+A provider with nothing to offer still ships an `index.json` with zero entries.
+An empty directory is indistinguishable from a broken bind mount; a manifest is
+the provider asserting it checked.
+
+Full mechanism: `docs/CONTRACTS.md`.
 
 ## Container capabilities
 

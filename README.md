@@ -182,6 +182,30 @@ Overrides:
 
 Until you customize the stub it no-ops with a warning, so existing projects keep working with no change.
 
+### Optional: cross-project contracts
+
+If your project depends on another project's interface — an HTTP API, a file
+format, a set of env vars and exit codes — you can stop guessing at it. Declare
+the dependency in a `contracts.yaml` at your repo root, commit a vendored copy
+of the producer's contract under `vendor/contracts/<slug>/`, and phasekit
+refuses any phase commit where that copy has drifted from the producer's
+authoritative one.
+
+The split that makes this work anywhere: **your ordinary test suite validates
+against the vendored copy**, so `git clone && <your tests>` passes with no
+provider and no mount, exactly like a lockfile. Only the pre-commit gate needs a
+provider, and only when your repo declares one. A repo with no `contracts.yaml`
+behaves exactly as it did before.
+
+```yaml
+# contracts.yaml
+version: 1
+depends_on:
+  - billing-api
+```
+
+See `docs/CONTRACTS.md`.
+
 See `docs/CONTAINERIZATION.md` for full details on security model, firewall, environment variables, and troubleshooting.
 
 ## Profiles
@@ -289,6 +313,7 @@ KICKOFF.md                        # entrypoint documentation
 | `docs/CAPABILITY_MANIFEST.md` | Manifest schema and profile resolution |
 | `docs/EXTENSION_PATTERNS.md` | Adding profiles, agents, hooks, skills, docs |
 | `docs/CONTAINERIZATION.md` | Container setup, firewall, auth, troubleshooting |
+| `docs/CONTRACTS.md` | Cross-project contract dependencies: declaring, vendoring, the drift gate |
 | `docs/COMPATIBILITY.md` | Versioning policy and upgrade guidance |
 | `docs/REASONING_PROFILES.md` | When to use deeper reasoning per role |
 | `docs/USAGE_PATTERNS.md` | Workflow patterns for different project types |
