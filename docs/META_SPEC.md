@@ -23,6 +23,15 @@ These assets include:
 ## Core goals
 
 - Remain reusable across many project types
+- **Operate fully standalone.** phasekit is installed by `curl | bash` from a
+  public repo and must work end to end for someone who has no orchestration
+  layer at all. Any external scheduler, registry or management system is an
+  *optional provider* of documented inputs, never a prerequisite. The existing
+  shape to copy is `PHASEKIT_SESSION_DEADLINE`: phasekit defines the input
+  contract and honours it when supplied, and behaves correctly when it is not.
+  When a feature needs data from outside the repo, the thing that decides
+  whether it is *required* must live **in the project repo**, so it travels
+  with the project and a standalone user can satisfy it by hand.
 - Improve itself safely through audited, phase-gated changes
 - Support both greenfield setup and adoption of existing repos
 - Generate capability assets from a clear source of truth
@@ -33,6 +42,10 @@ These assets include:
 
 - Becoming a generic code framework for app logic
 - Replacing project-specific product specs
+- **Requiring any particular orchestrator, scheduler or registry to function.**
+  A feature that only works when a specific management system is present is a
+  regression against the standalone goal above, however useful that system is
+  to its owner.
 - Fully autonomous deployment to production without explicit configuration
 - Silently rewriting its own workflow without review and approval
 
