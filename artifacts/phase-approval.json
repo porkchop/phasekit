@@ -1,41 +1,38 @@
 {
-  "phase": "v0.7.0-phase-1-declaration-and-reader",
+  "phase": "v0.7.0-phase-2-mount-plumbing",
   "approved": true,
-  "summary": "Cross-project contracts, phase 1: the consumer-side declaration format and its parser, shipped INERT. New scripts/phasekit-contracts.py defines the conventions as a single source of truth (contracts.yaml at the repo root, vendor/contracts/<slug>/ for vendored copies, /contracts + index.json for the provider mount, PHASEKIT_CONTRACTS_DIR to override it) and exposes load_declaration() plus a `status` subcommand. Nothing mounts and nothing refuses yet. The parser is deliberately strict — unknown top-level or entry keys, a wrong version, a slug with a path separator, an absolute/traversal vendor path and duplicate slugs are all hard errors — because a typo'd key that silently does nothing is the exact bug class this release exists to kill. Registered under scripts: in capabilities/project-capabilities.yaml and in ALWAYS_INSTALLED_FILE_PATHS so it provisions downstream.",
-  "decision_memo": "foundry-meta/KICKOFF-phasekit-v070-contracts.md + DESIGN-cross-project-contracts.md (approved 2026-08-16; forks A/B/C and the standalone amendment already decided — phase 1 re-litigated nothing)",
-  "suggested_commit_message": "v0.7.0 phase 1: contracts.yaml declaration + reader (inert)",
+  "summary": "Cross-project contracts, phase 2: the provider mount. container-setup.sh gained PHASEKIT_CONTRACTS_MOUNT — a host path bind-mounted read-only at the fixed container path /contracts, with PHASEKIT_CONTRACTS_DIR set alongside it so in-container tooling learns where it landed. phasekit-contracts.py gained load_provider_index() and a `provider` subcommand that read the mount's index.json. The zero-entry manifest is honoured as a POSITIVE statement ('I checked; there are none') and is observably distinct from an empty directory, which is indistinguishable from a broken bind mount. Unset PHASEKIT_CONTRACTS_MOUNT remains a strict no-op; set-but-unusable (not a directory, or no readable index.json) is a hard error before the container starts.",
+  "decision_memo": "foundry-meta/KICKOFF-phasekit-v070-contracts.md phase 2; conventions per DESIGN-cross-project-contracts.md 'the mount is always present, and empty is a positive statement'",
+  "suggested_commit_message": "v0.7.0 phase 2: read-only /contracts mount + provider index",
   "reviewer_notes": [
-    "Audit first: grepped the tree for existing contracts machinery — none existed. Greenfield, no rewrite risk.",
-    "Deliberately did NOT start from the earliest unapproved entry in docs/META_PHASES.md; the kickoff overrides that for this release (M9.x is unrelated work and would never reach contracts).",
-    "Ownership class: contracts.yaml is PROJECT-owned and is NOT registered as an installed file, so `phasekit upgrade` can never erase a project's declarations. Only the reader script ships. A regression test pinning upgrade-preservation lands with the gate in phase 3.",
-    "Bare-string shorthand (`depends_on: [slug]`) is accepted alongside the mapping form and normalizes to one internal representation. Two spellings, one meaning — chosen because an agent authoring the file is likely to reach for the simple form, and a rejected-but-obvious spelling is a failure mode, not a safeguard.",
-    "The gate must live in a phasekit-owned script rather than only in the project-owned scripts/phasekit-verify.sh: a check the policed repo can edit away is not a check. Recorded in the capabilities entry so the reason survives the commit."
+    "Acceptance 'with none, the container starts exactly as today' is tested functionally, not by grep: the real container-setup.sh runs against a stub `docker` on PATH, the composed `docker run` argv is captured with and without a provider, and the difference is asserted to be EXACTLY the two contracts arguments — nothing added, nothing dropped, nothing reordered. A structural pin would have passed for a script that also perturbed an unrelated flag.",
+    "Set-but-unusable fails loudly rather than being silently dropped. A provider passing a path the consumer quietly ignores is precisely META_REPO_PATH — an export with no consumer, unnoticed for months — and reproducing it inside the feature built to prevent it would be the worst possible outcome.",
+    "Deliberate strictness asymmetry, documented in the code: contracts.yaml is phasekit's own format so unknown keys are hard errors (typos must not be no-ops), while index.json crosses a repo boundary and is versioned by a separate producer, so additive fields are tolerated and the two sides can ship independently.",
+    "The container-side path '/contracts' is necessarily written in both bash and Python. There is no cheap way to share a constant across that boundary, so the invariant is enforced by an assertion (the bash literal must equal DEFAULT_MOUNT_DIR, and must be defined exactly once) rather than left to intention.",
+    "Nothing refuses yet — a repo that declares dependencies still builds. That lands in phase 3."
   ],
   "deferred_items": [
-    {
-      "tag": "phase 2",
-      "description": "Mount plumbing: container-setup.sh accepts a provider-supplied contracts path and bind-mounts it read-only at /contracts; index.json is read and honoured, including the zero-entry case."
-    },
     {
       "tag": "phase 3",
       "description": "The gate: vendored == mounted equality pin, refusal when the repo declares dependencies and no provider is present, and a one-command refresh named by exact command in the failure message."
     },
     {
       "tag": "phase 4",
-      "description": "Session-prompt awareness, stack-profile seeding, docs, capability registration review, tag and push v0.7.0."
+      "description": "Session-prompt awareness, stack-profile seeding, docs (CONTRACTS.md, CONTAINERIZATION, QUALITY_GATES, README), tag and push v0.7.0."
     }
   ],
   "verification": {
     "self_check_passes_on_master": true,
-    "tracked_files_classified": 110,
-    "test_count": 171,
-    "new_tests": 28,
+    "tracked_files_classified": 112,
+    "test_count": 195,
+    "new_tests": 24,
     "test_status": "all green",
     "commands_run": [
-      "python3 -m unittest tests.test_contracts_v070  -> 28 tests OK",
-      "python3 -m unittest discover -s tests -p 'test_*.py'  -> 171 tests OK",
-      "python3 scripts/enrich-project.py --self-check  -> 110 tracked files, 0 unclassified, 0 double-classified"
+      "python3 -m unittest tests.test_contracts_mount_v070  -> 24 tests OK",
+      "python3 -m unittest discover -s tests -p 'test_*.py'  -> 195 tests OK",
+      "python3 scripts/enrich-project.py --self-check  -> 112 tracked files, 0 unclassified, 0 double-classified",
+      "bash -n scripts/container-setup.sh  -> clean"
     ],
-    "acceptance_criteria_met": "a repo with no contracts.yaml behaves exactly as v0.6.6 (inert), and non-vacuity is proven three ways: the parsed result differs when the file exists, the real CLI entry point's output differs, and a malformed declaration exits 2 loudly instead of passing silently"
+    "acceptance_criteria_met": "with a provider, /contracts is bind-mounted read-only and its index.json is read and honoured (including the zero-entry case); with none, the composed docker argv is byte-identical to v0.6.6"
   }
 }

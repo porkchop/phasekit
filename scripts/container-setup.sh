@@ -39,6 +39,13 @@ set -euo pipefail
 #                       tasks (v0.6.0; see docs/EXECUTION_MODES.md)
 #   PHASEKIT_SESSION_DEADLINE  Epoch seconds of the supervisor's hard kill;
 #                       enables deadline-aware iteration pacing (v0.6.1)
+#   PHASEKIT_CONTRACTS_MOUNT  HOST path to a provider's contracts tree
+#                       (index.json + one directory per dependency slug).
+#                       Bind-mounted read-only at /contracts and announced to
+#                       the in-container tooling via PHASEKIT_CONTRACTS_DIR.
+#                       Optional: unset means "no provider", which is the
+#                       normal standalone case and changes nothing (v0.7.0;
+#                       see docs/CONTRACTS.md)
 #   IMAGE_NAME          Docker image name (default: scaffold-runner)
 #   CLAUDE_VOLUME       Named volume for ~/.claude credentials (default: scaffold-claude-config)
 #   GIT_USER_NAME       Git author name (default: Scaffold Runner)
@@ -64,6 +71,12 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMAGE_NAME="${IMAGE_NAME:-scaffold-runner}"
 CLAUDE_VOLUME="${CLAUDE_VOLUME:-scaffold-claude-config}"
 COMMAND="${1:-build}"
+
+# Container-side mount point for cross-project contracts (v0.7.0). Fixed, not
+# configurable: the in-container tooling learns the path from the
+# PHASEKIT_CONTRACTS_DIR env var we set alongside the mount, so there is one
+# way to name it. Must match DEFAULT_MOUNT_DIR in scripts/phasekit-contracts.py.
+CONTRACTS_CONTAINER_DIR="/contracts"
 
 # Resolve the container user (see header docs).
 #
@@ -241,6 +254,42 @@ run_container() {
   # loop refuses to start an iteration it likely can't finish before this.
   if [[ -n "${PHASEKIT_SESSION_DEADLINE:-}" ]]; then
     docker_args+=(-e PHASEKIT_SESSION_DEADLINE="$PHASEKIT_SESSION_DEADLINE")
+  fi
+
+  # Cross-project contracts (v0.7.0). A provider — the Foundry orchestrator, or
+  # a human running standalone — points PHASEKIT_CONTRACTS_MOUNT at a host
+  # directory holding index.json plus one directory per dependency slug. We
+  # bind-mount it read-only at the fixed container path /contracts and tell the
+  # in-container tooling where it landed.
+  #
+  # Unset is the ordinary case and must stay a no-op: phasekit is a public tool
+  # that works with no orchestrator at all, so "no mount" can never be an error
+  # here. The refusal lives on the consumer side, triggered by the repo's own
+  # contracts.yaml declaration — never by the mount's absence.
+  #
+  # Set-but-unusable IS an error, and a loud one. A provider that passes a path
+  # we silently drop is exactly the META_REPO_PATH failure — an export with no
+  # consumer, unnoticed for months — reproduced inside the feature built to
+  # prevent it. Fail before spending a single token.
+  if [[ -n "${PHASEKIT_CONTRACTS_MOUNT:-}" ]]; then
+    if [[ ! -d "$PHASEKIT_CONTRACTS_MOUNT" ]]; then
+      echo "Error: PHASEKIT_CONTRACTS_MOUNT is set to '$PHASEKIT_CONTRACTS_MOUNT' but that is not a directory." >&2
+      echo "       A provider must pass a readable contracts tree (index.json + one dir per slug)," >&2
+      echo "       or leave the variable unset. See docs/CONTRACTS.md." >&2
+      exit 1
+    fi
+    if [[ ! -r "$PHASEKIT_CONTRACTS_MOUNT/index.json" ]]; then
+      # "No dependencies" is a manifest with zero entries, never an empty
+      # directory: an empty dir is indistinguishable from a broken bind mount,
+      # whereas a manifest is the provider ASSERTING that it checked.
+      echo "Error: PHASEKIT_CONTRACTS_MOUNT '$PHASEKIT_CONTRACTS_MOUNT' has no readable index.json." >&2
+      echo "       A provider with no dependencies to offer must still ship an index.json with" >&2
+      echo "       zero entries — silence and never-reached must not look alike." >&2
+      exit 1
+    fi
+    docker_args+=(-v "$PHASEKIT_CONTRACTS_MOUNT":"$CONTRACTS_CONTAINER_DIR":ro)
+    docker_args+=(-e PHASEKIT_CONTRACTS_DIR="$CONTRACTS_CONTAINER_DIR")
+    echo "Contracts mount: $PHASEKIT_CONTRACTS_MOUNT -> $CONTRACTS_CONTAINER_DIR (read-only)"
   fi
 
   # CLAUDE_MODE controls whether the inner loop starts a fresh session (`new`,

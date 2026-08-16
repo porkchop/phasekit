@@ -41,7 +41,8 @@ phasekit behaves identically. Foundry is one possible *provider* of a
 documented interface, not a prerequisite.
 
 Usage:
-  python3 scripts/phasekit-contracts.py status [--repo DIR] [--json]
+  python3 scripts/phasekit-contracts.py status   [--repo DIR] [--json]
+  python3 scripts/phasekit-contracts.py provider [--json]
 
 See docs/CONTRACTS.md for the file format and the full lifecycle.
 """
@@ -279,6 +280,128 @@ def mount_dir() -> Path:
     return Path(os.environ.get(MOUNT_DIR_ENV) or DEFAULT_MOUNT_DIR)
 
 
+# --- The provider side of the mount ----------------------------------------
+
+
+@dataclass(frozen=True)
+class ProviderEntry:
+    """One contract the provider says it has mounted."""
+
+    slug: str
+    # Path relative to the mount root. Defaults to the slug.
+    rel_path: str
+
+    def source_dir(self, mount: Path) -> Path:
+        return mount / self.rel_path
+
+
+@dataclass(frozen=True)
+class ProviderIndex:
+    """The mount's `index.json`, or the positive absence of a provider.
+
+    `present` distinguishes "a provider is here and asserts what it offers"
+    from "no provider at all". A provider with nothing to offer still ships an
+    index with zero entries — that is the provider stating it checked, and it
+    is deliberately NOT the same observable as a missing or broken mount.
+    """
+
+    present: bool = False
+    path: Path | None = None
+    mount: Path | None = None
+    entries: tuple[ProviderEntry, ...] = field(default_factory=tuple)
+
+    def get(self, slug: str) -> ProviderEntry | None:
+        for entry in self.entries:
+            if entry.slug == slug:
+                return entry
+        return None
+
+    def slugs(self) -> tuple[str, ...]:
+        return tuple(e.slug for e in self.entries)
+
+
+def load_provider_index(mount: Path | None = None) -> ProviderIndex:
+    """Read `<mount>/index.json`.
+
+    Returns `ProviderIndex(present=False)` when no provider is mounted — the
+    ordinary standalone case, which is never an error here. Raises
+    ContractsError only when a provider IS present and its manifest is broken,
+    because a mounted-but-unreadable manifest is a misconfiguration that must
+    never be mistaken for "no dependencies".
+
+    Note the deliberate asymmetry with `load_declaration`: unknown keys in
+    index.json are TOLERATED. contracts.yaml is phasekit's own format, so
+    strictness there catches typos; index.json crosses a repo boundary and is
+    versioned by a separate producer, so tolerating additive fields is what
+    lets the two sides ship independently.
+    """
+    root = Path(mount) if mount is not None else mount_dir()
+    index_path = root / INDEX_FILENAME
+
+    if not index_path.is_file():
+        return ProviderIndex(present=False, mount=root)
+
+    try:
+        raw = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ContractsError(f"{index_path}: unreadable provider manifest: {exc}") from exc
+
+    if not isinstance(raw, dict):
+        raise ContractsError(
+            f"{index_path}: provider manifest must be a JSON object, "
+            f"got {type(raw).__name__}"
+        )
+
+    raw_entries = raw.get("entries", [])
+    if raw_entries is None:
+        raw_entries = []
+    if not isinstance(raw_entries, list):
+        raise ContractsError(
+            f"{index_path}: `entries` must be a list (use [] to assert none), "
+            f"got {type(raw_entries).__name__}"
+        )
+
+    entries: list[ProviderEntry] = []
+    seen: set[str] = set()
+    for i, item in enumerate(raw_entries):
+        if isinstance(item, str):
+            item = {"slug": item}
+        if not isinstance(item, dict):
+            raise ContractsError(
+                f"{index_path}: entries[{i}] must be a slug string or an object"
+            )
+        slug = item.get("slug")
+        if not isinstance(slug, str) or not SLUG_RE.match(slug):
+            raise ContractsError(
+                f"{index_path}: entries[{i}] has an invalid `slug`: {slug!r}"
+            )
+        if slug in seen:
+            raise ContractsError(f"{index_path}: duplicate entry slug {slug!r}")
+        seen.add(slug)
+
+        rel = item.get("path", slug)
+        if not isinstance(rel, str) or not rel.strip():
+            raise ContractsError(
+                f"{index_path}: entries[{i}] `path` must be a non-empty string"
+            )
+        rel = rel.strip()
+        rel_pure = Path(rel)
+        if rel_pure.is_absolute() or ".." in rel_pure.parts:
+            raise ContractsError(
+                f"{index_path}: entries[{i}] `path` must stay inside the mount, got {rel!r}"
+            )
+        entries.append(
+            ProviderEntry(
+                slug=slug,
+                rel_path=Path(*[p for p in rel_pure.parts if p != "."]).as_posix(),
+            )
+        )
+
+    return ProviderIndex(
+        present=True, path=index_path, mount=root, entries=tuple(entries)
+    )
+
+
 # --- CLI -------------------------------------------------------------------
 
 
@@ -320,6 +443,45 @@ def cmd_status(repo_root: Path, as_json: bool) -> int:
     return 0
 
 
+def cmd_provider(as_json: bool) -> int:
+    index = load_provider_index()
+    mount = index.mount or mount_dir()
+
+    if as_json:
+        print(json.dumps(
+            {
+                "mount": str(mount),
+                "provider_present": index.present,
+                "entries": [
+                    {
+                        "slug": e.slug,
+                        "path": e.rel_path,
+                        "readable": e.source_dir(mount).is_dir(),
+                    }
+                    for e in index.entries
+                ],
+            },
+            indent=2, sort_keys=True,
+        ))
+        return 0
+
+    if not index.present:
+        print(
+            f"contracts: no provider mounted at {mount} "
+            f"(set {MOUNT_DIR_ENV}, or run under a provider that supplies one)."
+        )
+        return 0
+    if not index.entries:
+        print(f"contracts: provider mounted at {mount}, asserting 0 available contracts.")
+        return 0
+
+    print(f"contracts: provider mounted at {mount}, {len(index.entries)} available:")
+    for entry in index.entries:
+        state = "readable" if entry.source_dir(mount).is_dir() else "MISSING"
+        print(f"  - {entry.slug}: {entry.rel_path} [{state}]")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="phasekit-contracts",
@@ -336,6 +498,13 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="Show what this repo declares and whether it is vendored."
     )
     p_status.add_argument("--json", action="store_true", help="Machine-readable output.")
+
+    p_provider = sub.add_parser(
+        "provider",
+        help=f"Show what the mounted provider offers (mount: ${MOUNT_DIR_ENV} "
+             f"or {DEFAULT_MOUNT_DIR}).",
+    )
+    p_provider.add_argument("--json", action="store_true", help="Machine-readable output.")
     return parser
 
 
@@ -356,6 +525,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "status":
             return cmd_status(repo_root, as_json=args.json)
+        if args.command == "provider":
+            return cmd_provider(as_json=args.json)
     except ContractsError as exc:
         print(f"phasekit-contracts: {exc}", file=sys.stderr)
         return 2
