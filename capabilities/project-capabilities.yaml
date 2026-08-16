@@ -328,6 +328,17 @@ scripts:
     # run-phase falls back to `cat` if absent, but downstream provisioning is
     # the supported path. See docs/EXECUTION_MODES.md "Visibility and logs".
 
+  phasekit-contracts:
+    path: scripts/phasekit-contracts.py
+    required: false
+    ownership: scaffold
+    # v0.7.0 cross-project contracts, CONSUMER side. Reads the project-owned
+    # `contracts.yaml` at the repo root and (from v0.7.0 phase 3) gates the
+    # build on vendored == mounted. Ships to every project because the gate
+    # must be phasekit-owned: a check living only in the project-owned
+    # scripts/phasekit-verify.sh could be edited away by the repo it polices.
+    # Inert in a repo with no contracts.yaml. See docs/CONTRACTS.md.
+
   generate-skill:
     path: scripts/generate-skill.py
     required: true
