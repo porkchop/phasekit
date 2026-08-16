@@ -43,6 +43,16 @@ documented interface, not a prerequisite.
 Usage:
   python3 scripts/phasekit-contracts.py status   [--repo DIR] [--json]
   python3 scripts/phasekit-contracts.py provider [--json]
+  python3 scripts/phasekit-contracts.py check    [--repo DIR]
+  python3 scripts/phasekit-contracts.py refresh  [--repo DIR]
+
+Exit codes (`check`):
+  0  nothing declared, or every declared contract matches the provider
+  2  the declaration or the provider manifest is malformed
+  3  a declared contract is UNOBTAINABLE — no provider, or the provider does
+     not offer it. Refreshing cannot help; fix the provider or the registry.
+  4  DRIFT — the vendored copy is missing or differs from the mounted one.
+     One command fixes it, and the failure message names that command.
 
 See docs/CONTRACTS.md for the file format and the full lifecycle.
 """
@@ -50,9 +60,11 @@ See docs/CONTRACTS.md for the file format and the full lifecycle.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,6 +105,14 @@ MOUNT_DIR_ENV = "PHASEKIT_CONTRACTS_DIR"
 INDEX_FILENAME = "index.json"
 
 SUPPORTED_VERSION = 1
+
+# Exit codes for `check`. Distinct because the two failures need different
+# human actions: DRIFT is fixed by one command in this repo, UNOBTAINABLE is
+# fixed somewhere else entirely (the provider, or the project registry).
+EXIT_OK = 0
+EXIT_CONFIG = 2
+EXIT_UNOBTAINABLE = 3
+EXIT_DRIFT = 4
 
 # Slugs become path components, so they are constrained hard: lowercase,
 # no separators, no dots-only traversal.
@@ -402,6 +422,268 @@ def load_provider_index(mount: Path | None = None) -> ProviderIndex:
     )
 
 
+# --- The equality pin ------------------------------------------------------
+
+
+def tree_digest(root: Path) -> dict[str, str]:
+    """Map every file under `root` to the sha256 of its bytes.
+
+    Byte-exact and content-only: mtimes, ownership and directory order are
+    deliberately ignored, because a bind mount and a git checkout will never
+    agree on those and a pin that fires on them would be noise that teaches
+    people to bypass the gate.
+
+    Non-regular files (symlinks, sockets, fifos) are a hard error rather than
+    a skip. A contract directory has no legitimate use for them, and silently
+    skipping one is a hole an inauthentic copy could hide in.
+    """
+    digests: dict[str, str] = {}
+    if not root.is_dir():
+        return digests
+    for path in sorted(root.rglob("*")):
+        if path.is_dir() and not path.is_symlink():
+            continue
+        if path.is_symlink() or not path.is_file():
+            raise ContractsError(
+                f"{path}: contract trees must contain regular files only "
+                f"(found a symlink or special file)"
+            )
+        digest = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                digest.update(chunk)
+        digests[path.relative_to(root).as_posix()] = digest.hexdigest()
+    return digests
+
+
+@dataclass(frozen=True)
+class TreeDiff:
+    """What `vendored` is missing, has extra, or has changed vs `mounted`."""
+
+    missing: tuple[str, ...] = field(default_factory=tuple)   # in mount, not vendored
+    extra: tuple[str, ...] = field(default_factory=tuple)     # in vendored, not mount
+    changed: tuple[str, ...] = field(default_factory=tuple)   # both, different bytes
+
+    @property
+    def clean(self) -> bool:
+        return not (self.missing or self.extra or self.changed)
+
+    def describe(self, limit: int = 6) -> str:
+        parts = []
+        for label, items in (
+            ("only in the provider", self.missing),
+            ("only in the vendored copy", self.extra),
+            ("differing content", self.changed),
+        ):
+            if not items:
+                continue
+            shown = ", ".join(items[:limit])
+            more = f" (+{len(items) - limit} more)" if len(items) > limit else ""
+            parts.append(f"{label}: {shown}{more}")
+        return "; ".join(parts)
+
+
+def diff_trees(vendored: Path, mounted: Path) -> TreeDiff:
+    left = tree_digest(vendored)
+    right = tree_digest(mounted)
+    return TreeDiff(
+        missing=tuple(sorted(set(right) - set(left))),
+        extra=tuple(sorted(set(left) - set(right))),
+        changed=tuple(sorted(k for k in set(left) & set(right) if left[k] != right[k])),
+    )
+
+
+def refresh_command(repo_root: Path) -> str:
+    """The exact command that fixes drift, as the user would type it.
+
+    Named verbatim in every failure message. Without it a stale vendored
+    contract becomes a wedge — the roughest edge in this design, so it ships
+    visible rather than clever.
+    """
+    script = Path(__file__).resolve()
+    try:
+        rel = script.relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        rel = str(script)
+    return f"python3 {rel} refresh"
+
+
+def provider_hint() -> str:
+    return (
+        f"If you are working outside a provider, point {MOUNT_DIR_ENV} at a local "
+        f"directory holding {INDEX_FILENAME} plus one directory per slug."
+    )
+
+
+# --- check -----------------------------------------------------------------
+
+
+def cmd_check(repo_root: Path) -> int:
+    decl = load_declaration(repo_root)
+
+    # The trigger for refusing is the repo's OWN declaration, never the
+    # mount's absence. A repo that declares nothing is a v0.6.6 repo and this
+    # gate must be invisible to it — otherwise every standalone user gets
+    # yelled at, on every run, about something they have no reason to provide.
+    if not decl.declares_dependencies:
+        return EXIT_OK
+
+    index = load_provider_index()
+    mount = index.mount or mount_dir()
+
+    # 1. Obtainability. A declared contract we cannot read means we would be
+    #    building blind against an interface the repo itself said it depends
+    #    on. That is a refusal, not a warning.
+    if not index.present:
+        slugs = ", ".join(decl.slugs())
+        print(
+            f"phasekit-contracts: REFUSING — {CONTRACTS_FILENAME} declares "
+            f"{len(decl.dependencies)} contract dependency(ies) ({slugs}) but no "
+            f"provider is mounted at {mount}.\n"
+            f"  This repo asked for these contracts, so building without them is "
+            f"building blind.\n"
+            f"  {provider_hint()}\n"
+            f"  (Your ordinary test suite does NOT need a provider — it validates "
+            f"against the vendored copies in this repo. Only this gate does.)",
+            file=sys.stderr,
+        )
+        return EXIT_UNOBTAINABLE
+
+    unobtainable = [d for d in decl.dependencies if index.get(d.slug) is None]
+    if unobtainable:
+        offered = ", ".join(index.slugs()) or "(none)"
+        for dep in unobtainable:
+            print(
+                f"phasekit-contracts: REFUSING — declared dependency "
+                f"'{dep.slug}' is not offered by the provider at {mount}.\n"
+                f"  Provider offers: {offered}\n"
+                f"  Fix the provider or the project registry, or remove the "
+                f"declaration from {CONTRACTS_FILENAME}.",
+                file=sys.stderr,
+            )
+        return EXIT_UNOBTAINABLE
+
+    # 2. Authenticity. The vendored copy is a cache; this is its pin. It fires
+    #    the same way whether the producer moved on or a consumer edited its
+    #    copy to go green — one command fixes both, and we name it.
+    drifted = False
+    for dep in decl.dependencies:
+        entry = index.get(dep.slug)
+        source = entry.source_dir(mount)
+        vendored = dep.vendor_dir(repo_root)
+
+        if not source.is_dir():
+            print(
+                f"phasekit-contracts: REFUSING — the provider's manifest lists "
+                f"'{dep.slug}' but {source} is not readable (broken mount?).",
+                file=sys.stderr,
+            )
+            return EXIT_UNOBTAINABLE
+
+        if not vendored.is_dir():
+            print(
+                f"phasekit-contracts: DRIFT — '{dep.slug}' is declared but not "
+                f"vendored at {dep.vendor_path}.\n"
+                f"  Fix with:  {refresh_command(repo_root)}\n"
+                f"  Then commit {dep.vendor_path} — the vendored copy is what "
+                f"lets this repo's own tests pass on a bare clone.",
+                file=sys.stderr,
+            )
+            drifted = True
+            continue
+
+        diff = diff_trees(vendored, source)
+        if not diff.clean:
+            print(
+                f"phasekit-contracts: DRIFT — the vendored copy of '{dep.slug}' "
+                f"does not match the provider's current contract.\n"
+                f"  vendored: {dep.vendor_path}\n"
+                f"  provider: {source}\n"
+                f"  {diff.describe()}\n"
+                f"  Fix with:  {refresh_command(repo_root)}\n"
+                f"  Then reconcile this repo's code and tests with the refreshed "
+                f"contract, and commit both together.",
+                file=sys.stderr,
+            )
+            drifted = True
+
+    if drifted:
+        return EXIT_DRIFT
+
+    print(
+        f"phasekit-contracts: {len(decl.dependencies)} contract(s) match the "
+        f"provider at {mount}."
+    )
+    return EXIT_OK
+
+
+# --- refresh ---------------------------------------------------------------
+
+
+def cmd_refresh(repo_root: Path) -> int:
+    """Re-vendor every declared contract from the mount.
+
+    Deliberately manual. Auto-refreshing at dispatch would dirty the tree and
+    trip the clean-tree guards; the gate fails, a human or the next iteration
+    runs this, and the refreshed copy lands in a commit where it is reviewable.
+    """
+    decl = load_declaration(repo_root)
+    if not decl.declares_dependencies:
+        print(f"phasekit-contracts: nothing declared in {CONTRACTS_FILENAME}; nothing to refresh.")
+        return EXIT_OK
+
+    index = load_provider_index()
+    mount = index.mount or mount_dir()
+    if not index.present:
+        print(
+            f"phasekit-contracts: cannot refresh — no provider mounted at {mount}.\n"
+            f"  {provider_hint()}",
+            file=sys.stderr,
+        )
+        return EXIT_UNOBTAINABLE
+
+    changed = 0
+    for dep in decl.dependencies:
+        entry = index.get(dep.slug)
+        if entry is None or not entry.source_dir(mount).is_dir():
+            print(
+                f"phasekit-contracts: cannot refresh '{dep.slug}' — the provider "
+                f"at {mount} does not offer it.",
+                file=sys.stderr,
+            )
+            return EXIT_UNOBTAINABLE
+
+        source = entry.source_dir(mount)
+        # Validate before mutating: a symlink in the source would otherwise be
+        # copied into the repo before tree_digest ever objected to it.
+        tree_digest(source)
+
+        vendored = dep.vendor_dir(repo_root)
+        before = tree_digest(vendored) if vendored.is_dir() else {}
+        # Replace, don't merge: a file the producer deleted must disappear here
+        # too, or the vendored copy slowly becomes a superset nobody notices.
+        if vendored.exists():
+            shutil.rmtree(vendored)
+        vendored.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, vendored, symlinks=False)
+        after = tree_digest(vendored)
+
+        if before != after:
+            changed += 1
+            print(f"  refreshed {dep.slug} -> {dep.vendor_path} ({len(after)} file(s))")
+        else:
+            print(f"  {dep.slug} already current ({len(after)} file(s))")
+
+    if changed:
+        print(
+            f"phasekit-contracts: refreshed {changed} contract(s). Review the diff, "
+            f"reconcile your code and tests with it, and commit."
+        )
+    else:
+        print("phasekit-contracts: all vendored contracts were already current.")
+    return EXIT_OK
+
+
 # --- CLI -------------------------------------------------------------------
 
 
@@ -505,6 +787,17 @@ def build_parser() -> argparse.ArgumentParser:
              f"or {DEFAULT_MOUNT_DIR}).",
     )
     p_provider.add_argument("--json", action="store_true", help="Machine-readable output.")
+
+    sub.add_parser(
+        "check",
+        help="Gate: refuse when a declared contract is unobtainable or the "
+             "vendored copy has drifted from the provider's.",
+    )
+    sub.add_parser(
+        "refresh",
+        help="Re-vendor every declared contract from the mount (the one command "
+             "the drift message names).",
+    )
     return parser
 
 
@@ -527,9 +820,13 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_status(repo_root, as_json=args.json)
         if args.command == "provider":
             return cmd_provider(as_json=args.json)
+        if args.command == "check":
+            return cmd_check(repo_root)
+        if args.command == "refresh":
+            return cmd_refresh(repo_root)
     except ContractsError as exc:
         print(f"phasekit-contracts: {exc}", file=sys.stderr)
-        return 2
+        return EXIT_CONFIG
     parser.print_help()
     return 2
 

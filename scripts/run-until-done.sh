@@ -250,6 +250,125 @@ print_json_summary() {
   jq -r '.' "$file"
 }
 
+record_verify_failure() {
+  # Single source of truth for the verify-failure capture. Both the contracts
+  # gate and the project's verify script fail through here, so the next
+  # iteration's recovery path, the attempts counter and the VERIFY_MAX_ATTEMPTS
+  # breaker behave identically no matter which gate refused. (A second copy of
+  # this logic is exactly how wrapup_commit silently lost the post-verify gates
+  # before v0.6.6.)
+  local cmd="$1" label="$2" exit_code="$3" log="$4"
+
+  local prior_attempts=0
+  # A zero-byte artifact (crashed earlier writer) makes `jq -r` emit nothing
+  # with exit 0, so prior_attempts became "" and the arithmetic below aborted
+  # the whole capture under set -e — permanently re-poisoning the file and
+  # defeating the VERIFY_MAX_ATTEMPTS breaker (foundry-orchestrator run 49,
+  # 2026-08-08). Purge empty files and sanitize the read to digits.
+  if [[ -f "$ARTIFACTS_DIR/phase-verify-failed.json" && ! -s "$ARTIFACTS_DIR/phase-verify-failed.json" ]]; then
+    rm -f "$ARTIFACTS_DIR/phase-verify-failed.json"
+  fi
+  if [[ -f "$ARTIFACTS_DIR/phase-verify-failed.json" ]]; then
+    prior_attempts="$(jq -r '.attempts // 0' "$ARTIFACTS_DIR/phase-verify-failed.json" 2>/dev/null || echo 0)"
+  fi
+  [[ "$prior_attempts" =~ ^[0-9]+$ ]] || prior_attempts=0
+  local attempts=$((prior_attempts + 1))
+  local tail_output
+  tail_output="$(tail -n 200 "$log")"
+  if ! jq -n \
+    --arg cmd "$cmd" \
+    --arg label "$label" \
+    --argjson exit_code "$exit_code" \
+    --argjson attempts "$attempts" \
+    --arg log "$tail_output" \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{
+      verify_failed: true,
+      command: $cmd,
+      label: $label,
+      exit_code: $exit_code,
+      attempts: $attempts,
+      log_tail: $log,
+      ts: $ts
+    }' > "$ARTIFACTS_DIR/phase-verify-failed.json" 2>/dev/null; then
+    # jq can choke on pathological log bytes; never leave a zero-byte
+    # artifact behind — write a minimal valid capture instead.
+    printf '{"verify_failed": true, "label": "%s", "exit_code": %s, "attempts": %s, "log_tail": "(unavailable: capture failed)", "ts": "%s"}\n' \
+      "$label" "$exit_code" "$attempts" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      > "$ARTIFACTS_DIR/phase-verify-failed.json"
+  fi
+
+  echo "  Verify FAILED (attempt $attempts/$VERIFY_MAX_ATTEMPTS); see artifacts/phase-verify-failed.json" >&2
+  echo "----- last 50 lines of verify output -----" >&2
+  tail -n 50 "$log" >&2
+  echo "------------------------------------------" >&2
+
+  if [[ "$attempts" -ge "$VERIFY_MAX_ATTEMPTS" ]]; then
+    echo "  Reached VERIFY_MAX_ATTEMPTS=$VERIFY_MAX_ATTEMPTS — writing phase-blocked.json and stopping." >&2
+    jq -n \
+      --arg cmd "$cmd" \
+      --argjson attempts "$attempts" \
+      '{
+        blocked: true,
+        reason: "pre-commit verify failed repeatedly",
+        command: $cmd,
+        attempts: $attempts,
+        next_step: "fix the failing verify or set VERIFY_SKIP=1 for this iteration"
+      }' > "$ARTIFACTS_DIR/phase-blocked.json"
+  fi
+}
+
+run_contracts_gate() {
+  # Cross-project contracts (v0.7.0). Refuses the commit when this repo's OWN
+  # contracts.yaml declares a dependency whose contract is unobtainable, or
+  # whose vendored copy has drifted from the provider's authoritative one.
+  #
+  # Three deliberate properties:
+  #
+  # 1. INERT without a declaration. A repo with no contracts.yaml never reaches
+  #    the checker's failure paths, so phasekit keeps working with no
+  #    orchestrator at all — a public `curl | bash` tool cannot make Foundry a
+  #    prerequisite (docs/META_SPEC.md).
+  # 2. Runs BEFORE the VERIFY_SKIP bypass. VERIFY_SKIP is the per-iteration
+  #    hatch for red TDD commits and docs-only phases, and a builder sets it
+  #    routinely; letting it also switch off contract authenticity would neuter
+  #    the gate exactly when a red gate is applying the pressure to cheat.
+  #    PHASEKIT_CONTRACTS_SKIP=1 is the separate, loud, operator-only hatch.
+  # 3. Lives HERE, in a phasekit-owned script, not only in the project-owned
+  #    scripts/phasekit-verify.sh. A repo that can edit away the check that
+  #    polices it is not policed. Same principle as the secret-lint allowlist
+  #    living on the operator side of the deploy boundary.
+  local checker="$ROOT_DIR/scripts/phasekit-contracts.py"
+  [[ -f "$ROOT_DIR/contracts.yaml" ]] || return 0
+
+  if [[ "${PHASEKIT_CONTRACTS_SKIP:-}" == "1" ]]; then
+    echo "PHASEKIT_CONTRACTS_SKIP=1 — bypassing the cross-project contracts gate (contracts.yaml IS present)." >&2
+    return 0
+  fi
+
+  if [[ ! -f "$checker" ]]; then
+    # contracts.yaml present but the checker absent means a stale vendored
+    # scripts/ directory. Say so instead of silently passing: a declaration
+    # nobody checks is the failure this whole release exists to prevent.
+    echo "WARN: contracts.yaml is present but scripts/phasekit-contracts.py is missing — run 'phasekit upgrade'. Contract drift is NOT being checked." >&2
+    return 0
+  fi
+
+  echo "Pre-commit verify: cross-project contracts (contracts.yaml)"
+  local log
+  log="$(mktemp)"
+  local status=0
+  python3 "$checker" --repo "$ROOT_DIR" check >"$log" 2>&1 || status=$?
+  if [[ "$status" -eq 0 ]]; then
+    cat "$log"
+    rm -f "$log"
+    return 0
+  fi
+  record_verify_failure "python3 scripts/phasekit-contracts.py check" "contracts" "$status" "$log"
+  rm -f "$log"
+  return 1
+}
+
 run_verify_gate() {
   # Pre-commit verification gate. Runs project-defined fast checks (lint,
   # typecheck, unit tests) before any phase commit, regardless of AUTO_PUSH.
@@ -264,6 +383,12 @@ run_verify_gate() {
   # the commit; the loop continues so the next iteration can see the artifact
   # and fix the failure before doing new work.
   #
+  # Cross-project contracts run first and are NOT covered by VERIFY_SKIP —
+  # see run_contracts_gate for why. Inert unless this repo declares.
+  if ! run_contracts_gate; then
+    return 1
+  fi
+
   # Escape hatch: VERIFY_SKIP=1 bypasses the gate entirely (sparingly — e.g.
   # docs-only phases or TDD phases that intentionally commit a red test).
   if [[ "${VERIFY_SKIP:-}" == "1" ]]; then
@@ -329,65 +454,8 @@ run_verify_gate() {
   fi
 
   # Failure path. Capture context so the next iteration can diagnose.
-  local exit_code="$verify_status"
-  local prior_attempts=0
-  # A zero-byte artifact (crashed earlier writer) makes `jq -r` emit nothing
-  # with exit 0, so prior_attempts became "" and the arithmetic below aborted
-  # the whole capture under set -e — permanently re-poisoning the file and
-  # defeating the VERIFY_MAX_ATTEMPTS breaker (foundry-orchestrator run 49,
-  # 2026-08-08). Purge empty files and sanitize the read to digits.
-  if [[ -f "$ARTIFACTS_DIR/phase-verify-failed.json" && ! -s "$ARTIFACTS_DIR/phase-verify-failed.json" ]]; then
-    rm -f "$ARTIFACTS_DIR/phase-verify-failed.json"
-  fi
-  if [[ -f "$ARTIFACTS_DIR/phase-verify-failed.json" ]]; then
-    prior_attempts="$(jq -r '.attempts // 0' "$ARTIFACTS_DIR/phase-verify-failed.json" 2>/dev/null || echo 0)"
-  fi
-  [[ "$prior_attempts" =~ ^[0-9]+$ ]] || prior_attempts=0
-  local attempts=$((prior_attempts + 1))
-  local tail_output
-  tail_output="$(tail -n 200 "$log")"
-  if ! jq -n \
-    --arg cmd "$cmd" \
-    --arg label "$label" \
-    --argjson exit_code "$exit_code" \
-    --argjson attempts "$attempts" \
-    --arg log "$tail_output" \
-    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{
-      verify_failed: true,
-      command: $cmd,
-      label: $label,
-      exit_code: $exit_code,
-      attempts: $attempts,
-      log_tail: $log,
-      ts: $ts
-    }' > "$ARTIFACTS_DIR/phase-verify-failed.json" 2>/dev/null; then
-    # jq can choke on pathological log bytes; never leave a zero-byte
-    # artifact behind — write a minimal valid capture instead.
-    printf '{"verify_failed": true, "label": "%s", "exit_code": %s, "attempts": %s, "log_tail": "(unavailable: capture failed)", "ts": "%s"}\n' \
-      "$label" "$exit_code" "$attempts" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      > "$ARTIFACTS_DIR/phase-verify-failed.json"
-  fi
-
-  echo "  Verify FAILED (attempt $attempts/$VERIFY_MAX_ATTEMPTS); see artifacts/phase-verify-failed.json" >&2
-  echo "----- last 50 lines of verify output -----" >&2
-  tail -n 50 "$log" >&2
-  echo "------------------------------------------" >&2
+  record_verify_failure "$cmd" "$label" "$verify_status" "$log"
   rm -f "$log"
-
-  if [[ "$attempts" -ge "$VERIFY_MAX_ATTEMPTS" ]]; then
-    echo "  Reached VERIFY_MAX_ATTEMPTS=$VERIFY_MAX_ATTEMPTS — writing phase-blocked.json and stopping." >&2
-    jq -n \
-      --arg cmd "$cmd" \
-      --argjson attempts "$attempts" \
-      '{
-        blocked: true,
-        reason: "pre-commit verify failed repeatedly",
-        command: $cmd,
-        attempts: $attempts,
-        next_step: "fix the failing verify or set VERIFY_SKIP=1 for this iteration"
-      }' > "$ARTIFACTS_DIR/phase-blocked.json"
-  fi
   return 1
 }
 

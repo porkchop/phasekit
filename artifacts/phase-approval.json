@@ -1,38 +1,38 @@
 {
-  "phase": "v0.7.0-phase-2-mount-plumbing",
+  "phase": "v0.7.0-phase-3-the-gate",
   "approved": true,
-  "summary": "Cross-project contracts, phase 2: the provider mount. container-setup.sh gained PHASEKIT_CONTRACTS_MOUNT — a host path bind-mounted read-only at the fixed container path /contracts, with PHASEKIT_CONTRACTS_DIR set alongside it so in-container tooling learns where it landed. phasekit-contracts.py gained load_provider_index() and a `provider` subcommand that read the mount's index.json. The zero-entry manifest is honoured as a POSITIVE statement ('I checked; there are none') and is observably distinct from an empty directory, which is indistinguishable from a broken bind mount. Unset PHASEKIT_CONTRACTS_MOUNT remains a strict no-op; set-but-unusable (not a directory, or no readable index.json) is a hard error before the container starts.",
-  "decision_memo": "foundry-meta/KICKOFF-phasekit-v070-contracts.md phase 2; conventions per DESIGN-cross-project-contracts.md 'the mount is always present, and empty is a positive statement'",
-  "suggested_commit_message": "v0.7.0 phase 2: read-only /contracts mount + provider index",
+  "summary": "Cross-project contracts, phase 3: the gate bites. `phasekit-contracts.py check` refuses when a declared contract is unobtainable (exit 3 — no provider, or the provider does not offer it) and when the vendored copy has drifted from the mounted one (exit 4 — byte-exact tree comparison over sha256 digests). `refresh` is the one command that fixes drift, and every drift message names it verbatim. run-until-done.sh calls the gate from inside run_verify_gate, before the VERIFY_SKIP bypass, and both gates now share one record_verify_failure() writer so the artifact, the attempts counter and the VERIFY_MAX_ATTEMPTS breaker behave identically whichever gate refused.",
+  "decision_memo": "foundry-meta/KICKOFF-phasekit-v070-contracts.md phase 3; enforcement per DESIGN-cross-project-contracts.md fork C and the 'Amended 2026-08-16 (later)' lockfile pattern",
+  "suggested_commit_message": "v0.7.0 phase 3: the contracts gate — vendored == mounted, or refuse",
   "reviewer_notes": [
-    "Acceptance 'with none, the container starts exactly as today' is tested functionally, not by grep: the real container-setup.sh runs against a stub `docker` on PATH, the composed `docker run` argv is captured with and without a provider, and the difference is asserted to be EXACTLY the two contracts arguments — nothing added, nothing dropped, nothing reordered. A structural pin would have passed for a script that also perturbed an unrelated flag.",
-    "Set-but-unusable fails loudly rather than being silently dropped. A provider passing a path the consumer quietly ignores is precisely META_REPO_PATH — an export with no consumer, unnoticed for months — and reproducing it inside the feature built to prevent it would be the worst possible outcome.",
-    "Deliberate strictness asymmetry, documented in the code: contracts.yaml is phasekit's own format so unknown keys are hard errors (typos must not be no-ops), while index.json crosses a repo boundary and is versioned by a separate producer, so additive fields are tolerated and the two sides can ship independently.",
-    "The container-side path '/contracts' is necessarily written in both bash and Python. There is no cheap way to share a constant across that boundary, so the invariant is enforced by an assertion (the bash literal must equal DEFAULT_MOUNT_DIR, and must be defined exactly once) rather than left to intention.",
-    "Nothing refuses yet — a repo that declares dependencies still builds. That lands in phase 3."
+    "The gate lives in a phasekit-owned script invoked by the loop, NOT only in the project-owned scripts/phasekit-verify.sh. A repo that can edit away the check that polices it is not policed — the same principle that puts the secret-lint allowlist on the operator side of the deploy boundary.",
+    "Scoping decision: the contracts gate runs BEFORE the VERIFY_SKIP bypass. VERIFY_SKIP is the routine per-iteration hatch for red TDD commits and docs-only phases; if it also switched off contract authenticity, the gate would be off exactly when a red gate is applying the pressure to cheat. PHASEKIT_CONTRACTS_SKIP=1 is a separate, loud, operator-only hatch. Both halves are proven end-to-end against the real loop, not just grepped.",
+    "Distinct exit codes because the two failures need different human actions: DRIFT (4) is fixed by one command in this repo; UNOBTAINABLE (3) is fixed somewhere else entirely (the provider, or the project registry). Collapsing them would send people to the wrong place.",
+    "Refusal messages state the boundary rather than leaving it to be discovered: they name PHASEKIT_CONTRACTS_DIR for standalone use and say explicitly that the ordinary test suite does NOT need a provider. The 'the command named by the failure message is the one that works' test parses the command out of the message and runs it, so the two cannot drift apart.",
+    "Comparison recipe is content-only (sha256 over bytes, recursive): mtimes, ownership and directory order are ignored because a bind mount and a git checkout will never agree on those, and a pin that fires on them is noise that teaches people to bypass the gate. Non-regular files are a hard error rather than a skip — a skipped symlink is a hole an inauthentic copy could hide in.",
+    "refresh replaces rather than merges, so a file the producer deleted disappears here too; otherwise the vendored copy slowly becomes a superset nobody notices. It stays manual by design — auto-refresh at dispatch would dirty the tree and trip clean-tree guards.",
+    "contracts.yaml present but the checker missing (a stale vendored scripts/ dir) WARNs loudly rather than passing quietly: a declaration nobody checks is the failure this release exists to prevent.",
+    "The kickoff's ownership trap is now pinned by test: contracts.yaml is registered nowhere, and a real enrich-then-upgrade cycle is asserted to leave the file byte-identical while still installing the checker that reads it."
   ],
   "deferred_items": [
     {
-      "tag": "phase 3",
-      "description": "The gate: vendored == mounted equality pin, refusal when the repo declares dependencies and no provider is present, and a one-command refresh named by exact command in the failure message."
-    },
-    {
       "tag": "phase 4",
-      "description": "Session-prompt awareness, stack-profile seeding, docs (CONTRACTS.md, CONTAINERIZATION, QUALITY_GATES, README), tag and push v0.7.0."
+      "description": "Session-prompt awareness (a mount nobody is told about goes unread), stack-profile seeding of the consumer check, docs/CONTRACTS.md + CONTAINERIZATION + QUALITY_GATES + README, capability registration review, tag and push v0.7.0."
     }
   ],
   "verification": {
     "self_check_passes_on_master": true,
     "tracked_files_classified": 112,
-    "test_count": 195,
-    "new_tests": 24,
+    "test_count": 232,
+    "new_tests": 37,
     "test_status": "all green",
     "commands_run": [
-      "python3 -m unittest tests.test_contracts_mount_v070  -> 24 tests OK",
-      "python3 -m unittest discover -s tests -p 'test_*.py'  -> 195 tests OK",
-      "python3 scripts/enrich-project.py --self-check  -> 112 tracked files, 0 unclassified, 0 double-classified",
-      "bash -n scripts/container-setup.sh  -> clean"
+      "python3 -m unittest tests.test_contracts_gate_v070  -> 37 tests OK",
+      "python3 -m unittest discover -s tests -p 'test_*.py'  -> 232 tests OK",
+      "python3 scripts/enrich-project.py --self-check  -> 0 unclassified, 0 double-classified",
+      "bash -n scripts/run-until-done.sh  -> clean",
+      "manual smoke: drift / no-provider / refresh-then-pass messages read correctly in a scratch consumer repo"
     ],
-    "acceptance_criteria_met": "with a provider, /contracts is bind-mounted read-only and its index.json is read and honoured (including the zero-entry case); with none, the composed docker argv is byte-identical to v0.6.6"
+    "acceptance_criteria_met": "a deliberately edited vendored copy fails the gate; a deliberately stale one fails with the exact refresh command in the message; a repo declaring nothing is entirely unaffected (the loop never even mentions contracts)"
   }
 }
