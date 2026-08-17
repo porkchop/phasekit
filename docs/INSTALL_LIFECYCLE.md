@@ -65,6 +65,17 @@ The manifest records:
   - `installed_at` (UTC)
   - For `bootstrap-with-template-tracking`: `rendered_from` and `template_sha`
 
+## `--upgrade` commits its own work
+
+An upgrade commits the files it wrote, with the message `chore(scaffold): phasekit upgrade vX.Y.Z -> vA.B.C`, and pushes when the branch has an upstream. Opt out with `--no-commit`.
+
+It leaves the tree clean because a dirty tree after an upgrade caused two distinct failures in one day:
+
+- **Idle projects self-deadlocked.** The upgrade dirtied the tree and the orchestrator's on-ramp refuses a dirty tree, so a project that gets no sessions could never absorb its own upgrade: dirty tree → no session → still dirty. Three projects on the v0.7.1 rollout had to be fixed by hand.
+- **Active projects filed false scaffold-drift signals.** Sessions that absorbed the upgrade committed scaffold-class files, tripping scope containment four times.
+
+**Only the paths the upgrade wrote are committed.** It uses `git commit --only` on exactly those paths, so anything you already had staged or modified stays exactly where it was — an upgrade must never hand your in-flight work a commit message about the scaffold. Everything about the commit and push is non-fatal: no git identity, no remote, no upstream, or a rejected push each print a note and leave the installed files in place.
+
 ## What to commit (and what to gitignore)
 
 Phasekit installs files and produces runtime artifacts. Most of what it installs is project-shared (commit it); a few specific paths are runtime-only or per-user (gitignore them).

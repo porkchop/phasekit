@@ -1111,7 +1111,7 @@ def _interactive_resolve(plans, target):
 def cmd_upgrade(target_dir, profile=None, dry_run=False, yes=False, no_lock=False,
                 interactive=False,
                 keep_local=(), take_new=(), adopt=(), rename_local=(),
-                accept_removal=()):
+                accept_removal=(), commit=True):
     """Upgrade a downstream project: re-evaluate scaffold-owned files and
     apply changes after a plan-then-confirm cycle.
 
@@ -1180,8 +1180,98 @@ def cmd_upgrade(target_dir, profile=None, dry_run=False, yes=False, no_lock=Fals
             print("Aborted.", file=sys.stderr)
             return 1
 
+    old_version = existing.get("scaffold_version") or "unknown"
+
     with target_lock(target, no_lock=no_lock):
-        return apply_upgrade_plan(target, scaffold_manifest, plans, profile)
+        rc = apply_upgrade_plan(target, scaffold_manifest, plans, profile)
+    if rc != 0:
+        return rc
+
+    if commit:
+        commit_upgrade(target, plans, old_version)
+    return 0
+
+
+UPGRADE_COMMIT_PREFIX = "chore(scaffold): phasekit upgrade"
+
+
+def commit_upgrade(target, plans, old_version):
+    """Commit (and try to push) the files this upgrade wrote.
+
+    Leaving the tree dirty caused two distinct failures in one day:
+
+    1. IDLE PROJECTS SELF-DEADLOCK. The upgrade dirties the tree, and the
+       orchestrator's on-ramp refuses a dirty tree — so a project that gets no
+       sessions can never absorb its own upgrade: dirty tree -> no session ->
+       still dirty. Hit three projects on the v0.7.1 rollout.
+    2. ACTIVE PROJECTS FILE FALSE DRIFT SIGNALS. The projects whose sessions
+       did absorb it committed scaffold-class files, tripping scope
+       containment four times (operator tasks #130-133).
+
+    Only the paths THIS upgrade touched are staged. Sweeping in whatever else
+    happened to be dirty would hand a project's in-flight work a commit message
+    about the scaffold, which is worse than the problem being fixed.
+
+    Every failure here is non-fatal: the upgrade itself already succeeded on
+    disk, and a repo with no git identity, no remote, or a rejected push must
+    not turn that into an error.
+    """
+    if not (target / ".git").exists():
+        return
+
+    new_version, _ = get_scaffold_version()
+    touched = {".scaffold/manifest.json", ".claude/settings.json"}
+    for p in plans:
+        if p["action"] in (ACTION_INSTALL, ACTION_TAKE_NEW, ACTION_DELETE,
+                           ACTION_RENAME_LOCAL):
+            touched.add(p["path"])
+        if p["action"] == ACTION_RENAME_LOCAL and p.get("rename_target"):
+            touched.add(p["rename_target"])
+
+    def git(*args, check=False):
+        return subprocess.run(["git", "-C", str(target), *args],
+                              capture_output=True, text=True, check=check)
+
+    # Stage what we touched (`--all` on the pathspec so a deletion is recorded
+    # too, and a path the plan removed does not error).
+    for path in sorted(touched):
+        git("add", "--all", "--", path)
+
+    # Which of them actually differ from HEAD. An idempotent re-upgrade reaches
+    # here with nothing to say and must not make an empty commit.
+    changed = [p for p in git("diff", "--cached", "--name-only").stdout.split()
+               if p in touched]
+    if not changed:
+        return
+
+    message = f"{UPGRADE_COMMIT_PREFIX} {old_version} -> {new_version}"
+    # `--only <paths>` is load-bearing, not a flourish. A plain `git commit`
+    # commits the WHOLE index, so anything the project had already staged when
+    # the upgrade ran would be swept into a commit whose message says
+    # "phasekit upgrade" — handing someone's in-flight work the wrong story,
+    # which is worse than the dirty tree this feature exists to fix.
+    # `--only` commits exactly these paths and leaves the rest of the index
+    # staged and uncommitted.
+    r = git("commit", "--only", "-m", message, "--", *changed)
+    if r.returncode != 0:
+        detail = (r.stderr.strip().splitlines() or [""])[-1]
+        print(f"  note: could not commit the upgrade ({detail}); "
+              f"the files are installed but the tree is left dirty.", file=sys.stderr)
+        return
+    print(f"  commit: {message}")
+
+    # Push only when there is somewhere to push to. A project with no remote or
+    # no upstream is a normal standalone case, not a failure.
+    if not git("remote").stdout.strip():
+        return
+    if git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}").returncode != 0:
+        print("  note: no upstream branch — commit is local.", file=sys.stderr)
+        return
+    r = git("push")
+    if r.returncode == 0:
+        print("  push: ok")
+    else:
+        print("  note: push failed; the upgrade commit is local.", file=sys.stderr)
 
 
 # === --uninstall (M9 §5) ===================================================
@@ -2153,6 +2243,10 @@ def main():
                         help="Migrate the manifest's schema_version forward without other side effects")
     parser.add_argument("--upgrade", action="store_true",
                         help="Plan-then-confirm upgrade of a downstream project against the current scaffold")
+    parser.add_argument("--no-commit", action="store_true",
+                        help="--upgrade: install the files but do not commit or push them "
+                             "(default is to commit the upgrade's own work, so an idle "
+                             "project is not left with a dirty tree it can never absorb)")
     parser.add_argument("--uninstall", action="store_true",
                         help="Remove scaffold-owned files (scaffold class). Use --include-once to also remove bootstrap-* files.")
     parser.add_argument("--include-once", dest="include_once", action="store_true",
@@ -2242,6 +2336,7 @@ def main():
             adopt=args.adopt,
             rename_local=args.rename_local,
             accept_removal=args.accept_removal,
+            commit=not args.no_commit,
         ))
 
     # Default: enrich

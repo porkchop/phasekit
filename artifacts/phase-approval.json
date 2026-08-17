@@ -1,31 +1,32 @@
 {
-  "phase": "session-lifetime-phase-2-no-verdict-retry",
+  "phase": "session-lifetime-phase-3-upgrade-commits",
   "approved": true,
-  "summary": "The loop-side backstop. When a session returns 0, wrote no verdict this iteration, and left changes in the tree, the loop now re-invokes it once asking for a verdict before falling through to its existing exit 1. Gated on a dirty tree and on no pending commit retry, bounded to one attempt per iteration, and it shares has_verdict_artifact() with the Stop hook's exported vocabulary so the two cannot disagree about what an ending is.",
-  "decision_memo": "foundry-meta/KICKOFF-phasekit-session-lifetime.md item 2",
-  "suggested_commit_message": "session lifetime: one retry when a session leaves work unclaimed",
+  "summary": "`phasekit upgrade` now commits the files it wrote (chore(scaffold): phasekit upgrade vX.Y.Z -> vA.B.C) and pushes when the branch has an upstream, leaving the tree clean. Opt out with --no-commit. Only the paths the upgrade touched are committed, via `git commit --only`, so a project's in-flight work is never swept into a scaffold commit. Every git failure is non-fatal.",
+  "decision_memo": "foundry-meta/KICKOFF-phasekit-session-lifetime.md item 3 (Aaron's call, deliberately simple)",
+  "suggested_commit_message": "session lifetime: phasekit upgrade commits and pushes its own work",
   "reviewer_notes": [
-    "Deliberately a backstop, not the primary fix. It fires after the process died, so anything backgrounded is already gone — which is why the retry PROMPT says so explicitly and tells the session not to wait for or restart it. The hook prevents the loss; this handles what the hook cannot see (crash, external kill, missing or failing hook). The kickoff asked for the retry to be proven with the hook absent, and the loop harness is exactly that: a stub run-phase.sh with no claude and no hooks.",
-    "The first gate was too broad and two existing regression tests caught it — v0.6.0's verify-retry and v0.6.3's stranded-approval. Both set PENDING_COMMIT_RETRY, which is a dirty tree the loop ALREADY resolves at this same boundary by committing the approval under its own phase's message. Prodding there spends a turn asking for a verdict that exists. Added `[[ -z \"$PENDING_COMMIT_RETRY\" ]]` and a dedicated pin so the narrowing is deliberate rather than incidental.",
-    "The retry prompt leads with phase-update.json and says why (commits the work AND the loop continues). That was the move available to all three failed sessions in the incident and none of them took it.",
-    "Verified it does NOT fire on a clean tree with no artifact: a legitimately empty iteration has nothing to claim, and nudging it would only burn a turn."
+    "REAL BUG CAUGHT BY A TEST I WROTE FOR THE SHARP EDGE. The first implementation staged the touched paths then ran a plain `git commit`, which commits the WHOLE index — so a change the project had already staged when the upgrade ran was swept into a commit whose message says 'phasekit upgrade'. That is worse than the dirty tree being fixed: it gives someone's in-flight work the wrong story and hides it in a scaffold commit. Fixed with `git commit --only -- <paths>`, which commits exactly those paths and leaves the rest of the index staged.",
+    "Test-side over-assertion corrected honestly rather than by weakening the feature: .scaffold/manifest.json is only committed WHEN IT CHANGES. A re-upgrade at the same scaffold version regenerates a byte-identical manifest, and committing that would be exactly the empty-commit churn the idempotence test forbids. The test now drops the manifest from the index first so the assertion means something.",
+    "Push is attempted only when a remote AND an upstream exist. A standalone project with neither is the normal public case, not a failure — it prints a note and keeps the commit local.",
+    "Non-fatal throughout, including no git identity: the files are already installed on disk by the time the commit is attempted, so turning a git-config problem into an upgrade failure would be strictly worse. Pinned by a test that unsets user.email/user.name and asserts the upgrade still exits 0 with the file present.",
+    "Documented in docs/INSTALL_LIFECYCLE.md with both failure modes that motivated it, so the next person does not read this as gratuitous git automation."
   ],
   "deferred_items": [
-    {"tag": "phase 3", "description": "phasekit upgrade commits and pushes its own work (kickoff item 3)."},
-    {"tag": "phase 4", "description": "Mutation-testing protocol as an opt-in capability profile (kickoff item 4), docs, release."}
+    {"tag": "phase 4", "description": "Mutation-testing protocol as an opt-in capability profile (kickoff item 4), docs, release."},
+    {"tag": "orchestrator (operator queue, not this release)", "description": "The scaffold-drift signal should recognise a phasekit upgrade commit rather than filing #130-133-style noise. Pairs with this item."}
   ],
   "verification": {
     "self_check_passes_on_master": true,
-    "tracked_files_classified": 120,
-    "test_count": 309,
-    "new_tests": 15,
+    "tracked_files_classified": 121,
+    "test_count": 324,
+    "new_tests": 14,
     "test_status": "all green",
     "commands_run": [
-      "python3 -m unittest tests.test_no_verdict_retry  -> 15 tests OK",
-      "python3 -m unittest discover -s tests -p 'test_*.py'  -> 309 tests OK",
-      "python3 scripts/enrich-project.py --self-check  -> 120 tracked files, 0 unclassified",
-      "bash -n scripts/run-until-done.sh  -> clean"
+      "python3 -m unittest tests.test_upgrade_commits  -> 14 tests OK",
+      "python3 -m unittest discover -s tests -p 'test_*.py'  -> 324 tests OK",
+      "python3 scripts/enrich-project.py --self-check  -> 121 tracked files, 0 unclassified",
+      "manual: upgrade with an unrelated untracked file present committed only the scaffold path and left the file alone"
     ],
-    "acceptance_criteria_met": "the incident replays as a fixture: a session writing no artifact and leaving a dirty tree is re-invoked once, can rescue the iteration by writing phase-update.json, and still falls through to the existing exit 1 if it stays silent"
+    "acceptance_criteria_met": "the tree is clean after an upgrade (breaking the idle-project deadlock), the commit uses the established message convention, unrelated staged/modified/untracked work is never included, and a second upgrade makes no empty commit"
   }
 }
