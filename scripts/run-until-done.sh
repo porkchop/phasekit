@@ -704,6 +704,19 @@ artifact_written_this_iteration() {
   [[ -f "$1" && "$1" -nt "$ITER_START_MARKER" ]]
 }
 
+has_verdict_artifact() {
+  # Did THIS iteration produce a verdict? Asked by the no-verdict retry
+  # backstop, and by the Stop hook via the exported vocabulary — one list, one
+  # freshness rule, so the two can never disagree about what an ending is.
+  local name
+  for name in "${VERDICT_ARTIFACTS[@]}"; do
+    if artifact_written_this_iteration "$ARTIFACTS_DIR/$name"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 write_session_handoff() {
   # Handoff baton (v0.6.1): composed by the loop from what it already knows —
   # never by invoking claude again (zero extra tokens). Written on every
@@ -1031,6 +1044,7 @@ else
 fi
 
 light_review_done=0
+verdict_retry_used=0
 
 # Phase-commit atomicity marker: touched immediately before each claude
 # invocation; only artifacts newer than it may drive a commit. PENDING_COMMIT_RETRY
@@ -1179,6 +1193,8 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   fi
 
   echo "=== Iteration $iteration ==="
+  # One verdict retry per iteration (see the backstop below).
+  verdict_retry_used=0
   cleanup_artifacts
   touch "$ITER_START_MARKER"
 
@@ -1202,6 +1218,60 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
     exit "$rc"
   fi
   retries_used=0
+
+  # --- No-verdict retry backstop -------------------------------------------
+  # The session returned 0 but wrote no verdict, AND left changes in the tree.
+  # That combination is unambiguous: work happened and nothing claimed it. Give
+  # the session exactly ONE re-invocation to name a verdict before the loop
+  # falls through to its existing `exit 1`.
+  #
+  # This is a BACKSTOP, not the primary fix. It fires after the process has
+  # already died, so anything the session had backgrounded is gone by now — the
+  # Stop hook catches the same condition while that work is still alive. Both
+  # are wanted: the hook prevents the loss, this handles what the hook cannot
+  # see (a crash, an external kill, a missing or failing hook).
+  #
+  # Bounded to one attempt per iteration, and gated twice so it only fires on
+  # a state the loop genuinely cannot explain:
+  #   - a dirty tree, so a legitimately-empty iteration is never re-prodded;
+  #   - no PENDING_COMMIT_RETRY, because a pending approval retry is a dirty
+  #     tree the loop ALREADY knows what to do with (the stranded-approval and
+  #     verify-retry paths commit it under its own phase's message at this same
+  #     boundary). Prodding there would spend a turn asking for a verdict that
+  #     already exists — caught by the v0.6.0/v0.6.3 regression tests.
+  if [[ "$verdict_retry_used" -eq 0 ]] \
+     && [[ -z "$PENDING_COMMIT_RETRY" ]] \
+     && ! has_verdict_artifact \
+     && [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+    verdict_retry_used=1
+    echo "No verdict artifact and the tree is dirty — asking once for a verdict before giving up." >&2
+    verdict_prompt="$(mktemp)"
+    cat > "$verdict_prompt" <<'VERDICT_RETRY_EOF'
+Your previous turn ended without writing a verdict artifact, and this working
+tree has uncommitted changes. The loop cannot commit work that nothing claims,
+so that work is currently stranded.
+
+Note: anything you had running in the background is already dead — the process
+exited when your last turn ended. Do not wait for it and do not restart it now.
+
+Decide what the work in the tree is, and write exactly one artifact:
+
+- artifacts/phase-update.json — you made real progress but the phase is not
+  finished. This commits the work and the loop continues. Almost always right.
+- artifacts/phase-approval.json — the phase is genuinely complete.
+- artifacts/phase-blocked.json — you cannot proceed without external input.
+- artifacts/project-complete.json — the whole project is done.
+
+Inspect the tree first (git status, git diff), then write the artifact. Do not
+start new work and do not run git commit — the wrapper owns commits.
+VERDICT_RETRY_EOF
+    vrc=0
+    run_once "$verdict_prompt" "continue" "$iteration" 0 || vrc=$?
+    rm -f "$verdict_prompt"
+    if [[ "$vrc" -ne 0 ]]; then
+      echo "  Verdict request exited $vrc — continuing to the loop's own handling." >&2
+    fi
+  fi
 
   if [[ -f "$ARTIFACTS_DIR/project-complete.json" ]]; then
     echo "Project complete artifact detected:"

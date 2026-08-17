@@ -1,36 +1,31 @@
 {
-  "phase": "session-lifetime-phase-1-stop-hook",
+  "phase": "session-lifetime-phase-2-no-verdict-retry",
   "approved": true,
-  "summary": "The Stop hook. .claude/hooks/require-verdict.sh blocks a session that tries to end an autonomous iteration without a verdict artifact, and every block hands the agent state-changing moves rather than just a refusal. Bounded at 2 blocks per iteration via a counter cleanup_artifacts clears; inert outside the loop and on the happy path; never satisfied by an artifact left from an earlier iteration. The verdict vocabulary is defined once in run-until-done.sh and exported, so the hook and the dispatcher cannot disagree about what an ending is. Also ships item 5 (prompt guidance) and — beyond the literal kickoff — an additive hook-registration sync in enrich-project.py without which the hook would never fire in any existing project.",
-  "decision_memo": "foundry-meta/KICKOFF-phasekit-session-lifetime.md items 1 and 5",
-  "suggested_commit_message": "session lifetime: Stop hook — a session may not end without a verdict",
+  "summary": "The loop-side backstop. When a session returns 0, wrote no verdict this iteration, and left changes in the tree, the loop now re-invokes it once asking for a verdict before falling through to its existing exit 1. Gated on a dirty tree and on no pending commit retry, bounded to one attempt per iteration, and it shares has_verdict_artifact() with the Stop hook's exported vocabulary so the two cannot disagree about what an ending is.",
+  "decision_memo": "foundry-meta/KICKOFF-phasekit-session-lifetime.md item 2",
+  "suggested_commit_message": "session lifetime: one retry when a session leaves work unclaimed",
   "reviewer_notes": [
-    "Audit first: no Stop hook existed; PreToolUse (deny-dangerous-commands) and SessionStart (compact-reanchor) are the established patterns and this follows them.",
-    "The vocabulary is exported by the loop (PHASEKIT_VERDICT_ARTIFACTS) rather than restated in the hook, and a test asserts the hook does NOT contain the artifact names. Kickoff said to enumerate from the loop; exporting is how that becomes structural instead of a convention.",
-    "Freshness uses the loop's existing ITER_START_MARKER, exported as PHASEKIT_ITER_MARKER, so the hook answers 'written this iteration?' with the same mechanism as artifact_written_this_iteration(). No second mechanism was invented.",
-    "Inert outside the loop is a deliberate fourth property beyond the kickoff's three: the hook needs all three PHASEKIT_* vars to have any opinion, so an interactive `claude` session can never be blocked. Blocking one would violate phasekit's standing rule that ordinary direct work must not be made cumbersome.",
-    "Fail-open everywhere except the deliberate block, including an unwritable artifacts dir: cannot count means cannot bound, which means it must not block.",
-    "ADDITION BEYOND THE KICKOFF, flagged for Aaron. The kickoff assumed registering the file in capabilities was enough. It is not: .claude/settings.json is bootstrap-with-template-tracking (write-once), so an upgrade installs the hook FILE and never the Stop REGISTRATION. Verified empirically before writing any code — a project enriched pre-release then upgraded had the script on disk and no Stop entry. Shipping that way would have delivered a believed no-op to all 8 fleet projects, including the one the incident happened in. sync_hook_registrations() closes it: additive only, driven by the settings template (already the single source of truth for the wiring), idempotent, never touching permissions/env/project-owned hooks."
+    "Deliberately a backstop, not the primary fix. It fires after the process died, so anything backgrounded is already gone — which is why the retry PROMPT says so explicitly and tells the session not to wait for or restart it. The hook prevents the loss; this handles what the hook cannot see (crash, external kill, missing or failing hook). The kickoff asked for the retry to be proven with the hook absent, and the loop harness is exactly that: a stub run-phase.sh with no claude and no hooks.",
+    "The first gate was too broad and two existing regression tests caught it — v0.6.0's verify-retry and v0.6.3's stranded-approval. Both set PENDING_COMMIT_RETRY, which is a dirty tree the loop ALREADY resolves at this same boundary by committing the approval under its own phase's message. Prodding there spends a turn asking for a verdict that exists. Added `[[ -z \"$PENDING_COMMIT_RETRY\" ]]` and a dedicated pin so the narrowing is deliberate rather than incidental.",
+    "The retry prompt leads with phase-update.json and says why (commits the work AND the loop continues). That was the move available to all three failed sessions in the incident and none of them took it.",
+    "Verified it does NOT fire on a clean tree with no artifact: a legitimately empty iteration has nothing to claim, and nudging it would only burn a turn."
   ],
   "deferred_items": [
-    {"tag": "phase 2", "description": "Loop retry backstop on no-artifact + dirty tree (kickoff item 2)."},
     {"tag": "phase 3", "description": "phasekit upgrade commits and pushes its own work (kickoff item 3)."},
     {"tag": "phase 4", "description": "Mutation-testing protocol as an opt-in capability profile (kickoff item 4), docs, release."}
   ],
   "verification": {
     "self_check_passes_on_master": true,
-    "tracked_files_classified": 119,
-    "test_count": 295,
-    "new_tests": 39,
+    "tracked_files_classified": 120,
+    "test_count": 309,
+    "new_tests": 15,
     "test_status": "all green",
     "commands_run": [
-      "python3 -m unittest tests.test_require_verdict_hook  -> 29 tests OK",
-      "python3 -m unittest tests.test_hook_registration_sync  -> 10 tests OK",
-      "python3 -m unittest discover -s tests -p 'test_*.py'  -> 295 tests OK",
-      "python3 scripts/enrich-project.py --self-check  -> 119 tracked files, 0 unclassified",
-      "bash -n on the hook and the loop  -> clean",
-      "empirical: fresh enrich registers Stop; a pre-release project upgraded gains both file and registration; second upgrade adds nothing"
+      "python3 -m unittest tests.test_no_verdict_retry  -> 15 tests OK",
+      "python3 -m unittest discover -s tests -p 'test_*.py'  -> 309 tests OK",
+      "python3 scripts/enrich-project.py --self-check  -> 120 tracked files, 0 unclassified",
+      "bash -n scripts/run-until-done.sh  -> clean"
     ],
-    "acceptance_criteria_met": "inert on a healthy session (zero blocks, counter never created), bounded (releases after 2), a stale artifact of every kind does not satisfy it, and the message names the three state-changing actions"
+    "acceptance_criteria_met": "the incident replays as a fixture: a session writing no artifact and leaving a dirty tree is re-invoked once, can rescue the iteration by writing phase-update.json, and still falls through to the existing exit 1 if it stays silent"
   }
 }
