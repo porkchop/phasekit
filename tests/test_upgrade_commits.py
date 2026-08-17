@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -101,8 +102,17 @@ class CommitsItsOwnWork(UpgradeFixture):
         self.assertIn(".scaffold/manifest.json", self.head_files())
 
     def test_a_second_upgrade_makes_no_empty_commit(self):
+        """DETERMINISTIC by construction, not by racing the clock. As first
+        written this passed only when both upgrades landed inside one clock
+        second: `enriched_at` was re-stamped on every manifest write, so a
+        second upgrade across a second boundary committed a timestamp-only
+        manifest change. Local runs were fast enough to pass; CI was not
+        (caught on the v0.8.0 push). The 1.1s sleep forces the boundary, so
+        this test fails against the old behavior on ANY machine — without it,
+        a fast machine proves nothing."""
         self.upgrade()
         before = self.git("rev-parse", "HEAD").stdout.strip()
+        time.sleep(1.1)
         r = self.upgrade()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), before)

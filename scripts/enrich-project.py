@@ -1623,6 +1623,32 @@ def write_downstream_manifest(target_dir, scaffold_manifest, profile, file_specs
     }
 
     manifest_path = scaffold_dir / "manifest.json"
+    # A re-run that changes nothing must write nothing new. TWO timestamp
+    # families differ between two identical enrichments — the top-level
+    # `enriched_at` and every file entry's `installed_at` — and a
+    # timestamps-only rewrite turns every no-op upgrade into a commit now that
+    # the upgrade commits its own work (v0.8.0). CI caught this as a timing
+    # flake — two upgrades inside one clock second passed, across a second
+    # boundary failed (test_a_second_upgrade_makes_no_empty_commit) — but the
+    # underlying behavior bit every real re-upgrade, which is always more than
+    # a second after the first. When the manifests agree on everything except
+    # timestamps, keep the prior file byte-for-byte: skip the write entirely.
+    # (The first fix masked only `enriched_at` and still failed — the honest
+    # comparison masks every field that exists to record "when".)
+    def _timeless(m):
+        return {
+            **m,
+            "enriched_at": None,
+            "files": [{**f, "installed_at": None} for f in m.get("files", [])],
+        }
+
+    if manifest_path.is_file():
+        try:
+            prior = json.loads(manifest_path.read_text())
+            if _timeless(prior) == _timeless(manifest):
+                return manifest_path
+        except (ValueError, KeyError, TypeError):
+            pass
     tmp_path = scaffold_dir / "manifest.json.scaffold-tmp"
     tmp_path.write_text(json.dumps(manifest, indent=2) + "\n")
     os.replace(tmp_path, manifest_path)

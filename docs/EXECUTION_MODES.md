@@ -131,6 +131,32 @@ Semantics, relative to a standard run:
 - **The verify gate itself is unchanged and mandatory.** Promote gate,
   secret-lint, and scope containment all stay on.
 
+## The Stop hook, and its off switch (v0.8.0)
+
+`.claude/hooks/require-verdict.sh` blocks an autonomous session from ending
+its turn without a verdict artifact (`phase-approval.json`,
+`phase-update.json`, `phase-blocked.json`, `project-complete.json`, or another
+terminal signal). It exists because a session that returns a final message
+kills every background task it started and — before this hook — could walk
+away leaving green work uncommitted; three consecutive sessions did exactly
+that on 2026-08-16. On a healthy session it blocks zero times.
+
+**Operational lever: `PHASEKIT_STOP_BLOCK_LIMIT`** — how many times the hook
+may block per iteration before stepping aside (default `2`).
+
+- **`PHASEKIT_STOP_BLOCK_LIMIT=0` disables the behavior entirely** (the guard
+  is `blocks >= limit`, so zero steps aside on the first check). Reach for
+  this if the hook ever blocks a legitimate stop or fights the loop.
+- **The env var is the off switch — file surgery is not.** Deleting the hook
+  file or its `Stop` entry in `.claude/settings.json` silently un-deletes
+  itself: `phasekit upgrade` re-syncs missing scaffold hook registrations by
+  design (that sync is what fixes the shipped-but-unwired failure class, and
+  it is deliberately not overridable per project).
+- The hook is inert outside the autonomous loop: it exits immediately unless
+  the loop's `PHASEKIT_VERDICT_ARTIFACTS` / `PHASEKIT_ARTIFACTS_DIR` /
+  `PHASEKIT_ITER_MARKER` environment is present, so interactive sessions
+  never see it.
+
 ## Loop integrity (v0.6.0)
 
 Two guarantees added to `run-until-done.sh`:
