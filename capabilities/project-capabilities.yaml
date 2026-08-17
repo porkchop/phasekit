@@ -55,6 +55,7 @@ profiles:
     include_hooks:
       - deny-dangerous-commands
       - compact-reanchor
+      - require-verdict
     include_scripts:
       - run-phase
       - run-until-done
@@ -308,6 +309,17 @@ hooks:
     path: .claude/hooks/deny-dangerous-commands.sh
     required: true
     ownership: scaffold
+
+  require-verdict:
+    path: .claude/hooks/require-verdict.sh
+    required: false
+    ownership: scaffold
+    # Stop hook: refuses to let an autonomous iteration end without a verdict
+    # artifact. Answers the incident where three consecutive sessions ended
+    # their own turn while their background work was still running, committed
+    # nothing, and left a growing dirty tree. Bounded (2 blocks per iteration),
+    # inert outside the loop and on the happy path, and never satisfied by an
+    # artifact left over from a previous iteration.
 
   compact-reanchor:
     path: .claude/hooks/compact-reanchor.sh

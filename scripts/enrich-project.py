@@ -970,10 +970,93 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
                 "text": p["text"], "rendered_from": p["rendered_from"],
             })
 
+    sync_hook_registrations(target)
+
     # Rewrite the manifest with the post-apply state.
     write_downstream_manifest(target, scaffold_manifest, profile,
                               file_specs_for_manifest)
     return 0
+
+
+def sync_hook_registrations(target, quiet=False):
+    """Add any MISSING scaffold hook registrations to .claude/settings.json.
+
+    Why this exists. Hook files are `scaffold`-class and install on every
+    upgrade, but `.claude/settings.json` is `bootstrap-with-template-tracking`
+    — write-once, never overwritten, because it also carries project-owned
+    permissions. So shipping a new hook used to deliver the FILE to every
+    existing project and the REGISTRATION to none of them: the hook lands and
+    never fires. A shipped no-op that everyone believes is running is worse
+    than not shipping it — it is the producer-built/consumer-missing failure
+    this scaffold has now spent two releases eliminating.
+
+    Additive only, and deliberately narrow:
+      - the desired wiring is read from templates/settings.template.json, which
+        is already the single source of truth for it; nothing is invented here
+      - an (event, command) pair that is already registered is left completely
+        alone, whatever its matcher or ordering
+      - existing entries are never modified, reordered or removed, and no other
+        key in settings.json is touched
+      - idempotent: a second run reports nothing
+
+    Returns the list of (event, command) pairs added.
+    """
+    settings_path = target / ".claude" / "settings.json"
+    template_path = REPO_ROOT / "templates" / "settings.template.json"
+    if not settings_path.is_file() or not template_path.is_file():
+        return []
+
+    try:
+        with settings_path.open() as f:
+            settings = json.load(f)
+        with template_path.open() as f:
+            template = json.load(f)
+    except (OSError, ValueError) as e:
+        # Never let this fail an upgrade — the files are all installed by now.
+        if not quiet:
+            print(f"  note: could not sync hook registrations ({e})", file=sys.stderr)
+        return []
+
+    def commands(entry):
+        return [h.get("command") for h in (entry.get("hooks") or [])
+                if isinstance(h, dict)]
+
+    added = []
+    existing_hooks = settings.get("hooks")
+    if not isinstance(existing_hooks, dict):
+        existing_hooks = {}
+    for event, entries in (template.get("hooks") or {}).items():
+        if not isinstance(entries, list):
+            continue
+        current = existing_hooks.get(event)
+        if not isinstance(current, list):
+            current = []
+        registered = {c for e in current if isinstance(e, dict) for c in commands(e)}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            wanted = [c for c in commands(entry) if c and c not in registered]
+            if not wanted:
+                continue
+            current.append(json.loads(json.dumps(entry)))
+            registered.update(wanted)
+            added.extend((event, c) for c in wanted)
+        if current:
+            existing_hooks[event] = current
+
+    if not added:
+        return []
+
+    settings["hooks"] = existing_hooks
+    tmp = settings_path.with_suffix(".json.tmp")
+    with tmp.open("w") as f:
+        json.dump(settings, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, settings_path)
+    if not quiet:
+        for event, command in added:
+            print(f"  hook-register: {event} -> {command}")
+    return added
 
 
 def _interactive_resolve(plans, target):

@@ -116,7 +116,9 @@ TRANSIENT_SIGNALS=(
   "scope-refusal.json"
   "light-escalation.json"
   ".scope-check.tmp"
+  ".stop-hook-blocks"
 )
+
 # The subset also hidden from `git status` via .git/info/exclude: consumed from
 # disk (the orchestrator's session_signals/record_run read-then-delete them, or
 # the commit path itself cleans them up), so hiding them hides nothing a human
@@ -129,7 +131,34 @@ HIDDEN_TRANSIENTS=(
   "scope-refusal.json"
   "light-escalation.json"
   ".scope-check.tmp"
+  ".stop-hook-blocks"
 )
+
+# --- The verdict vocabulary -------------------------------------------------
+# The artifacts that constitute a session ENDING WITH AN ANSWER. Derived from
+# this file's own dispatch below, and the single source of truth for the
+# question "did this iteration produce a verdict?" — asked in three places:
+#   1. the Stop hook (.claude/hooks/require-verdict.sh), via the export below
+#   2. the loop's own no-verdict retry backstop
+#   3. the loop's dispatch, which acts on each in turn
+# Exporting it rather than restating it in the hook is what stops the hook and
+# the dispatcher from disagreeing about what an ending is.
+#
+# scope-refusal.json and light-escalation.json are included deliberately: they
+# are legitimate ways for a session to end, and a hook that blocked on them
+# would be fighting the loop. phase-verify-failed.json, scope-warning.json and
+# spec-change.json are NOT verdicts — they are the loop's own commentary on a
+# session that is still expected to answer.
+VERDICT_ARTIFACTS=(
+  "project-complete.json"
+  "phase-approval.json"
+  "phase-update.json"
+  "phase-blocked.json"
+  "scope-refusal.json"
+  "light-escalation.json"
+)
+export PHASEKIT_VERDICT_ARTIFACTS="${VERDICT_ARTIFACTS[*]}"
+export PHASEKIT_ARTIFACTS_DIR="$ARTIFACTS_DIR"
 
 ensure_transients_excluded() {
   # The loop never commits artifacts/logs/* (see commit_from_artifact), and the
@@ -243,6 +272,10 @@ cleanup_artifacts() {
     "$ARTIFACTS_DIR/phase-blocked.json" \
     "$ARTIFACTS_DIR/project-complete.json" \
     "$ARTIFACTS_DIR/light-escalation.json"
+  # The Stop hook's block budget is per-iteration: a session that was nudged
+  # last iteration starts the next one with a full allowance, and a healthy
+  # iteration never creates the file at all.
+  rm -f "$ARTIFACTS_DIR/.stop-hook-blocks"
 }
 
 print_json_summary() {
@@ -1005,6 +1038,10 @@ light_review_done=0
 # whose verify gate failed (the staged work belongs to that same phase, so its
 # message is the right one).
 ITER_START_MARKER="$(mktemp)"
+# Exported for the Stop hook (.claude/hooks/require-verdict.sh), which must
+# answer "was this artifact written during THIS iteration?" exactly as
+# artifact_written_this_iteration() does. One marker, one answer.
+export PHASEKIT_ITER_MARKER="$ITER_START_MARKER"
 PENDING_COMMIT_RETRY=""
 
 # Soft wrap-up sentinel: an outer supervisor (e.g. the orchestrator's

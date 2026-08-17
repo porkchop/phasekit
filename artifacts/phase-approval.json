@@ -1,36 +1,36 @@
 {
-  "phase": "v0.7.1-fail-closed-repair",
+  "phase": "session-lifetime-phase-1-stop-hook",
   "approved": true,
-  "summary": "Repairs the single fail-open path in v0.7.0. run_contracts_gate warned and returned 0 when contracts.yaml existed but scripts/phasekit-contracts.py did not, so a declaring repo committed with no contract verification at all. It now refuses, routes the failure through the shared record_verify_failure() capture (exit code 5, emitted by the loop rather than by the checker), and names `phasekit upgrade` as the repair so it stays recoverable in one command. PHASEKIT_CONTRACTS_SKIP=1 is checked first and still wins.",
-  "decision_memo": "foundry-meta/KICKOFF-phasekit-v070-contracts.md, 'Post-release addendum 2026-08-16 — v0.7.1, one review finding'",
-  "suggested_commit_message": "v0.7.1: refuse when a declaring repo has no checker",
+  "summary": "The Stop hook. .claude/hooks/require-verdict.sh blocks a session that tries to end an autonomous iteration without a verdict artifact, and every block hands the agent state-changing moves rather than just a refusal. Bounded at 2 blocks per iteration via a counter cleanup_artifacts clears; inert outside the loop and on the happy path; never satisfied by an artifact left from an earlier iteration. The verdict vocabulary is defined once in run-until-done.sh and exported, so the hook and the dispatcher cannot disagree about what an ending is. Also ships item 5 (prompt guidance) and — beyond the literal kickoff — an additive hook-registration sync in enrich-project.py without which the hook would never fire in any existing project.",
+  "decision_memo": "foundry-meta/KICKOFF-phasekit-session-lifetime.md items 1 and 5",
+  "suggested_commit_message": "session lifetime: Stop hook — a session may not end without a verdict",
   "reviewer_notes": [
-    "Two reasons this was the wrong disposition, both from the addendum and both confirmed in the code: it contradicted the property stated three comment-lines above it (a repo that can edit away the check policing it is not policed), and the realistic trigger is the upgrade seam rather than malice — a project can acquire contracts.yaml from a build while its vendored scripts/ is still pre-v0.7.0, leaving the gate silently off in exactly the window where drift is most likely.",
-    "Exit code 5 is deliberately distinct from 2 (malformed declaration). Same reasoning that split 3 from 4 in v0.7.0: the two conditions have different repairs — 2 means fix your file, 5 means upgrade phasekit — and collapsing them sends people to the wrong place. Documented in docs/CONTRACTS.md as loop-emitted, since phasekit-contracts.py's own table stops at 4.",
-    "The old pin (test_a_declaration_with_no_checker_warns_rather_than_passing_quietly) asserted only that a WARN substring existed and never inspected the return value, so it passed either way — the addendum called this out and it is exactly why the defect survived review. Replaced with test_a_declaration_with_no_checker_refuses_and_names_the_repair, which asserts the DISPOSITION (return 1, no return 0 on that branch, names the repair, flows through the shared capture) rather than the wording.",
-    "A structural pin alone is what let this slip, so the repair also ships a functional pin: test_a_declaring_repo_with_no_checker_cannot_commit drives the real loop with the checker deleted and asserts no commit lands. Both new pins were verified to FAIL against the v0.7.0 script and pass against the fix (script reverted in isolation via git stash, tests kept) — they are not vacuous.",
-    "Two guardrails on the new refusal, both pinned: it keys off the DECLARATION and not the missing file, so every pre-v0.7.0 project without a contracts.yaml is unaffected (otherwise this patch would stop the entire fleet committing); and the operator hatch still wins, which is what makes refusing safe rather than wedging."
+    "Audit first: no Stop hook existed; PreToolUse (deny-dangerous-commands) and SessionStart (compact-reanchor) are the established patterns and this follows them.",
+    "The vocabulary is exported by the loop (PHASEKIT_VERDICT_ARTIFACTS) rather than restated in the hook, and a test asserts the hook does NOT contain the artifact names. Kickoff said to enumerate from the loop; exporting is how that becomes structural instead of a convention.",
+    "Freshness uses the loop's existing ITER_START_MARKER, exported as PHASEKIT_ITER_MARKER, so the hook answers 'written this iteration?' with the same mechanism as artifact_written_this_iteration(). No second mechanism was invented.",
+    "Inert outside the loop is a deliberate fourth property beyond the kickoff's three: the hook needs all three PHASEKIT_* vars to have any opinion, so an interactive `claude` session can never be blocked. Blocking one would violate phasekit's standing rule that ordinary direct work must not be made cumbersome.",
+    "Fail-open everywhere except the deliberate block, including an unwritable artifacts dir: cannot count means cannot bound, which means it must not block.",
+    "ADDITION BEYOND THE KICKOFF, flagged for Aaron. The kickoff assumed registering the file in capabilities was enough. It is not: .claude/settings.json is bootstrap-with-template-tracking (write-once), so an upgrade installs the hook FILE and never the Stop REGISTRATION. Verified empirically before writing any code — a project enriched pre-release then upgraded had the script on disk and no Stop entry. Shipping that way would have delivered a believed no-op to all 8 fleet projects, including the one the incident happened in. sync_hook_registrations() closes it: additive only, driven by the settings template (already the single source of truth for the wiring), idempotent, never touching permissions/env/project-owned hooks."
   ],
   "deferred_items": [
-    {
-      "tag": "fleet upgrade",
-      "description": "Upgrade resting projects to v0.7.1 (self-update, then per-project upgrade + check). Partial is harmless: the mechanism is inert until a repo writes contracts.yaml, and none has one."
-    }
+    {"tag": "phase 2", "description": "Loop retry backstop on no-artifact + dirty tree (kickoff item 2)."},
+    {"tag": "phase 3", "description": "phasekit upgrade commits and pushes its own work (kickoff item 3)."},
+    {"tag": "phase 4", "description": "Mutation-testing protocol as an opt-in capability profile (kickoff item 4), docs, release."}
   ],
   "verification": {
     "self_check_passes_on_master": true,
-    "tracked_files_classified": 116,
-    "test_count": 256,
-    "new_tests": 3,
+    "tracked_files_classified": 119,
+    "test_count": 295,
+    "new_tests": 39,
     "test_status": "all green",
     "commands_run": [
-      "python3 -m unittest tests.test_contracts_gate_v070  -> 40 tests OK",
-      "python3 -m unittest discover -s tests -p 'test_*.py'  -> 256 tests OK",
-      "git stash push -- scripts/run-until-done.sh && python3 -m unittest tests.test_contracts_gate_v070  -> 2 FAILURES (the new pins), confirming they are not vacuous",
-      "python3 scripts/enrich-project.py --self-check  -> 116 tracked files, 0 unclassified, 0 double-classified",
-      "bash -n scripts/run-until-done.sh  -> clean",
-      "smoke: a declaring repo with no checker refuses, does not commit, and writes phase-verify-failed.json with exit_code 5 / label contracts / command 'phasekit upgrade'"
+      "python3 -m unittest tests.test_require_verdict_hook  -> 29 tests OK",
+      "python3 -m unittest tests.test_hook_registration_sync  -> 10 tests OK",
+      "python3 -m unittest discover -s tests -p 'test_*.py'  -> 295 tests OK",
+      "python3 scripts/enrich-project.py --self-check  -> 119 tracked files, 0 unclassified",
+      "bash -n on the hook and the loop  -> clean",
+      "empirical: fresh enrich registers Stop; a pre-release project upgraded gains both file and registration; second upgrade adds nothing"
     ],
-    "acceptance_criteria_met": "the one fail-open path in v0.7.0 now fails closed, recoverably; the weak pin that let it through is replaced by one that asserts the disposition, backed by an end-to-end pin"
+    "acceptance_criteria_met": "inert on a healthy session (zero blocks, counter never created), bounded (releases after 2), a stale artifact of every kind does not satisfy it, and the message names the three state-changing actions"
   }
 }
