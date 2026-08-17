@@ -1,32 +1,34 @@
 {
-  "phase": "session-lifetime-phase-3-upgrade-commits",
+  "phase": "session-lifetime-phase-4-mutation-protocol",
   "approved": true,
-  "summary": "`phasekit upgrade` now commits the files it wrote (chore(scaffold): phasekit upgrade vX.Y.Z -> vA.B.C) and pushes when the branch has an upstream, leaving the tree clean. Opt out with --no-commit. Only the paths the upgrade touched are committed, via `git commit --only`, so a project's in-flight work is never swept into a scaffold commit. Every git failure is non-fatal.",
-  "decision_memo": "foundry-meta/KICKOFF-phasekit-session-lifetime.md item 3 (Aaron's call, deliberately simple)",
-  "suggested_commit_message": "session lifetime: phasekit upgrade commits and pushes its own work",
+  "summary": "Mutation testing extracted from one project's self-propagating LEARNINGS lore into a decided, bounded protocol — shipped as the OPT-IN `with-mutation` capability profile, never as a universal gate. docs/MUTATION_TESTING.md is the protocol; scripts/mutation-run.py executes an LLM-authored mutant spec in foreground chunks and writes a write-only audit record. Neither is installed by the default profile.",
+  "decision_memo": "foundry-meta/KICKOFF-phasekit-session-lifetime.md item 4. SCOPE DECIDED BEFORE BUILDING, per the kickoff's instruction: capability-profile option, matching its own recommendation. The kickoff said to STOP and ask only if I concluded it should be universal; I did not, so no question was raised.",
+  "suggested_commit_message": "session lifetime: mutation testing as an opt-in protocol, not lore",
   "reviewer_notes": [
-    "REAL BUG CAUGHT BY A TEST I WROTE FOR THE SHARP EDGE. The first implementation staged the touched paths then ran a plain `git commit`, which commits the WHOLE index — so a change the project had already staged when the upgrade ran was swept into a commit whose message says 'phasekit upgrade'. That is worse than the dirty tree being fixed: it gives someone's in-flight work the wrong story and hides it in a scaffold commit. Fixed with `git commit --only -- <paths>`, which commits exactly those paths and leaves the rest of the index staged.",
-    "Test-side over-assertion corrected honestly rather than by weakening the feature: .scaffold/manifest.json is only committed WHEN IT CHANGES. A re-upgrade at the same scaffold version regenerates a byte-identical manifest, and committing that would be exactly the empty-commit churn the idempotence test forbids. The test now drops the manifest from the index first so the assertion means something.",
-    "Push is attempted only when a remote AND an upstream exist. A standalone project with neither is the normal public case, not a failure — it prints a note and keeps the commit local.",
-    "Non-fatal throughout, including no git identity: the files are already installed on disk by the time the commit is attempted, so turning a git-config problem into an upgrade failure would be strictly worse. Pinned by a test that unsets user.email/user.name and asserts the upgrade still exits 0 with the file present.",
-    "Documented in docs/INSTALL_LIFECYCLE.md with both failure modes that motivated it, so the next person does not read this as gratuitous git automation."
+    "Scope: opt-in. phasekit is a public curl|bash tool whose META_SPEC states it must work for someone with no orchestration layer, so mandating a heavy practice for every downstream user would be a far bigger claim than 'Foundry does this'. Pinned by tests, not just by intent: a default enrich installs neither file, and the with-mutation profile installs both.",
+    "The division of labour is the design. The LLM designs mutants (that is where all three real defects came from); the harness only executes. mutation-run.py never invents a mutant — if it did, it would generate the cheap syntactic ones good tests already catch, and the audit record would fill with noise that makes the practice look effective while catching nothing.",
+    "Chunking, not resumability, exactly as the kickoff decided. Nothing is backgrounded, so nothing can be orphaned when a turn ends — which is the failure the rest of this release exists to prevent, and the reason the original mutation run cost three sessions. The rejected resumable cache is recorded in the script, in the doc, and pinned by a test asserting no --resume/cache machinery exists.",
+    "Two false-green refusals: a budget-skipped mutant is recorded as `not_run` and never as a pass, and an ambiguous `find` (matching more than once) is an error rather than a guess, because the outcome would not say which site it referred to.",
+    "Safety: refuses a dirty tree (patch/revert in place could otherwise restore a file over uncommitted edits) and the revert is in a `finally`, so an interrupted run cannot leave a mutation behind. A stray surviving mutation in a commit is the worst thing this script could produce.",
+    "WORKFLOW_SCRIPTS had to grow to make include_scripts able to install mutation-run at all — it previously only carried run-phase and run-until-done. That is precisely what makes the script opt-in: no profile except with-mutation names it.",
+    "DOGFOODED. Ran the harness against this release's own Stop-hook tests with two mutants aimed at the subtlest properties — the block bound (>= to >) and the staleness check (dropping the -nt comparison). Both were KILLED, so those tests genuinely discriminate rather than merely execute."
   ],
   "deferred_items": [
-    {"tag": "phase 4", "description": "Mutation-testing protocol as an opt-in capability profile (kickoff item 4), docs, release."},
-    {"tag": "orchestrator (operator queue, not this release)", "description": "The scaffold-drift signal should recognise a phasekit upgrade commit rather than filing #130-133-style noise. Pairs with this item."}
+    {"tag": "release", "description": "Tag the next minor and push. Version chosen at tag time per the kickoff — no number was pre-assigned."},
+    {"tag": "orchestrator (operator queue, NOT this release)", "description": "Stall watchdog should fire on the FIRST zero-commit session that also leaves a dirty tree; and the scaffold-drift signal should recognise a `phasekit upgrade` commit."}
   ],
   "verification": {
     "self_check_passes_on_master": true,
-    "tracked_files_classified": 121,
-    "test_count": 324,
-    "new_tests": 14,
+    "tracked_files_classified": 124,
+    "test_count": 348,
+    "new_tests": 24,
     "test_status": "all green",
     "commands_run": [
-      "python3 -m unittest tests.test_upgrade_commits  -> 14 tests OK",
-      "python3 -m unittest discover -s tests -p 'test_*.py'  -> 324 tests OK",
-      "python3 scripts/enrich-project.py --self-check  -> 121 tracked files, 0 unclassified",
-      "manual: upgrade with an unrelated untracked file present committed only the scaffold path and left the file alone"
+      "python3 -m unittest tests.test_mutation_run  -> 24 tests OK",
+      "python3 -m unittest discover -s tests -p 'test_*.py'  -> 348 tests OK",
+      "python3 scripts/enrich-project.py --self-check  -> 124 tracked files, 0 unclassified",
+      "python3 scripts/mutation-run.py --spec <hook mutants>  -> killed 2, survived 0 (dogfood)"
     ],
-    "acceptance_criteria_met": "the tree is clean after an upgrade (breaking the idle-project deadlock), the commit uses the established message convention, unrelated staged/modified/untracked work is never included, and a second upgrade makes no empty commit"
+    "acceptance_criteria_met": "the protocol specifies chunking, a budget, a write-only audit record and the LLM-designs/harness-executes split; it ships opt-in and the opt-in-ness is pinned by tests"
   }
 }

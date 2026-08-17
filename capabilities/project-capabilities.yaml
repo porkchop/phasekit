@@ -89,6 +89,16 @@ profiles:
     include_docs:
       - DESIGN
 
+  # Opt-in profile that adds the mutation-testing protocol + harness.
+  # Deliberately opt-in: mutation testing is heavy, and phasekit must stay
+  # useful to someone who wants none of it. See docs/MUTATION_TESTING.md.
+  with-mutation:
+    extends: default
+    include_docs:
+      - MUTATION_TESTING
+    include_scripts:
+      - mutation-run
+
   # --- v0.5.0 stack profiles ------------------------------------------------
   # A stack profile adds a per-stack contract on top of its base profile:
   #   1. verify seeding — scripts/phasekit-verify.sh is rendered from
@@ -275,6 +285,15 @@ docs:
     required: false
     ownership: scaffold
 
+  MUTATION_TESTING:
+    path: docs/MUTATION_TESTING.md
+    required: false
+    ownership: scaffold
+    # OPT-IN via the `with-mutation` profile — deliberately NOT in the default
+    # profile's include_docs. Mutation testing is a heavy practice and phasekit
+    # is a public tool; offering it as a capability is a very different claim
+    # from imposing it on every downstream user. See docs/MUTATION_TESTING.md.
+
   CONTRACTS:
     path: docs/CONTRACTS.md
     required: false
@@ -348,6 +367,14 @@ scripts:
     # Always installed alongside run-phase so the .log file is human-readable;
     # run-phase falls back to `cat` if absent, but downstream provisioning is
     # the supported path. See docs/EXECUTION_MODES.md "Visibility and logs".
+
+  mutation-run:
+    path: scripts/mutation-run.py
+    required: false
+    ownership: scaffold
+    # Execution harness for the opt-in mutation-testing protocol. Installed
+    # only under the `with-mutation` profile (include_scripts), never by
+    # default. It executes an LLM-authored mutant spec; it never designs one.
 
   phasekit-contracts:
     path: scripts/phasekit-contracts.py

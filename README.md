@@ -217,6 +217,7 @@ Profiles define which agents, docs, hooks, and scripts a project receives. Defin
 | `default` | project-lead, strategy-planner, architecture-red-team, code-reviewer, qa-playwright | General web apps, services, CLIs |
 | `game-project` | + engine-builder, frontend-builder, backend-builder, release-hardening | Games, interactive simulations |
 | `saas-project` | + frontend-builder, backend-builder, release-hardening | SaaS products with API/persistence |
+| `with-mutation` | (none) | Adds the opt-in mutation-testing protocol + harness — see `docs/MUTATION_TESTING.md` |
 
 Create custom profiles by adding entries to `capabilities/project-capabilities.yaml` with `extends: default`. See `docs/EXTENSION_PATTERNS.md` for patterns and a profile selection guide.
 
@@ -314,6 +315,7 @@ KICKOFF.md                        # entrypoint documentation
 | `docs/EXTENSION_PATTERNS.md` | Adding profiles, agents, hooks, skills, docs |
 | `docs/CONTAINERIZATION.md` | Container setup, firewall, auth, troubleshooting |
 | `docs/CONTRACTS.md` | Cross-project contract dependencies: declaring, vendoring, the drift gate |
+| `docs/MUTATION_TESTING.md` | Opt-in mutation-testing protocol: designing mutants, chunking, the audit record |
 | `docs/COMPATIBILITY.md` | Versioning policy and upgrade guidance |
 | `docs/REASONING_PROFILES.md` | When to use deeper reasoning per role |
 | `docs/USAGE_PATTERNS.md` | Workflow patterns for different project types |

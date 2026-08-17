@@ -230,6 +230,14 @@ Full mechanism, file formats and the standalone story: `docs/CONTRACTS.md`.
 
 Configuration is project-owned: edit `scripts/phasekit-verify.sh` (rendered into the project at enrich time) to declare the right fast checks for the stack. Until configured, the gate fail-opens with a warning so un-instrumented projects continue to work.
 
+### Mutation testing (opt-in)
+
+Not part of any gate and not enabled by default. Projects that want a check on
+whether their tests *discriminate* (as opposed to merely execute) can enable the
+`with-mutation` profile, which installs `docs/MUTATION_TESTING.md` and
+`scripts/mutation-run.py`. It is a scalpel for phases that add guards, filters,
+detectors or fail-open paths — not a per-iteration ritual.
+
 ### Verify budget (v0.6.4)
 
 The gate's speed is part of its correctness. Verify runs before *every* phase commit — often several times per session — so its wall time multiplies directly into session productivity: a suite that quietly grows past its budget turns build sessions into no-commit sessions (the motivating case burned three consecutive sessions on a suite that had grown to ~83s).

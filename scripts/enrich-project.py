@@ -1649,7 +1649,12 @@ SCAFFOLD_ONLY_DOCS = {"META_SPEC", "META_PHASES", "CAPABILITY_MANIFEST"}
 
 # Scripts in the manifest's `scripts:` section that are workflow-relevant
 # downstream (not all scaffold scripts; matches cmd_enrich's filter).
-WORKFLOW_SCRIPTS = ("run-phase", "run-until-done")
+# Scripts a profile may pull in by naming them in `include_scripts`.
+# Everything else in the capabilities `scripts:` map either ships to every
+# project via ALWAYS_INSTALLED_FILE_PATHS or is scaffold-internal.
+# `mutation-run` is here precisely so it can be OPT-IN: no profile except
+# `with-mutation` names it, so a default project never receives it.
+WORKFLOW_SCRIPTS = ("run-phase", "run-until-done", "mutation-run")
 
 # === v0.5.0 stack profiles ==================================================
 # A profile carrying `stack: <name>` seeds a real verify gate and installs a
