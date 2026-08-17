@@ -1723,6 +1723,7 @@ def verify_gate_is_stub(verify_path):
 # scaffold manifest (scaffold root + container files).
 ALWAYS_INSTALLED_FILE_PATHS = (
     "CONTINUE_PROMPT.txt",
+    "contracts/interface.json",
     "scripts/container-setup.sh",
     "scripts/verify-container.sh",
     "scripts/phasekit.sh",

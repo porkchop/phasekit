@@ -1,0 +1,642 @@
+{
+  "version": 1,
+  "interface": "phasekit",
+  "description": "phasekit's machine-readable interface manifest: the environment variables, artifact files and exit codes through which phasekit and any supervisor (an orchestrator, a cron job, a human wrapper) communicate. Hand-authored by the producer; pinned from both directions by tests/test_interface_manifest.py. Refreshing this file is part of acceptance for any change that touches the interface (docs/CONTRACTS.md, 'Producer responsibilities').",
+  "standalone_note": "Every input here is honoured WHEN SUPPLIED. No supervisor is required: defaults make every script work standalone, and this manifest is equally the contract a stranger's cron job codes against.",
+  "scope": {
+    "covered": "scripts/*.sh, scripts/phasekit-contracts.py, and .claude/hooks/*.sh — the shipped runtime surface a supervisor interacts with.",
+    "not_covered": "Ambient POSIX environment (HOME, PWD, PATH) and the Claude Code harness's own hook payload (HOOK_PAYLOAD via stdin) are not interface knobs and are not declared. install.sh's PHASEKIT_HOME/PHASEKIT_BIN/PHASEKIT_URL/PHASEKIT_REF are the installer's interface, documented in docs/adr/ADR-0002-self-update-channels.md. The orchestrator's own artifacts (e.g. iteration-mode.json, written and read entirely supervisor-side) are the supervisor's interface, not phasekit's; their phasekit-side reflection is the env family below (e.g. PHASEKIT_ITERATION_MODE)."
+  },
+  "env": [
+    {
+      "name": "PHASEKIT_SESSION_DEADLINE",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh"],
+      "default": "unset — deadline pacing disabled",
+      "container_forwarded": true,
+      "semantics": "Epoch seconds of the supervisor's hard kill (the supervisor computes it as start + its MAX_MINUTES); the loop refuses to start an iteration it cannot finish before it and wraps up instead. Non-numeric values are warned about and ignored."
+    },
+    {
+      "name": "PHASEKIT_WRAPUP_SENTINEL",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh"],
+      "default": "<repo>/artifacts/wrapup-requested",
+      "container_forwarded": false,
+      "semantics": "Path of the supervisor's soft-stop sentinel file. Existence-only signal: the loop clears a stale one at start, polls between iterations, and finishes with a wrap-up commit when it appears. The default lives inside the workspace, so a containerized supervisor signals by writing the file, not by forwarding this variable; an overrider owns keeping a custom path out of git status."
+    },
+    {
+      "name": "PHASEKIT_ITERATION_MODE",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh"],
+      "default": "standard",
+      "container_forwarded": true,
+      "semantics": "standard | light. light is the reduced-ceremony loop for small triaged tasks (caps 2/2, no strategy-planner/red-team, escalate-not-grind); it silently downgrades to standard when the verify gate is absent or still the stub."
+    },
+    {
+      "name": "PHASEKIT_ITER_RETRY",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh"],
+      "default": "1",
+      "container_forwarded": true,
+      "semantics": "Per-iteration retry budget for a non-zero claude CLI exit (transient API/CLI failures). 0 disables retries; after the budget is spent the child's exit code propagates verbatim."
+    },
+    {
+      "name": "PHASEKIT_PACING_FLOOR_SECONDS",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh"],
+      "default": "180",
+      "container_forwarded": false,
+      "semantics": "Minimum remaining-time threshold for deadline pacing; no new iteration starts when less than max(this, 1.2 x average pass duration) remains before PHASEKIT_SESSION_DEADLINE. Non-numeric values fall back to the default."
+    },
+    {
+      "name": "PHASEKIT_VERIFY_CMD",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh"],
+      "default": "unset — the loop runs scripts/phasekit-verify.sh if present",
+      "container_forwarded": false,
+      "semantics": "One-shot shell command overriding the project's verify gate; run via bash -eo pipefail -c. Non-empty also satisfies light-mode verify eligibility on its own."
+    },
+    {
+      "name": "PHASEKIT_VERIFY_BUDGET_SECONDS",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh"],
+      "default": "60",
+      "container_forwarded": false,
+      "semantics": "Seconds above which one verify run counts as over budget; after two such runs the loop prints a one-time fail-open advisory suggesting a fast tier. Non-numeric values fall back to the default."
+    },
+    {
+      "name": "VERIFY_SKIP",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh"],
+      "default": "unset — verify gate runs",
+      "container_forwarded": false,
+      "semantics": "1 bypasses the pre-commit verify gate for a run (the routine hatch for red-TDD commits and docs-only phases) and clears artifacts/phase-verify-failed.json. Deliberately does NOT bypass the contracts gate. Also honoured by the seeded scripts/phasekit-verify.sh templates."
+    },
+    {
+      "name": "VERIFY_MAX_ATTEMPTS",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh"],
+      "default": "3 (standard mode) / 2 (light mode)",
+      "container_forwarded": false,
+      "semantics": "Consecutive verify-failure circuit breaker; on reaching it the loop writes artifacts/phase-blocked.json (standard) or escalates via artifacts/light-escalation.json (light) and stops with exit 2."
+    },
+    {
+      "name": "PHASEKIT_CONTRACTS_SKIP",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh"],
+      "default": "unset — contracts gate runs when contracts.yaml declares dependencies",
+      "container_forwarded": false,
+      "semantics": "1 is the loud, operator-only, one-run bypass of the cross-project contracts gate (docs/CONTRACTS.md). Never a committed setting; checked before the missing-checker refusal so it also wins there."
+    },
+    {
+      "name": "PHASEKIT_CONTRACTS_MOUNT",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "unset — no contracts provider (the normal standalone case)",
+      "container_forwarded": true,
+      "semantics": "HOST path to a provider's contracts tree (index.json + one directory per slug). Bind-mounted read-only at /contracts inside the container, announced inward as PHASEKIT_CONTRACTS_DIR=/contracts. Set-but-unusable (not a directory, or no readable index.json) is a hard exit 1, never a silent drop."
+    },
+    {
+      "name": "PHASEKIT_CONTRACTS_DIR",
+      "kind": "both",
+      "read_by": ["scripts/phasekit-contracts.py"],
+      "set_by": ["scripts/container-setup.sh"],
+      "default": "/contracts",
+      "container_forwarded": true,
+      "semantics": "Where the provider's contracts tree is readable, consumed by the contracts checker. Set by container-setup.sh when PHASEKIT_CONTRACTS_MOUNT is given; a standalone user sets it by hand to run the gate outside a container."
+    },
+    {
+      "name": "PHASEKIT_NO_UPDATE_CHECK",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh"],
+      "default": "unset — nudge enabled",
+      "container_forwarded": false,
+      "semantics": "1 skips the once-per-run, non-fatal upstream release-tag nudge (git ls-remote against the manifest's origin_url)."
+    },
+    {
+      "name": "PHASEKIT_TRACE",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh", "scripts/run-phase.sh", "scripts/container-setup.sh"],
+      "default": "unset — no tracing",
+      "container_forwarded": true,
+      "semantics": "1 enables bash set -x in the wrapper scripts; container-setup.sh forwards any non-empty value into the container so in-container scripts trace too."
+    },
+    {
+      "name": "PHASEKIT_CONTAINER_NAME",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "unset — docker assigns a random name",
+      "container_forwarded": true,
+      "semantics": "Deterministic docker --name so an outer supervisor can docker kill the container on session timeout."
+    },
+    {
+      "name": "PHASEKIT_CONTAINER_USER",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "unset — image default user (node, UID 1000)",
+      "container_forwarded": true,
+      "semantics": "Raw docker run --user spec; root normalizes to 0:0 (with HOME=/home/node pinned and IS_SANDBOX=1 exported). Takes precedence over PHASEKIT_ROOTLESS_DOCKER."
+    },
+    {
+      "name": "PHASEKIT_ROOTLESS_DOCKER",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "unset",
+      "container_forwarded": true,
+      "semantics": "1 (with PHASEKIT_CONTAINER_USER empty) runs the container as root, the UID-0 mode for rootless Docker where container root maps to the unprivileged host user."
+    },
+    {
+      "name": "PHASEKIT_PYTHON",
+      "kind": "consumed",
+      "read_by": ["scripts/phasekit.sh"],
+      "default": "python3",
+      "container_forwarded": false,
+      "semantics": "Interpreter used to run scripts/enrich-project.py, so a global install can point at an isolated venv (e.g. one that has pyyaml)."
+    },
+    {
+      "name": "CLAUDE_MODE",
+      "kind": "both",
+      "read_by": ["scripts/run-until-done.sh", "scripts/run-phase.sh", "scripts/container-setup.sh"],
+      "set_by": ["scripts/run-until-done.sh"],
+      "default": "new",
+      "container_forwarded": true,
+      "semantics": "new = fresh session (also resets a stale phase-verify-failed.json at kickoff); continue = resume the most recent session (-c). The loop consumes it for iteration 1 and sets it per child invocation thereafter."
+    },
+    {
+      "name": "MAX_ITERATIONS",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh"],
+      "default": "50 (standard mode) / 2 (light mode)",
+      "container_forwarded": true,
+      "semantics": "Loop iteration ceiling; exhausting it without completion is exit 3. container-setup.sh forwards it only when set, deliberately leaving the mode-aware default to the loop."
+    },
+    {
+      "name": "ANTHROPIC_MODEL",
+      "kind": "consumed",
+      "read_by": ["scripts/run-phase.sh", "scripts/run-until-done.sh", "scripts/container-setup.sh"],
+      "default": "unset — claude CLI default model",
+      "container_forwarded": true,
+      "semantics": "Model for the claude invocation (alias like sonnet or a full claude-* id), passed as --model when non-empty. The light-mode final review deliberately unsets it so the review runs on the default model; the value is also recorded in light-escalation.json."
+    },
+    {
+      "name": "ANTHROPIC_API_KEY",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "unset — fall back to volume-persisted subscription credentials",
+      "container_forwarded": true,
+      "semantics": "Pay-per-token API key, forwarded into the container only when non-empty. Missing both this and volume credentials is a warning, not an error."
+    },
+    {
+      "name": "AUTO_PUSH",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh"],
+      "default": "unset — no push",
+      "container_forwarded": true,
+      "semantics": "1 makes the loop git push after every loop-created commit (iteration and wrap-up); push failure is non-fatal."
+    },
+    {
+      "name": "IMAGE_NAME",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "scaffold-runner",
+      "container_forwarded": true,
+      "semantics": "Docker image tag to build/run."
+    },
+    {
+      "name": "CLAUDE_VOLUME",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "scaffold-claude-config",
+      "container_forwarded": true,
+      "semantics": "Named Docker volume mounted at /home/node/.claude, holding persisted Claude subscription credentials — one volume is the fleet's shared auth."
+    },
+    {
+      "name": "PLAYWRIGHT_MCP_VERSION",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "unset — Dockerfile's pinned version",
+      "container_forwarded": true,
+      "semantics": "Passed as --build-arg at image build time (not a runtime -e)."
+    },
+    {
+      "name": "SKIP_PLAYWRIGHT_MCP",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "unset — MCP config is injected",
+      "container_forwarded": true,
+      "semantics": "Non-empty skips Playwright MCP injection by the container entrypoint."
+    },
+    {
+      "name": "GIT_USER_NAME",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "unset — image-baked identity (Scaffold Runner)",
+      "container_forwarded": true,
+      "semantics": "Git author name inside the container."
+    },
+    {
+      "name": "GIT_USER_EMAIL",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "unset — image-baked identity (scaffold-runner@localhost)",
+      "container_forwarded": true,
+      "semantics": "Git author email inside the container."
+    },
+    {
+      "name": "GH_TOKEN",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "unset — not forwarded",
+      "container_forwarded": true,
+      "semantics": "GitHub token for HTTPS push / gh CLI, forwarded when set. GITHUB_TOKEN is honoured independently under its own name."
+    },
+    {
+      "name": "GITHUB_TOKEN",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "unset — not forwarded",
+      "container_forwarded": true,
+      "semantics": "Alternate name for GH_TOKEN; both are forwarded independently when set."
+    },
+    {
+      "name": "SSH_AUTH_SOCK",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "unset or not a socket — no agent forwarding",
+      "container_forwarded": true,
+      "semantics": "Host ssh-agent socket, bind-mounted into the container and rewritten to /ssh-agent for the child."
+    },
+    {
+      "name": "CLAUDE_TOOL_INPUT",
+      "kind": "consumed",
+      "read_by": [".claude/hooks/deny-dangerous-commands.sh"],
+      "default": "empty — no pattern matches, hook allows",
+      "container_forwarded": false,
+      "semantics": "Supplied by the Claude Code harness to PreToolUse hooks: the tool-invocation payload, substring-matched (lowercased) against the dangerous-command blocklist."
+    },
+    {
+      "name": "PHASEKIT_STOP_BLOCK_LIMIT",
+      "kind": "consumed",
+      "read_by": [".claude/hooks/require-verdict.sh"],
+      "default": "2",
+      "container_forwarded": false,
+      "semantics": "Max Stop-hook blocks per iteration before the require-verdict hook steps aside and lets the loop's own no-verdict handling take over. Non-numeric values fall back to the default."
+    },
+    {
+      "name": "PHASEKIT_VERDICT_ARTIFACTS",
+      "kind": "both",
+      "read_by": [".claude/hooks/require-verdict.sh"],
+      "set_by": ["scripts/run-until-done.sh"],
+      "default": "unset — the hook is inert",
+      "container_forwarded": false,
+      "semantics": "Space-separated verdict-artifact vocabulary, exported by the loop from its VERDICT_ARTIFACTS array (the single source of truth) so the Stop hook and the dispatcher cannot disagree about what an ending is. Not honoured from the outer environment: the loop assigns it unconditionally."
+    },
+    {
+      "name": "PHASEKIT_ARTIFACTS_DIR",
+      "kind": "both",
+      "read_by": [".claude/hooks/require-verdict.sh"],
+      "set_by": ["scripts/run-until-done.sh"],
+      "default": "unset — the hook is inert",
+      "container_forwarded": false,
+      "semantics": "Absolute path of the repo's artifacts/ directory, exported by the loop for the Stop hook. Not honoured from the outer environment: the loop assigns it unconditionally."
+    },
+    {
+      "name": "PHASEKIT_ITER_MARKER",
+      "kind": "both",
+      "read_by": [".claude/hooks/require-verdict.sh"],
+      "set_by": ["scripts/run-until-done.sh"],
+      "default": "unset — the hook is inert",
+      "container_forwarded": false,
+      "semantics": "Path of the loop's iteration-start marker file (a mktemp path, touched before every claude invocation); the Stop hook only counts verdict artifacts newer than it."
+    },
+    {
+      "name": "PHASEKIT_ITER",
+      "kind": "both",
+      "read_by": ["scripts/run-phase.sh"],
+      "set_by": ["scripts/run-until-done.sh"],
+      "default": "manual",
+      "container_forwarded": false,
+      "semantics": "Iteration number embedded in the per-iteration log filenames (artifacts/logs/claude-iter-N.*). Set per invocation by the loop; the manual default labels direct run-phase.sh runs."
+    },
+    {
+      "name": "PHASEKIT_RETRY_ATTEMPT",
+      "kind": "both",
+      "read_by": ["scripts/run-phase.sh"],
+      "set_by": ["scripts/run-until-done.sh"],
+      "default": "0",
+      "container_forwarded": false,
+      "semantics": "Retry ordinal for the current iteration; >0 appends -retryN to log filenames so a retry never overwrites the first attempt's logs."
+    },
+    {
+      "name": "IS_SANDBOX",
+      "kind": "exported",
+      "set_by": ["scripts/container-setup.sh"],
+      "default": "unset",
+      "container_forwarded": true,
+      "semantics": "Set to 1 for the container only when running as UID 0, because Claude Code refuses --permission-mode bypassPermissions as root without it."
+    },
+    {
+      "name": "CLAUDE_CONFIG_DIR",
+      "kind": "exported",
+      "set_by": ["scripts/container-setup.sh"],
+      "default": "/home/node/.claude (in-container)",
+      "container_forwarded": true,
+      "semantics": "Unconditionally set for the container so the claude CLI finds the volume-persisted credentials regardless of the effective user."
+    },
+    {
+      "name": "PHASEKIT_VERIFY_CONFIGURED",
+      "kind": "file-sentinel",
+      "read_by": ["scripts/run-until-done.sh", "scripts/enrich-project.py"],
+      "default": "n/a — not an environment variable",
+      "container_forwarded": false,
+      "semantics": "NOT read from the environment: a sentinel LINE inside the project-owned scripts/phasekit-verify.sh. The seeded stub carries PHASEKIT_VERIFY_CONFIGURED=0; a configured gate flips it to 1. The loop greps for it to decide light-mode eligibility, and enrich-project.py uses it to know the stub may be replaced by a stack template on upgrade."
+    },
+    {
+      "name": "PHASEKIT_CHANNEL_DEFAULT",
+      "kind": "internal-constant",
+      "set_by": ["scripts/phasekit-channel.sh"],
+      "default": "stable",
+      "container_forwarded": false,
+      "semantics": "Library constant (unconditional assignment when sourced), not an input knob: the channel used when a scaffold checkout has no .phasekit-channel file. Setting it in the environment has no effect."
+    },
+    {
+      "name": "PHASEKIT_CANONICAL_ORIGIN",
+      "kind": "internal-constant",
+      "set_by": ["scripts/run-until-done.sh"],
+      "default": "https://github.com/porkchop/phasekit.git",
+      "container_forwarded": false,
+      "semantics": "Internal constant: the fallback upstream URL for the release-tag nudge when the manifest carries no origin_url. Setting it in the environment has no effect."
+    }
+  ],
+  "artifacts": [
+    {
+      "name": "phase-approval.json",
+      "path": "artifacts/phase-approval.json",
+      "writers": ["session"],
+      "consumers": ["scripts/run-until-done.sh", "scripts/enrich-project.py", ".claude/hooks/compact-reanchor.sh", "supervisor"],
+      "lifecycle": "durable — committed with the phase, deliberately never deleted by iteration cleanup",
+      "verdict": true,
+      "transient_signal": false,
+      "hidden": false,
+      "when": "Written by the Claude session at the end of a phase to approve it; the loop commits it (freshness-gated against the iteration-start marker).",
+      "keys": ["phase", "approved", "summary", "suggested_commit_message"]
+    },
+    {
+      "name": "phase-update.json",
+      "path": "artifacts/phase-update.json",
+      "writers": ["session"],
+      "consumers": ["scripts/run-until-done.sh", "supervisor"],
+      "lifecycle": "committed when produced, deleted at each iteration start",
+      "verdict": true,
+      "transient_signal": false,
+      "hidden": false,
+      "when": "Written by the session when it revised the phase plan/roadmap instead of approving a phase; the loop commits it.",
+      "keys": ["suggested_commit_message"]
+    },
+    {
+      "name": "project-complete.json",
+      "path": "artifacts/project-complete.json",
+      "writers": ["session"],
+      "consumers": ["scripts/run-until-done.sh", "scripts/enrich-project.py", "supervisor"],
+      "lifecycle": "durable — committed as the project's completion record; deleted at each iteration start until real",
+      "verdict": true,
+      "transient_signal": false,
+      "hidden": false,
+      "when": "Written by the session when every phase is approved and acceptance criteria are met; in light mode it must survive an adversarial final review to count. Its presence after the final commit is the loop's exit-0 signal.",
+      "keys": ["summary", "suggested_commit_message"]
+    },
+    {
+      "name": "phase-blocked.json",
+      "path": "artifacts/phase-blocked.json",
+      "writers": ["session", "scripts/run-until-done.sh"],
+      "consumers": ["scripts/run-until-done.sh", "scripts/enrich-project.py", "supervisor"],
+      "lifecycle": "transient signal — deleted at each iteration start; kept out of commits but deliberately visible in git status",
+      "verdict": true,
+      "transient_signal": true,
+      "hidden": false,
+      "when": "Written by the session when it needs external input, or by the loop itself when VERIFY_MAX_ATTEMPTS consecutive verify failures trip the circuit breaker. Either way the loop stops with exit 2.",
+      "keys": ["blocked", "blocker_kind", "reason", "summary", "command", "attempts", "next_step"]
+    },
+    {
+      "name": "phase-verify-failed.json",
+      "path": "artifacts/phase-verify-failed.json",
+      "writers": ["scripts/run-until-done.sh"],
+      "consumers": ["scripts/run-until-done.sh", "scripts/enrich-project.py", "supervisor"],
+      "lifecycle": "transient signal — cleared on verify pass, on VERIFY_SKIP, or at a fresh CLAUDE_MODE=new kickoff; NOT a verdict (the session is still expected to answer); visible in git status",
+      "verdict": false,
+      "transient_signal": true,
+      "hidden": false,
+      "when": "Written by the loop after each failed verify (or contracts-gate) run, carrying the failure for the next iteration to fix. attempts feeds the circuit breaker.",
+      "keys": ["verify_failed", "command", "label", "exit_code", "attempts", "log_tail", "ts"]
+    },
+    {
+      "name": "session-handoff.json",
+      "path": "artifacts/session-handoff.json",
+      "writers": ["scripts/run-until-done.sh"],
+      "consumers": ["session", "supervisor"],
+      "lifecycle": "durable across the boundary — committed with the wrap-up; the NEXT session's continue prompt reads then deletes it",
+      "verdict": false,
+      "transient_signal": false,
+      "hidden": false,
+      "when": "Written by the loop on wrap-up paths (sentinel honoured or deadline pacing) as the baton for the next session.",
+      "keys": ["stopped_at_phase", "in_flight", "verified", "next_step", "note", "ts"]
+    },
+    {
+      "name": "ready-to-deploy.json",
+      "path": "artifacts/ready-to-deploy.json",
+      "writers": ["session"],
+      "consumers": ["supervisor"],
+      "lifecycle": "durable — committed inside the iteration's work",
+      "verdict": false,
+      "transient_signal": false,
+      "hidden": false,
+      "when": "Written by the session when the project is ready for a deploy; phasekit's scripts neither read nor write it — the vocabulary is defined by phasekit's workflow docs (docs/QUALITY_GATES.md) and the file is the supervisor's deploy trigger.",
+      "keys": ["deploy_ready"]
+    },
+    {
+      "name": "scope-refusal.json",
+      "path": "artifacts/scope-refusal.json",
+      "writers": ["scripts/run-until-done.sh"],
+      "consumers": ["scripts/run-until-done.sh", "supervisor"],
+      "lifecycle": "transient signal — hidden from git status; consumed from disk by the supervisor",
+      "verdict": true,
+      "transient_signal": true,
+      "hidden": true,
+      "when": "Written by the loop's commit gate when a light-mode iteration staged scaffold-class files it may not touch; the commit is refused and light mode escalates (exit 2).",
+      "keys": ["scope_refused", "reason", "action", "ts"]
+    },
+    {
+      "name": "light-escalation.json",
+      "path": "artifacts/light-escalation.json",
+      "writers": ["scripts/run-until-done.sh"],
+      "consumers": ["supervisor"],
+      "lifecycle": "transient signal — hidden from git status; consumed from disk by the supervisor",
+      "verdict": true,
+      "transient_signal": true,
+      "hidden": true,
+      "when": "Written by the loop when a light-mode run needs promotion to a standard iteration (scope refusal, repeated verify failure, review withdrawal, or the iteration cap). Accompanies exit 2 (or exit 3 for the cap).",
+      "keys": ["light_escalation", "trigger", "reason", "detail", "model", "iterations_used", "next_step", "ts"]
+    },
+    {
+      "name": "scope-warning.json",
+      "path": "artifacts/scope-warning.json",
+      "writers": ["scripts/run-until-done.sh"],
+      "consumers": ["supervisor"],
+      "lifecycle": "transient signal — hidden from git status; advisory only",
+      "verdict": false,
+      "transient_signal": true,
+      "hidden": true,
+      "when": "Written by the loop's commit gate when a standard-mode commit touches scaffold-class files — allowed, but flagged for the operator.",
+      "keys": ["scope_warning", "files", "ts"]
+    },
+    {
+      "name": "spec-change.json",
+      "path": "artifacts/spec-change.json",
+      "writers": ["scripts/run-until-done.sh"],
+      "consumers": ["supervisor"],
+      "lifecycle": "transient signal — hidden from git status; read-then-deleted by the supervisor",
+      "verdict": false,
+      "transient_signal": true,
+      "hidden": true,
+      "when": "Written by the loop's commit gate when docs/SPEC.md is part of the staged change, so a supervisor can surface spec drift.",
+      "keys": ["spec_changed", "added_lines", "removed_lines", "ts"]
+    },
+    {
+      "name": "wrapup-requested",
+      "path": "artifacts/wrapup-requested (overridable via PHASEKIT_WRAPUP_SENTINEL)",
+      "writers": ["supervisor"],
+      "consumers": ["scripts/run-until-done.sh"],
+      "lifecycle": "sentinel — existence-only, contents never read; cleared stale at loop start, removed once honoured; excluded from git status",
+      "verdict": false,
+      "transient_signal": false,
+      "hidden": false,
+      "when": "Written by the outer supervisor at T-minus-N to request a soft stop; the loop finishes the current iteration, wrap-up commits, and exits 0.",
+      "keys": []
+    },
+    {
+      "name": "mutation-run.json",
+      "path": "artifacts/mutation-run.json",
+      "writers": ["scripts/mutation-run.py"],
+      "consumers": ["session", "supervisor"],
+      "lifecycle": "audit record of an opt-in mutation-testing run (with-mutation profile only)",
+      "verdict": false,
+      "transient_signal": false,
+      "hidden": false,
+      "when": "Written by the opt-in mutation harness when a session runs the mutation protocol; see docs/MUTATION_TESTING.md.",
+      "keys": ["results"]
+    },
+    {
+      "name": "logs",
+      "path": "artifacts/logs/",
+      "writers": ["scripts/run-phase.sh"],
+      "consumers": ["operator"],
+      "lifecycle": "internal — never committed (the loop unstages artifacts/logs on every commit path) and excluded from git status",
+      "verdict": false,
+      "transient_signal": false,
+      "hidden": false,
+      "internal": true,
+      "when": "claude-iter-N[-retryM].jsonl (raw stream-json + stderr) and .log (rendered via phasekit-log-fmt.sh) per claude invocation.",
+      "keys": []
+    },
+    {
+      "name": ".scope-check.tmp",
+      "path": "artifacts/.scope-check.tmp",
+      "writers": ["scripts/run-until-done.sh"],
+      "consumers": ["scripts/run-until-done.sh"],
+      "lifecycle": "internal staging file for the scope check; promoted to scope-warning.json or removed within one gate run; hidden from git status",
+      "verdict": false,
+      "transient_signal": true,
+      "hidden": true,
+      "internal": true,
+      "when": "Exists only inside post_verify_commit_gates. Do not rely on it.",
+      "keys": []
+    },
+    {
+      "name": ".stop-hook-blocks",
+      "path": "artifacts/.stop-hook-blocks",
+      "writers": [".claude/hooks/require-verdict.sh"],
+      "consumers": [".claude/hooks/require-verdict.sh", "scripts/run-until-done.sh"],
+      "lifecycle": "internal per-iteration counter (plain integer, not JSON); deleted by iteration cleanup so the block budget resets; hidden from git status",
+      "verdict": false,
+      "transient_signal": true,
+      "hidden": true,
+      "internal": true,
+      "when": "The Stop hook's bounded-block bookkeeping. Do not rely on it.",
+      "keys": []
+    }
+  ],
+  "exit_codes": {
+    "scripts/run-until-done.sh": {
+      "codes": {
+        "0": "finished cleanly: project completion committed, wrap-up sentinel honoured, deadline pacing wrapped up, or stranded work recovered with nothing left to do",
+        "1": "loop-owned failure: a required command (jq, git) is missing, or the session ended with NO verdict artifact and the loop cannot dispatch (the silence failure the Stop hook exists to prevent)",
+        "2": "stopped, external input required: phase-blocked.json present, a commit was blocked, or a light-mode run escalated",
+        "3": "MAX_ITERATIONS reached without project completion (light mode also writes light-escalation.json with trigger iteration_cap)"
+      },
+      "passthrough": "Any other code is the claude CLI's own exit, propagated verbatim after the PHASEKIT_ITER_RETRY budget is exhausted — including 124 from a supervisor-side timeout and 137 from SIGKILL. The loop assigns meaning only to 0/1/2/3."
+    },
+    "scripts/run-phase.sh": {
+      "codes": {
+        "1": "usage error: no prompt-file argument, or the prompt file does not exist"
+      },
+      "passthrough": "Otherwise the claude CLI's exit status, unmodified (pipefail); nothing is remapped."
+    },
+    "scripts/phasekit-contracts.py": {
+      "codes": {
+        "0": "nothing declared, or every declared contract byte-matches the provider (also all status/provider/refresh success paths)",
+        "2": "malformed declaration or provider manifest (also missing pyyaml, and CLI usage errors)",
+        "3": "unobtainable: no provider mounted, or the provider does not offer a declared slug; refreshing cannot help",
+        "4": "drift: the vendored copy is missing or differs from the mounted one; fix is the named refresh command",
+        "5": "unverifiable: contracts.yaml exists but scripts/phasekit-contracts.py does not (scaffold predates v0.7.0). Emitted by the LOOP into phase-verify-failed.json, never by the checker itself; fix is phasekit upgrade"
+      },
+      "passthrough": null
+    },
+    "scripts/container-setup.sh": {
+      "codes": {
+        "1": "precondition/config failure: docker missing, PHASEKIT_CONTRACTS_MOUNT unusable (not a directory, or no readable index.json), or an unknown command"
+      },
+      "passthrough": "Otherwise docker build's or the in-container process's exit status verbatim — so run-until-done.sh's codes surface unchanged, as do docker's own conventions (125/126/127, 137 for docker kill)."
+    },
+    "scripts/verify-container.sh": {
+      "codes": {
+        "0": "all executed checks passed (skipped checks count as neither)",
+        "1": "at least one check failed (aggregate; see the FAIL lines on stdout for which)"
+      },
+      "passthrough": null
+    },
+    "scripts/phasekit.sh": {
+      "codes": {
+        "0": "success (check-version is informational and returns 0 even when behind)",
+        "1": "usage or I/O failure (missing target, unreadable manifest, non-canonical checkout for channel/self-update)",
+        "2": "lock contention — another enrich-project.py holds the target's lock",
+        "3": "drift detected by the check verb (DRIFT / MISSING / TEMPLATE DRIFT)"
+      },
+      "passthrough": "The CLI execs scripts/enrich-project.py, so these are the engine's codes; a missing PHASEKIT_PYTHON interpreter surfaces as the shell's 126/127."
+    },
+    ".claude/hooks/require-verdict.sh": {
+      "codes": {
+        "0": "allow the stop: hook inert (loop env absent), a fresh verdict artifact exists, the block budget is spent, or the counter is unwritable (cannot bound, so must not block)",
+        "2": "block the stop (Stop-hook contract): no verdict artifact newer than the iteration marker; bounded to PHASEKIT_STOP_BLOCK_LIMIT blocks per iteration"
+      },
+      "passthrough": null
+    },
+    ".claude/hooks/deny-dangerous-commands.sh": {
+      "codes": {
+        "0": "no blocklist pattern matched (including an empty payload — fail-open)",
+        "2": "deny the tool call (PreToolUse hook contract): a dangerous pattern matched"
+      },
+      "passthrough": null
+    },
+    ".claude/hooks/compact-reanchor.sh": {
+      "codes": {
+        "0": "always — contractually fail-open; internal python failures are swallowed and output is capped at 2048 bytes"
+      },
+      "passthrough": null
+    },
+    "conventions": {
+      "124": "reserved for 'killed by an outer timeout wrapper'. No phasekit script ever exits 124 deliberately, so a supervisor may treat it as its own timeout reflected back.",
+      "137": "SIGKILL (e.g. docker kill by a supervisor on hard deadline), propagated verbatim.",
+      "note": "A wrapper distinguishing 'loop verdict' from 'child failure' relies on run-until-done.sh owning exactly 0/1/2/3 and everything else being passthrough."
+    }
+  }
+}

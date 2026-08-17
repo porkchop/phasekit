@@ -220,6 +220,42 @@ changes an interface without refreshing its contract is incomplete by
 definition** — without a producer-side pin, a hand-written contract rots exactly
 like prose and the problem has merely moved.
 
+## phasekit's own interface manifest
+
+phasekit practices the above on itself: **`contracts/interface.json`**
+declares the full interface through which any supervisor (an orchestrator, a
+cron job, a human wrapper) drives phasekit —
+
+* **env** — every variable the loop, `container-setup.sh`, the hooks or the
+  checker read: default when absent, semantics, which script reads it, and
+  whether `container-setup.sh` forwards it into a containerized run.
+* **artifacts** — every file under `artifacts/` written or consumed across
+  the boundary: who writes it, when, and the top-level keys a consumer may
+  rely on. The verdict / transient-signal / hidden vocabularies mirror the
+  loop's own arrays.
+* **exit codes** — what each script's codes mean, which codes are
+  passthrough, and the conventions a wrapper depends on (`124` = killed by an
+  outer timeout, never a deliberate phasekit exit).
+
+Every input is honoured *when supplied*; nothing in the manifest makes a
+supervisor a prerequisite. It is equally the contract a standalone user's
+wrapper codes against.
+
+It is hand-authored, so it is held against the code from **both directions**
+by `tests/test_interface_manifest.py`: every declared name must be present in
+the script it names (a declared-but-unread entry is `META_REPO_PATH` wearing
+a contract), and every `PHASEKIT_*` name, `artifacts/` filename and literal
+exit code in shipped scripts/hooks must be declared (a new consumer cannot be
+added without declaring it — the pin that would have caught
+`PHASEKIT_SESSION_DEADLINE` on day one). **Refreshing the manifest is part of
+acceptance for any change that touches the interface**; the pins are what
+make that enforceable rather than aspirational.
+
+The manifest is scaffold-class and ships downstream on `phasekit upgrade`,
+because the vendored loop in each managed repo *is* the interface it
+describes: a supervisor codes against (and may mount or vendor) the project's
+own copy.
+
 ## Environment reference
 
 | variable | side | meaning |

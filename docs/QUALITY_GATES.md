@@ -139,8 +139,10 @@ motivating incidents: a tracked `phase-blocked.json`, then a tracked
 The full family: `phase-blocked.json`, `phase-verify-failed.json`,
 `spec-change.json`, `scope-warning.json`, `scope-refusal.json`,
 `light-escalation.json` (plus `artifacts/logs/` and the wrap-up sentinel).
-Deliberate absences — committed on purpose, not transient: `phase-approval`,
-`phase-update`, `project-complete`, `session-handoff`, `ready-to-deploy`, and
+Deliberate absences — committed on purpose, not transient:
+`phase-approval.json`, `phase-update.json`, `project-complete.json`,
+`session-handoff.json`, `ready-to-deploy.json` (the supervisor's deploy
+trigger — the session writes it, phasekit's own scripts never touch it), and
 an orchestrator's `iteration-mode.json`.
 
 Three mechanisms in `scripts/run-until-done.sh` keep the family uncommitted:

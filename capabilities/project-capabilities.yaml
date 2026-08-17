@@ -464,6 +464,16 @@ files:
   CONTINUE_PROMPT.txt:
     ownership: scaffold
 
+  contracts/interface.json:
+    ownership: scaffold
+    # phasekit's own interface manifest (env consumed, artifacts written, exit
+    # codes) — the producer-side contract for the #83 / META_REPO_PATH class,
+    # pinned bidirectionally by tests/test_interface_manifest.py. Ships
+    # downstream because the vendored loop/hooks/container-setup in each
+    # project ARE the interface it describes: a supervisor of a managed
+    # project codes against (and may mount/vendor) the project's own copy,
+    # kept current by `phasekit upgrade` like the scripts themselves.
+
   .devcontainer/Dockerfile:
     ownership: scaffold
 
