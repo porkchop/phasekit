@@ -366,6 +366,14 @@
       "default": "https://github.com/porkchop/phasekit.git",
       "container_forwarded": false,
       "semantics": "Internal constant: the fallback upstream URL for the release-tag nudge when the manifest carries no origin_url. Setting it in the environment has no effect."
+    },
+    {
+      "name": "PHASEKIT_LEARNINGS_WARN_KB",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh"],
+      "default": "48",
+      "container_forwarded": false,
+      "semantics": "Advisory-only threshold in KB for the once-per-session docs/LEARNINGS.md size note. At or over the threshold the loop prints one stderr line suggesting a curation pass per the file's own header rule; it never blocks, never rotates, and never alters prompts (the doc-rotation descope, 2026-08-20). Non-numeric values disable the check. Supervisors that want scheduling watch the same file size themselves."
     }
   ],
   "artifacts": [

@@ -611,14 +611,18 @@ PY
   # text that ships in commits — refuse the commit if it matches obvious
   # credential shapes. Narrow patterns on purpose: false positives here block
   # real work (gate-recovery principle); the promote/mirror gates carry the
-  # broad lint.
-  if [[ -f "$ROOT_DIR/docs/LEARNINGS.md" ]] && echo "$staged" | grep -q '^docs/LEARNINGS\.md$'; then
+  # broad lint. Covers every staged docs/LEARNINGS*.md (not just the main
+  # file) so text a curation session moves to an archive sibling cannot
+  # dodge the gate by changing filename.
+  local learnings_file
+  while IFS= read -r learnings_file; do
+    [[ -n "$learnings_file" && -f "$ROOT_DIR/$learnings_file" ]] || continue
     if grep -nE 'sk-ant-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----' \
-        "$ROOT_DIR/docs/LEARNINGS.md" >&2; then
-      echo "run-until-done: REFUSED — docs/LEARNINGS.md matches a credential pattern (lines above). Remove the secret and retry." >&2
+        "$ROOT_DIR/$learnings_file" >&2; then
+      echo "run-until-done: REFUSED — $learnings_file matches a credential pattern (lines above). Remove the secret and retry." >&2
       return 1
     fi
-  fi
+  done < <(echo "$staged" | grep -E '^docs/LEARNINGS[^/]*\.md$')
   return 0
 }
 
@@ -1010,6 +1014,21 @@ run_once() {
 }
 
 iteration=1
+
+# --- Learnings size advisory (doc-rotation descope rider, 2026-08-20) --------
+# One log line, once per session, when docs/LEARNINGS.md is over budget.
+# Advisory ONLY — never blocks, never rotates, never injects prompt text: the
+# safe maintenance is curation per the file's own header rule (merge/tighten,
+# judgment), and mechanising that was explicitly descoped
+# (foundry-meta kickoffs/KICKOFF-phasekit-doc-rotation.md). A supervisor that
+# wants scheduling watches the same file size itself.
+LEARNINGS_WARN_KB="${PHASEKIT_LEARNINGS_WARN_KB:-48}"
+if [[ -f "$ROOT_DIR/docs/LEARNINGS.md" ]] && [[ "$LEARNINGS_WARN_KB" =~ ^[0-9]+$ ]]; then
+  learnings_kb=$(( $(wc -c < "$ROOT_DIR/docs/LEARNINGS.md") / 1024 ))
+  if (( learnings_kb >= LEARNINGS_WARN_KB )); then
+    echo "run-until-done: note — docs/LEARNINGS.md is ${learnings_kb} KB (advisory threshold ${LEARNINGS_WARN_KB} KB). Consider a curation pass per the file's header rule (merge/tighten; never blind oldest-first pruning)." >&2
+  fi
+fi
 
 # --- Iteration-mode resolution (v0.6.0) -------------------------------------
 # Eligibility guard: light mode with a stub/absent verify gate is refused —
