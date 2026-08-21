@@ -5,6 +5,7 @@ Before doing substantive work:
 2. Prefer the latest repository state over any prior session assumptions.
 3. Treat previous plans as provisional unless they still match the current files.
 4. Untracked files or unstaged changes in the working tree are work-in-progress from a previously interrupted run, not noise. Inspect them, decide whether they belong to the current phase, and either fold them in or discard them deliberately — do not ignore them.
+5. The SPEC's acceptance criteria are APPEND-ONLY: never delete or renumber an existing criterion. To change one, append the replacement as a new criterion and prefix the old line with `SUPERSEDED by AC#<n>: ` (that exact marker); outright removals happen only via an operator change-request. See docs/QUALITY_GATES.md "Spec integrity gate".
 
 Read and follow, in this order, if present:
 - .claude/CLAUDE.md

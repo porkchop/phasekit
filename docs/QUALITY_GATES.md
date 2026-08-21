@@ -56,6 +56,33 @@ Before starting a new implementation phase, the assigned builder must:
 - prefer extending existing modules over creating parallel implementations
 - report discovered drift as a blocking issue for project-lead to resolve before proceeding
 
+## Spec integrity gate
+The SPEC's acceptance-criteria section is **append-only**. An autonomous
+session may add criteria and may supersede them; it may never delete or
+renumber one. This is the long-running-harness doctrine (an agent must not
+be able to quietly weaken its own goalposts), and it is what makes `AC#n`
+citations in approval artifacts durable — a renumber silently re-aims every
+historical citation.
+
+- **Add**: append the new criterion with the next number. Numbers are
+  permanent identifiers and are never reused.
+- **Supersede**: append the replacement as a new criterion carrying the FULL
+  replacement text (never a delta), then prefix the superseded criterion's
+  line with the canonical marker, exactly:
+
+  `SUPERSEDED by AC#<n>: ` (followed by the original line, left intact)
+
+  The marker string is a cross-repo contract pinned in
+  `contracts/interface.json` — a supervisor's spec-change detector keys on
+  it, so the literal must not be paraphrased, reformatted, or translated.
+  Reading the newest line of any supersede chain must suffice.
+- **Remove**: only via an operator change-request that names the criterion.
+  A removal without one is a violation, and a supervisor may flag it as
+  high-confidence without further analysis.
+
+Everything outside the acceptance-criteria section keeps its ordinary
+editing rules.
+
 ## Verification sprint gate
 Before starting a phase that builds on a completed user-visible or end-to-end foundation, run a full verification of the cumulative system to confirm prior work still functions:
 - run the complete test suite (unit, integration, and browser/E2E when applicable)
