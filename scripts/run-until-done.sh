@@ -118,6 +118,7 @@ TRANSIENT_SIGNALS=(
   ".scope-check.tmp"
   ".stop-hook-blocks"
   ".wrapup-nudge-sent"
+  "session-interrupted.json"
 )
 
 # The subset also hidden from `git status` via .git/info/exclude: consumed from
@@ -134,6 +135,7 @@ HIDDEN_TRANSIENTS=(
   ".scope-check.tmp"
   ".stop-hook-blocks"
   ".wrapup-nudge-sent"
+  "session-interrupted.json"
 )
 
 # --- The verdict vocabulary -------------------------------------------------
@@ -761,6 +763,72 @@ write_session_handoff() {
     }' > "$ARTIFACTS_DIR/session-handoff.json"
 }
 
+write_provisional_handoff() {
+  # Dead-man baton (v0.10.1). The wrap-up baton above is written by the
+  # wrap-up — and a session killed mid-iteration (deadline class (a)) or one
+  # that exits silently dies BEFORE wrap-up runs, which is exactly the case
+  # where the next session most needs orientation: it inherits a dirty tree
+  # with no explanation, and the record shows inherited trees "confused the
+  # next session. Three times." So the loop writes a PROVISIONAL baton at
+  # every iteration start and removes it only when the iteration concludes
+  # with a verdict (the EXIT trap below). A kill cannot cooperate, and does
+  # not need to: the baton it leaves behind is accurate by construction.
+  #
+  # Its OWN file, not session-handoff.json, and the separation is
+  # load-bearing: iteration 1's provisional is written BEFORE the model runs,
+  # and the model's orientation reads session-handoff.json — writing there
+  # would clobber the inbound baton with a false "you were killed" note about
+  # the session that is only just starting. Instead the next session's loop
+  # PROMOTES a surviving session-interrupted.json into the baton slot at
+  # startup (see the promotion block beside the iteration marker), where the
+  # existing read-then-delete orientation consumes it unchanged. Same six
+  # keys as the real baton — the manifest pins one schema for both.
+  local iter="$1"
+  local phase="unknown"
+  if [[ -f "$ARTIFACTS_DIR/phase-approval.json" ]]; then
+    phase="$(jq -r '.phase // "unknown"' "$ARTIFACTS_DIR/phase-approval.json" 2>/dev/null)" || phase="unknown"
+    [[ -n "$phase" ]] || phase="unknown"
+  fi
+  jq -n \
+    --arg phase "$phase" \
+    --arg iter "$iter" \
+    --arg mode "$ITERATION_MODE" \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{
+      stopped_at_phase: $phase,
+      in_flight: ("iteration " + $iter + " (" + $mode + " mode) was IN FLIGHT when this session ended; whatever `git status` shows now is that iteration'"'"'s unverified work-in-progress"),
+      verified: false,
+      next_step: "audit the dirty tree as IN-PROGRESS IMPLEMENTATION from an interrupted session: re-derive what is verified, keep it, finish or revert the rest — do not read the tree as intentional resting state",
+      note: "dead-man baton: written at iteration start, removed when the iteration concludes with a verdict — you are reading it because the previous session was killed or exited without concluding (stopped_at_phase = last APPROVED phase). Ephemeral: delete after orienting.",
+      ts: $ts
+    }' > "$ARTIFACTS_DIR/session-interrupted.json"
+}
+
+clear_provisional_handoff_on_exit() {
+  # The dead-man baton's other half: on any NORMAL exit, remove the
+  # provisional iff this iteration produced a verdict — a concluded iteration
+  # explains its own tree, and a leftover "you were killed" note would lie.
+  # Fail directions, each deliberate:
+  #   * no verdict this iteration (the silent exit-1 class) -> LEFT IN PLACE,
+  #     because the baton is then telling the truth;
+  #   * an exit before the loop ever started (preflight refusals) has no
+  #     iteration marker; nothing was in flight, so a surviving provisional
+  #     can only be a previous session's truthful one -> leave it;
+  #   * a hard kill never runs this trap at all, which is the whole point.
+  local f="$ARTIFACTS_DIR/session-interrupted.json"
+  [[ -f "$f" ]] || return 0
+  [[ -n "${ITER_START_MARKER:-}" && -f "${ITER_START_MARKER:-}" ]] || return 0
+  local a
+  for a in "${VERDICT_ARTIFACTS[@]}"; do
+    if [[ -f "$ARTIFACTS_DIR/$a" && "$ARTIFACTS_DIR/$a" -nt "$ITER_START_MARKER" ]]; then
+      rm -f "$f"
+      return 0
+    fi
+  done
+  echo "run-until-done: dead-man handoff left in place (no verdict this iteration) — the next session orients from it" >&2
+}
+trap clear_provisional_handoff_on_exit EXIT
+
 wrapup_commit() {
   # Soft wrap-up (v0.6.0). When the outer supervisor signals imminent shutdown
   # (see WRAPUP_SENTINEL below) or deadline pacing fires (v0.6.1), commit
@@ -1081,6 +1149,20 @@ ITER_START_MARKER="$(mktemp)"
 # answer "was this artifact written during THIS iteration?" exactly as
 # artifact_written_this_iteration() does. One marker, one answer.
 export PHASEKIT_ITER_MARKER="$ITER_START_MARKER"
+
+# Dead-man promotion (v0.10.1): a session-interrupted.json that survived to
+# THIS session's start is the previous session's kill telling its story.
+# Promote it into the baton slot the orientation already reads-then-deletes —
+# unless a real wrap-up baton exists, which knows strictly more (the wrap-up
+# ran after the last provisional was written) and wins.
+if [[ -f "$ARTIFACTS_DIR/session-interrupted.json" ]]; then
+  if [[ -f "$ARTIFACTS_DIR/session-handoff.json" ]]; then
+    rm -f "$ARTIFACTS_DIR/session-interrupted.json"
+  else
+    mv -f "$ARTIFACTS_DIR/session-interrupted.json" "$ARTIFACTS_DIR/session-handoff.json"
+    echo "run-until-done: promoted the previous session's dead-man baton to session-handoff.json (that session ended without concluding its iteration)" >&2
+  fi
+fi
 PENDING_COMMIT_RETRY=""
 
 # Soft wrap-up sentinel: an outer supervisor (e.g. the orchestrator's
@@ -1222,6 +1304,10 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   verdict_retry_used=0
   cleanup_artifacts
   touch "$ITER_START_MARKER"
+  # Dead-man baton: overwritten here every iteration, removed by the EXIT
+  # trap when the iteration concludes with a verdict, and left behind by a
+  # kill — see write_provisional_handoff.
+  write_provisional_handoff "$iteration"
 
   # First attempt of iteration 1 in `new` mode uses fresh-session semantics;
   # retries (and every later iteration) use `continue` so they resume the

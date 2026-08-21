@@ -578,6 +578,30 @@
       "keys": []
     },
     {
+      "name": "session-interrupted.json",
+      "path": "artifacts/session-interrupted.json",
+      "writers": [
+        "scripts/run-until-done.sh"
+      ],
+      "consumers": [
+        "scripts/run-until-done.sh"
+      ],
+      "lifecycle": "dead-man baton: written at every iteration start, deleted by the loop's EXIT trap when the iteration concludes with a verdict; one that survives to the NEXT session's start is promoted to session-handoff.json (unless a real wrap-up baton exists, which wins) and consumed by the orientation there. Same six keys as session-handoff.json. Never committed; hidden from git status",
+      "verdict": false,
+      "transient_signal": true,
+      "hidden": true,
+      "internal": true,
+      "when": "The previous session was killed or exited without concluding its iteration. Read via its promotion to session-handoff.json, not directly.",
+      "keys": [
+        "stopped_at_phase",
+        "in_flight",
+        "verified",
+        "next_step",
+        "note",
+        "ts"
+      ]
+    },
+    {
       "name": ".stop-hook-blocks",
       "path": "artifacts/.stop-hook-blocks",
       "writers": [".claude/hooks/require-verdict.sh"],

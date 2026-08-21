@@ -58,7 +58,7 @@ How to determine what is already approved:
 - Start work on the next phase after that
 
 First task:
-1. If `artifacts/session-handoff.json` exists, it is the previous session's wrap-up baton — read it first to orient (last approved phase, in-flight work, whether verify passed), then DELETE the file after orienting. It is ephemeral, not a durable record (durable learnings belong in docs/LEARNINGS.md).
+1. If `artifacts/session-handoff.json` exists, it is the previous session's baton — read it first to orient (last approved phase, in-flight work, whether verify passed), then DELETE the file after orienting. Its `note` says which flavor it is: a wrap-up baton (the session ended deliberately) or a dead-man baton (the session was KILLED or exited mid-iteration — treat the dirty tree as that iteration's unverified work-in-progress: verify what is green and keep it; finish or revert the rest; never read it as intentional resting state). It is ephemeral, not a durable record (durable learnings belong in docs/LEARNINGS.md).
 2. If `artifacts/phase-verify-failed.json` exists, the previous iteration's phase-approval or phase-update commit was blocked by the pre-commit verification gate. Treat fixing that failure as the highest-priority work for this iteration — read the artifact's `command`, `log_tail`, and `attempts` fields, then fix the underlying problem before doing any new phase work. Re-write whichever signal artifact you wrote previously (`phase-approval.json` or `phase-update.json`, preserving the same phase identity) when the fix is in place; the wrapper will retry the commit.
 3. Read `artifacts/phase-approval.json` to find the last approved phase
 4. Identify the next unapproved phase from docs/META_PHASES.md or docs/PHASES.md
