@@ -117,6 +117,7 @@ TRANSIENT_SIGNALS=(
   "light-escalation.json"
   ".scope-check.tmp"
   ".stop-hook-blocks"
+  ".wrapup-nudge-sent"
 )
 
 # The subset also hidden from `git status` via .git/info/exclude: consumed from
@@ -132,6 +133,7 @@ HIDDEN_TRANSIENTS=(
   "light-escalation.json"
   ".scope-check.tmp"
   ".stop-hook-blocks"
+  ".wrapup-nudge-sent"
 )
 
 # --- The verdict vocabulary -------------------------------------------------
@@ -276,6 +278,10 @@ cleanup_artifacts() {
   # last iteration starts the next one with a full allowance, and a healthy
   # iteration never creates the file at all.
   rm -f "$ARTIFACTS_DIR/.stop-hook-blocks"
+  # The wrap-up nudge (PostToolUse hook) is once-per-iteration by the same
+  # freshness idiom; clearing its marker here keeps the two hook budgets on
+  # one lifecycle. A healthy iteration (no sentinel) never creates it.
+  rm -f "$ARTIFACTS_DIR/.wrapup-nudge-sent"
 }
 
 print_json_summary() {

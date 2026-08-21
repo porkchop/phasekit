@@ -19,10 +19,10 @@
     {
       "name": "PHASEKIT_WRAPUP_SENTINEL",
       "kind": "consumed",
-      "read_by": ["scripts/run-until-done.sh"],
+      "read_by": ["scripts/run-until-done.sh", ".claude/hooks/wrapup-nudge.sh"],
       "default": "<repo>/artifacts/wrapup-requested",
       "container_forwarded": false,
-      "semantics": "Path of the supervisor's soft-stop sentinel file. Existence-only signal: the loop clears a stale one at start, polls between iterations, and finishes with a wrap-up commit when it appears. The default lives inside the workspace, so a containerized supervisor signals by writing the file, not by forwarding this variable; an overrider owns keeping a custom path out of git status."
+      "semantics": "Path of the supervisor's soft-stop sentinel file. Existence-only signal: the loop clears a stale one at start, polls between iterations, and finishes with a wrap-up commit when it appears; the wrapup-nudge PostToolUse hook additionally surfaces it to the model MID-iteration, once, so a turn spanning the deadline hears about it before the kill. The default lives inside the workspace, so a containerized supervisor signals by writing the file, not by forwarding this variable; an overrider owns keeping a custom path out of git status."
     },
     {
       "name": "PHASEKIT_ITERATION_MODE",
@@ -557,6 +557,24 @@
       "hidden": true,
       "internal": true,
       "when": "Exists only inside post_verify_commit_gates. Do not rely on it.",
+      "keys": []
+    },
+    {
+      "name": ".wrapup-nudge-sent",
+      "path": "artifacts/.wrapup-nudge-sent",
+      "writers": [
+        ".claude/hooks/wrapup-nudge.sh"
+      ],
+      "consumers": [
+        ".claude/hooks/wrapup-nudge.sh",
+        "scripts/run-until-done.sh"
+      ],
+      "lifecycle": "internal once-per-iteration marker (empty file); freshness against the iteration marker decides, and iteration cleanup deletes it beside .stop-hook-blocks; hidden from git status",
+      "verdict": false,
+      "transient_signal": true,
+      "hidden": true,
+      "internal": true,
+      "when": "The wrapup-nudge hook's once-per-iteration bookkeeping. Do not rely on it.",
       "keys": []
     },
     {

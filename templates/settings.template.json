@@ -43,6 +43,14 @@
             "command": "./.claude/hooks/deny-dangerous-commands.sh"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./.claude/hooks/wrapup-nudge.sh"
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -62,6 +70,16 @@
           {
             "type": "command",
             "command": "./.claude/hooks/require-verdict.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./.claude/hooks/wrapup-nudge.sh"
           }
         ]
       }

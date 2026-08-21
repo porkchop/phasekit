@@ -56,6 +56,7 @@ profiles:
       - deny-dangerous-commands
       - compact-reanchor
       - require-verdict
+      - wrapup-nudge
     include_scripts:
       - run-phase
       - run-until-done
@@ -339,6 +340,18 @@ hooks:
     # nothing, and left a growing dirty tree. Bounded (2 blocks per iteration),
     # inert outside the loop and on the happy path, and never satisfied by an
     # artifact left over from a previous iteration.
+
+  wrapup-nudge:
+    path: .claude/hooks/wrapup-nudge.sh
+    required: false
+    ownership: scaffold
+    # PreToolUse + PostToolUse hook: delivers the wrap-up request MID-turn —
+    # before a tool launch (blocks that one call: do not START work that will
+    # not fit) and after a completion. One marker bounds both to one nudge.
+    # Class (a) of the deadline post-mortem: the loop polls the sentinel only
+    # between iterations, so one long turn sails past it and is killed with
+    # uncommitted work. Fires once per iteration, only while the sentinel
+    # exists, inert outside the loop, fail-open, never blocks a tool.
 
   compact-reanchor:
     path: .claude/hooks/compact-reanchor.sh
