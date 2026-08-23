@@ -622,6 +622,13 @@
       "declared_in": ["docs/QUALITY_GATES.md", "CONTINUE_PROMPT.txt"],
       "consumers": ["session", "supervisor"],
       "semantics": "The SPEC's acceptance-criteria section is append-only: sessions add criteria and supersede them (prefix the old line with the marker, exactly, followed by the replacement criterion's number and a colon-space; full replacement text lives in the appended criterion), and never delete or renumber. Removals only via operator change-request. The marker literal is the cross-repo contract a supervisor's spec-change detector keys on: a removal or rewrite of an existing criterion line without it is a high-confidence violation; append-only changes auto-clear."
+    },
+    {
+      "name": "approval-deferrals",
+      "marker": "deferrals",
+      "declared_in": ["docs/QUALITY_GATES.md", "CONTINUE_PROMPT.txt"],
+      "consumers": ["session", "supervisor"],
+      "semantics": "Verdict artifacts (phase-approval.json, project-complete.json) may carry a top-level 'deferrals' array of {item, reason, suggested_task} objects, one per in-scope acceptance item the session deliberately did not implement. The supervisor files one queue task per entry so deferred scope cannot lose its slot; absence of the field claims everything in scope shipped. A deferral recorded only in prose is a violation of the deferred-scope gate — this field is the sole machine-readable home."
     }
   ],
   "exit_codes": {

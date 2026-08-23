@@ -83,12 +83,69 @@ historical citation.
 Everything outside the acceptance-criteria section keeps its ordinary
 editing rules.
 
+## Deferred-scope gate
+An in-scope acceptance item (a SPEC criterion, or a named ask in the
+iteration's change-request) that a session decides not to implement is a
+**deferral, and deferrals are machine-readable or they are violations**.
+- Record every deferral in the verdict artifact that ends the work
+  (`phase-approval.json` or `project-complete.json`) under a top-level
+  `deferrals` array: `{"item": "<the criterion or ask>", "reason": "<one
+  line>", "suggested_task": "<one-line title for the follow-up>"}`.
+- Prose-only deferrals (a paragraph in PHASES.md, a caveat in a spec
+  section) do not count. Prose is where the explanation lives; the array
+  is what a supervisor can act on. A deferral recorded only in prose is
+  scope the pipeline will lose — the follow-up slot gets taken and
+  nothing reschedules it.
+- The `deferrals` field name is a cross-repo contract pinned in
+  `contracts/interface.json` (`approval-deferrals`): a supervisor files
+  one queue task per entry. Do not rename or restructure it.
+- Deferring is legitimate — an honest audit may find the remaining work
+  deserves its own iteration. Deferring *silently* is not: absence of the
+  field claims "everything in scope shipped."
+
 ## Verification sprint gate
 Before starting a phase that builds on a completed user-visible or end-to-end foundation, run a full verification of the cumulative system to confirm prior work still functions:
 - run the complete test suite (unit, integration, and browser/E2E when applicable)
 - exercise the primary user workflow end-to-end via `qa-playwright` for browser projects, or via the project's domain-equivalent QA (CLI smoke test, integration harness) for non-browser projects
 - fix any regressions before starting new work — do not layer new complexity onto broken foundations
 - record verification results under a `verification_sprint` field in the next `artifacts/phase-approval.json`
+
+## Review-fix convergence gate
+Review rounds must ratchet — each round strictly reduces open defects.
+- **Pin-per-fix**: no review-finding fix lands without the regression
+  test that fails without it. A fix whose only evidence is the reviewer's
+  re-read is not closed; name the finding in the test or in its commit so
+  the pairing is checkable.
+- **Continuity is opt-in per iteration**: a change-request may direct
+  that the session producing a review's findings also fixes them in the
+  same session (context stays hot; fix quality rises). Independence is
+  preserved by the NEXT review round running fresh-context. Do not
+  self-adopt this default — it applies only where the iteration's request
+  says so.
+- **Non-convergence is a verdict, not a loop**: if two consecutive fix
+  rounds have each introduced new MAJOR findings, do not run a third.
+  Write `artifacts/phase-blocked.json` with reason `review-nonconvergence`
+  and stop — an operator decision or a redesign is cheaper than a fourth
+  round of defect-minting.
+
+## Progress record discipline
+`docs/PHASES.md` progress records are handoff and audit instruments, not
+narratives. Budget: aim for **at most 80 lines per record**, structured:
+- **Closed** — criteria/rows completed, one line each
+- **Opened** — new findings: `file:symbol`, severity, one-line claim
+- **Decisions** — each with a one-line rationale
+- **Admissions** — limits, surviving issues, and a pointer to any
+  `deferrals` entries in the verdict artifact
+- **Verify** — tier run and result
+
+Rules: narrative paragraphs only for genuine surprises. Never quote code
+with line numbers — they rot; cite `file:symbol` and re-derive. The story
+of the work lives in the diff and the commit message; do not restate it.
+Records are append-only history: this format applies to NEW records —
+never rewrite past ones. Corollary for source comments: a comment states
+a constraint the code cannot; session numbers, finding IDs, and the
+history of earlier comment drafts are archaeology and belong in the
+progress record, never in the code.
 
 ## Planning gate
 Use a planning and adversarial review cycle before implementation when any of the following are true:
@@ -331,6 +388,24 @@ For phases that required a planning gate, include a `decision_memo` field refere
 ```
 
 This field is optional for phases that did not require a planning gate, and required for those that did.
+
+When in-scope acceptance work was deferred (see the deferred-scope gate), the artifact carries the machine-readable record:
+
+```json
+{
+  "phase": "phase-7",
+  "approved": true,
+  "summary": "...",
+  "deferrals": [
+    {
+      "item": "AC#3 integer-math conversion of the movement pipeline",
+      "reason": "audit found behaviour-bearing float usage across six modules; deserves its own gated iteration",
+      "suggested_task": "fixed-point conversion of the movement pipeline (deferred from AC#3)"
+    }
+  ],
+  "suggested_commit_message": "phase-7: ..."
+}
+```
 
 ## Final completion artifact
 
