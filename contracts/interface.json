@@ -387,7 +387,7 @@
       "transient_signal": false,
       "hidden": false,
       "when": "Written by the Claude session at the end of a phase to approve it; the loop commits it (freshness-gated against the iteration-start marker).",
-      "keys": ["phase", "approved", "summary", "suggested_commit_message"]
+      "keys": ["phase", "approved", "summary", "suggested_commit_message", "deferrals"]
     },
     {
       "name": "phase-update.json",
@@ -411,7 +411,7 @@
       "transient_signal": false,
       "hidden": false,
       "when": "Written by the session when every phase is approved and acceptance criteria are met; in light mode it must survive an adversarial final review to count. Its presence after the final commit is the loop's exit-0 signal.",
-      "keys": ["summary", "suggested_commit_message"]
+      "keys": ["summary", "suggested_commit_message", "deferrals"]
     },
     {
       "name": "phase-blocked.json",
@@ -628,7 +628,14 @@
       "marker": "deferrals",
       "declared_in": ["docs/QUALITY_GATES.md", "CONTINUE_PROMPT.txt"],
       "consumers": ["session", "supervisor"],
-      "semantics": "Verdict artifacts (phase-approval.json, project-complete.json) may carry a top-level 'deferrals' array of {item, reason, suggested_task} objects, one per in-scope acceptance item the session deliberately did not implement. The supervisor files one queue task per entry so deferred scope cannot lose its slot; absence of the field claims everything in scope shipped. A deferral recorded only in prose is a violation of the deferred-scope gate — this field is the sole machine-readable home."
+      "semantics": "Verdict artifacts (phase-approval.json, project-complete.json) may carry a top-level 'deferrals' array of {item, reason, suggested_task} objects plus an optional 'key', one entry per in-scope acceptance item the session deliberately did not implement. 'item' MUST name the AC number when the deferral maps to a criterion. 'key' is the stable dedupe identifier: it defaults to that AC number (e.g. 'AC#3') when 'item' cites one, and MUST be supplied explicitly (kebab-case) otherwise; entries with the same key across artifact rewrites or successive approvals are the SAME deferral and are never refiled. The supervisor files one queue task per new key so deferred scope cannot lose its slot — and those tasks land HELD (ops lane or approval-gated), never pre-approved: a session's own deferral entry is not self-granted authorization for follow-up work. Absence of the field claims everything in scope shipped; a deferral recorded only in prose is a violation of the deferred-scope gate — this field is the sole machine-readable home."
+    },
+    {
+      "name": "blocked-reason-review-nonconvergence",
+      "marker": "review-nonconvergence",
+      "declared_in": ["docs/QUALITY_GATES.md"],
+      "consumers": ["session", "supervisor"],
+      "semantics": "The exact 'reason' literal a session writes into artifacts/phase-blocked.json when the review-fix convergence gate trips (two consecutive fix rounds each introduced new MAJOR findings). Sessions must use the literal verbatim; a supervisor branching on blocked-reason may key on it to route non-convergence to an operator or redesign lane rather than a generic stall path."
     }
   ],
   "exit_codes": {

@@ -91,6 +91,17 @@ iteration's change-request) that a session decides not to implement is a
   (`phase-approval.json` or `project-complete.json`) under a top-level
   `deferrals` array: `{"item": "<the criterion or ask>", "reason": "<one
   line>", "suggested_task": "<one-line title for the follow-up>"}`.
+  `item` MUST name the AC number when the deferral maps to a criterion.
+- Each entry carries a stable dedupe identifier: an optional `"key"`
+  field, defaulting to the cited AC number (e.g. `AC#3`) when `item`
+  names one, and REQUIRED explicitly (kebab-case) when it does not. The
+  same key across artifact rewrites or successive approvals is the SAME
+  deferral — "still deferred" is not a new entry. The supervisor files
+  one queue task per new key, and those tasks land HELD (ops lane or
+  approval-gated), never pre-approved: your own deferral entry is not
+  self-granted authorization for the follow-up work.
+- This gate binds every verdict artifact regardless of execution mode —
+  light and micro iterations included.
 - Prose-only deferrals (a paragraph in PHASES.md, a caveat in a spec
   section) do not count. Prose is where the explanation lives; the array
   is what a supervisor can act on. A deferral recorded only in prose is
@@ -112,6 +123,13 @@ Before starting a phase that builds on a completed user-visible or end-to-end fo
 
 ## Review-fix convergence gate
 Review rounds must ratchet — each round strictly reduces open defects.
+
+Severity vocabulary (this gate keys on it, and the grader is the session
+being graded — demoting a finding to dodge the stop rule is the
+anti-rationalization table's genre): **BLOCKER** = violates an acceptance
+criterion or corrupts state; **MAJOR** = reachable wrong behavior, or a
+fix/claim with no pinned test; **MINOR** = everything else worth
+recording. Grade findings before writing the fix list.
 - **Pin-per-fix**: no review-finding fix lands without the regression
   test that fails without it. A fix whose only evidence is the reviewer's
   re-read is not closed; name the finding in the test or in its commit so
@@ -142,7 +160,11 @@ Rules: narrative paragraphs only for genuine surprises. Never quote code
 with line numbers — they rot; cite `file:symbol` and re-derive. The story
 of the work lives in the diff and the commit message; do not restate it.
 Records are append-only history: this format applies to NEW records —
-never rewrite past ones. Corollary for source comments: a comment states
+never rewrite past ones. This format applies only where a record is
+written at all (a mode that writes no record owes none). Precedence: a
+project's own `docs/PHASES.md` header may declare local format rules;
+where it does, local wins for that file — same project-owned-wins rule as
+verify seeding. Corollary for source comments: a comment states
 a constraint the code cannot; session numbers, finding IDs, and the
 history of earlier comment drafts are archaeology and belong in the
 progress record, never in the code.
@@ -399,6 +421,7 @@ When in-scope acceptance work was deferred (see the deferred-scope gate), the ar
   "deferrals": [
     {
       "item": "AC#3 integer-math conversion of the movement pipeline",
+      "key": "AC#3",
       "reason": "audit found behaviour-bearing float usage across six modules; deserves its own gated iteration",
       "suggested_task": "fixed-point conversion of the movement pipeline (deferred from AC#3)"
     }
