@@ -1245,13 +1245,17 @@ artifact_never_landed() {
 # generic completion chore commit — approval and completion written in the
 # same iteration, and the completion branch runs first, so the approval's
 # suggested_commit_message sat unused while its work rode an unlabeled sweep.
-# rc semantics: the phase commit sweeps the whole tree (completion record
-# included — the boundary is NAMED, which is the property this buys; the
-# resting predicate reads the committed record, not the message), so the
+# rc semantics (v0.12.3): the phase commit sweeps the whole tree (completion
+# record included — the boundary is NAMED, which is the property this buys;
+# the resting predicate reads the committed record, not the message), so the
 # completion commit that follows typically finds nothing (rc 2 = clean
-# finish). A verify failure here falls through to the completion path below,
-# whose existing re-loop machinery owns the fix cycle — this helper never
-# gates on its own.
+# finish). The helper RETURNS commit_from_artifact's rc and gates nothing
+# itself — each call site decides: the in-loop gate short-circuits its
+# completion attempt on rc 1 (the tree is verify-red; a second full-tier run
+# on the same red tree would double the spend AND double-count the
+# VERIFY_MAX_ATTEMPTS breaker at exactly the boundary where verify is most
+# expensive), while the stranded-at-start site ignores the rc (`|| true`)
+# because its failure path already falls into the loop.
 commit_pending_approval_first() {
   artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json" || return 0
   echo "Unlanded phase approval detected before completion — committing the phase under its own message first."
@@ -1260,7 +1264,7 @@ commit_pending_approval_first() {
   commit_from_artifact \
     "$ARTIFACTS_DIR/phase-approval.json" \
     "chore(workflow): approve completed phase" || acrc=$?
-  return 0
+  return "$acrc"
 }
 
 if artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then
@@ -1269,7 +1273,12 @@ if artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then
   # gates apply) — on success the run is already complete, zero claude calls.
   echo "Stranded project-complete.json from a prior session detected — attempting its final commit before starting."
   print_json_summary "$ARTIFACTS_DIR/project-complete.json"
-  commit_pending_approval_first
+  # ANY-age approval is deliberate at THIS site (v0.12.3 review): both
+  # artifacts stranded together came from one dead session, so pairing them
+  # is the likeliest truth — the wrong-phase risk the in-loop site guards
+  # against does not apply to a tree no new iteration has touched. rc
+  # ignored: this path's failure already falls into the loop below.
+  commit_pending_approval_first || true
   crc=0
   commit_from_artifact \
     "$ARTIFACTS_DIR/project-complete.json" \
@@ -1431,11 +1440,31 @@ VERDICT_RETRY_EOF
     # itself) must land in git before the loop exits — exiting here without
     # committing left a dirty tree behind every completed run and forced a
     # manual reconcile each time (5 reconciles on 2026-07-25/26).
-    commit_pending_approval_first
+    #
+    # FRESH approvals only at this site (v0.12.3, review MAJOR): a STALE
+    # uncommitted approval reaching this gate would sweep THIS iteration's
+    # completion work under the old phase's message — the mislabeling class
+    # the stranded-at-start elif's verify-gated retry exists to prevent.
+    # Fresh = written this iteration, or the pending-retry marker names it
+    # (the staged work belongs to that phase, so its message is right —
+    # the same two conditions the phase-commit branch below trusts).
+    apcrc=0
+    if artifact_written_this_iteration "$ARTIFACTS_DIR/phase-approval.json" \
+       || [[ "$PENDING_COMMIT_RETRY" == "phase-approval" ]]; then
+      commit_pending_approval_first || apcrc=$?
+    fi
     crc=0
-    commit_from_artifact \
-      "$ARTIFACTS_DIR/project-complete.json" \
-      "chore(workflow): final session work + project completion record" || crc=$?
+    if [[ "$apcrc" -eq 1 ]]; then
+      # The tree is verify-red from the phase commit attempt; re-running the
+      # completion commit now would re-verify the same red tree (double
+      # spend, double breaker count). Take the same re-loop path a failed
+      # completion commit takes.
+      crc=1
+    else
+      commit_from_artifact \
+        "$ARTIFACTS_DIR/project-complete.json" \
+        "chore(workflow): final session work + project completion record" || crc=$?
+    fi
     if [[ "$crc" -eq 0 || "$crc" -eq 2 ]]; then
       # 0 = final work committed; 2 = nothing substantive left (already
       # committed) — both are a clean finish.

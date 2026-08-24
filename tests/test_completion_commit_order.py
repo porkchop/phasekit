@@ -35,10 +35,34 @@ class CompletionCommitOrderTest(unittest.TestCase):
         body = self.text.split("commit_pending_approval_first() {", 1)[1].split("\n}", 1)[0]
         self.assertIn('artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json"', body)
         self.assertIn("commit_from_artifact", body)
-        # The helper must never gate on its own: a verify failure falls through
-        # to the completion path, whose re-loop machinery owns the fix cycle.
-        self.assertIn("return 0", body)
+        # v0.12.3: the helper RETURNS the commit rc (callers decide) and never
+        # exits on its own.
+        self.assertIn('return "$acrc"', body)
         self.assertNotIn("exit ", body)
+
+    def test_the_in_loop_site_requires_freshness_and_short_circuits_red(self) -> None:
+        """v0.12.3 review MAJOR: a STALE approval at the in-loop gate must NOT
+        drive the sweep (it would mislabel this iteration's completion work
+        under an old phase's message), and a verify-red phase commit must not
+        be followed by a second full-tier run on the same red tree."""
+        # Freshness condition guards the in-loop call:
+        in_loop_region = self.text.split("Final-commit gate.")[1][:2000]
+        self.assertIn(
+            'artifact_written_this_iteration "$ARTIFACTS_DIR/phase-approval.json"',
+            in_loop_region,
+        )
+        self.assertIn('"$PENDING_COMMIT_RETRY" == "phase-approval"', in_loop_region)
+        # Short-circuit: rc 1 from the helper takes the re-loop path without a
+        # completion commit attempt.
+        self.assertIn('if [[ "$apcrc" -eq 1 ]]', in_loop_region)
+        self.assertIn("crc=1", in_loop_region)
+
+    def test_the_stranded_site_is_any_age_on_purpose(self) -> None:
+        stranded_region = self.text.split(
+            "Stranded project-complete.json from a prior session"
+        )[1][:900]
+        self.assertIn("commit_pending_approval_first || true", stranded_region)
+        self.assertIn("pairing them", stranded_region)
 
     def test_the_helper_runs_before_both_completion_commit_sites(self) -> None:
         """Every completion-record commit_from_artifact call has the helper
@@ -62,16 +86,19 @@ class CompletionCommitOrderTest(unittest.TestCase):
             "a third needs its own commit_pending_approval_first call and this "
             "test extended",
         )
+        import re
+
         prev_end = self.text.find("commit_pending_approval_first() {")
         helper_def_end = self.text.find("\n}", prev_end)
         prev = helper_def_end
+        # Indented BARE-call form only (v0.12.3 review nit): a commented-out
+        # line would satisfy a plain substring search.
+        call_re = re.compile(r"\n\s+commit_pending_approval_first(\s*\|\| \S+)?\s*\n")
         for site in sites:
-            call = self.text.rfind("commit_pending_approval_first\n", prev, site)
-            if call == -1:
-                call = self.text.rfind("commit_pending_approval_first ", prev, site)
-            self.assertNotEqual(
-                call, -1,
-                f"completion commit at offset {site} has no "
+            matches = [m for m in call_re.finditer(self.text, prev, site)]
+            self.assertTrue(
+                matches,
+                f"completion commit at offset {site} has no live "
                 f"commit_pending_approval_first call between it and the previous "
                 f"completion site — the sweep can swallow a phase again",
             )
