@@ -1239,12 +1239,37 @@ artifact_never_landed() {
   [[ -n "$(git status --porcelain --ignored=matching -- "$1" 2>/dev/null)" ]]
 }
 
+# v0.12.2: a phase approval that never landed must commit under its OWN
+# message before any completion sweep. Twice now (xmeo iteration 28 phase-74,
+# iteration 9 phase-25) a whole phase's substantive work shipped inside the
+# generic completion chore commit — approval and completion written in the
+# same iteration, and the completion branch runs first, so the approval's
+# suggested_commit_message sat unused while its work rode an unlabeled sweep.
+# rc semantics: the phase commit sweeps the whole tree (completion record
+# included — the boundary is NAMED, which is the property this buys; the
+# resting predicate reads the committed record, not the message), so the
+# completion commit that follows typically finds nothing (rc 2 = clean
+# finish). A verify failure here falls through to the completion path below,
+# whose existing re-loop machinery owns the fix cycle — this helper never
+# gates on its own.
+commit_pending_approval_first() {
+  artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json" || return 0
+  echo "Unlanded phase approval detected before completion — committing the phase under its own message first."
+  print_json_summary "$ARTIFACTS_DIR/phase-approval.json"
+  local acrc=0
+  commit_from_artifact \
+    "$ARTIFACTS_DIR/phase-approval.json" \
+    "chore(workflow): approve completed phase" || acrc=$?
+  return 0
+}
+
 if artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then
   # A stranded completion record would be deleted by the first iteration's
   # cleanup_artifacts and silently re-done. Commit it now (all the usual
   # gates apply) — on success the run is already complete, zero claude calls.
   echo "Stranded project-complete.json from a prior session detected — attempting its final commit before starting."
   print_json_summary "$ARTIFACTS_DIR/project-complete.json"
+  commit_pending_approval_first
   crc=0
   commit_from_artifact \
     "$ARTIFACTS_DIR/project-complete.json" \
@@ -1406,6 +1431,7 @@ VERDICT_RETRY_EOF
     # itself) must land in git before the loop exits — exiting here without
     # committing left a dirty tree behind every completed run and forced a
     # manual reconcile each time (5 reconciles on 2026-07-25/26).
+    commit_pending_approval_first
     crc=0
     commit_from_artifact \
       "$ARTIFACTS_DIR/project-complete.json" \

@@ -139,7 +139,13 @@ recording. Grade findings before writing the fix list.
   same session (context stays hot; fix quality rises). Independence is
   preserved by the NEXT review round running fresh-context. Do not
   self-adopt this default — it applies only where the iteration's request
-  says so.
+  says so. Even under continuity, a **completion-class phase** (the
+  iteration's final phase, or release-hardening) gets one fresh-context
+  review round before its verdict: one iteration's evidence that
+  self-review sufficed (xmeo iteration 9) is a data point, not a fleet
+  default, and the environments where the reviewer subagent is
+  unavailable must say so in the approval artifact rather than skip
+  silently.
 - **Non-convergence is a verdict, not a loop**: if two consecutive fix
   rounds have each introduced new MAJOR findings, do not run a third.
   Write `artifacts/phase-blocked.json` with reason `review-nonconvergence`
@@ -431,6 +437,13 @@ When in-scope acceptance work was deferred (see the deferred-scope gate), the ar
 ```
 
 ## Final completion artifact
+
+Before writing it, **walk the change-request's asks**: each one is shipped,
+carried by a `deferrals` entry, or the completion record says why not. An
+ask that simply vanishes is the deferred-scope gate's violation in
+completion clothing — the observed case was a request's own
+measure-this-iteration clause that was neither met nor deferred, and
+nothing noticed until an operator review did.
 
 ```json
 {
