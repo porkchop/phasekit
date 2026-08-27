@@ -594,6 +594,23 @@
       "keys": []
     },
     {
+      "name": ".wrapup-in-progress",
+      "path": "artifacts/.wrapup-in-progress",
+      "writers": [
+        "scripts/run-until-done.sh"
+      ],
+      "consumers": [
+        "scripts/run-until-done.sh"
+      ],
+      "lifecycle": "internal session-end marker (empty file, v0.13.1): touched at wrapup_commit entry so the deadline watchdog's last-resort phase stands down instead of racing the gated wrap-up; never removed on the wrap-up path (every wrap-up exit ends the session) and deleted at each iteration start beside the nudge marker; hidden from git status",
+      "verdict": false,
+      "transient_signal": true,
+      "hidden": true,
+      "internal": true,
+      "when": "Mutual exclusion between the loop's two session-end committers. Do not rely on it.",
+      "keys": []
+    },
+    {
       "name": "session-interrupted.json",
       "path": "artifacts/session-interrupted.json",
       "writers": [

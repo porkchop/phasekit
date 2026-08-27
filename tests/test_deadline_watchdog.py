@@ -55,6 +55,7 @@ def _extract(pattern_start, pattern_end):
 
 LEAD_FN = _extract(r"^compute_wrapup_lead\(\) \{", r"^\}")
 COMMIT_FN = _extract(r"^deadline_lastresort_commit\(\) \{", r"^\}")
+DISARM_FN = _extract(r"^_disarm_deploy_artifact\(\) \{", r"^\}")
 UNSTAGE_FN = _extract(r"^unstage_transient_adds\(\) \{", r"^\}")
 # The transient list the unstage helper iterates — extracted so a rename
 # there breaks here rather than silently testing nothing.
@@ -130,14 +131,19 @@ class LastResortCommit(unittest.TestCase):
         )
 
     def _run_lastresort(self):
+        # set -e matches production (the watchdog subshell inherits the
+        # loop's set -euo pipefail) — review finding 8: a harness without -e
+        # would pass a future early-exit regression this suite must catch.
         script = "\n".join(
             [
-                "set -uo pipefail",
+                "set -euo pipefail",
                 f'ROOT_DIR="{self.dir}"',
                 f'ARTIFACTS_DIR="{self.artifacts}"',
+                f'WRAPUP_SENTINEL="{self.artifacts}/wrapup-requested"',
                 TRANSIENTS_ARR,
                 UNSTAGE_FN,
                 COMMIT_FN,
+                DISARM_FN,
                 "deadline_lastresort_commit",
             ]
         )
@@ -262,6 +268,67 @@ class LastResortCommit(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn(
             "session-interrupted", self._git("ls-tree", "-r", "--name-only", "HEAD")
+        )
+
+
+class ReviewFindings0131(unittest.TestCase):
+    """Behavioral pins for the v0.13.1 review fixes (findings 1, 2, 4, 7)."""
+
+    def setUp(self):
+        LastResortCommit.setUp(self)
+        self.tearDown = lambda: LastResortCommit.tearDown(self)
+
+    def test_a_legitimately_armed_clean_artifact_keeps_its_fresh_mtime(self):
+        # Finding 7: clean at HEAD + fresh mtime = a pending deploy the
+        # session honestly earned; the disarm must not age it away.
+        rtd = self.artifacts / "ready-to-deploy.json"
+        rtd.write_text('{"deploy_ready": true, "iteration": "verified"}\n')
+        (self.root / "src.txt").write_text("v1\n")
+        LastResortCommit._commit_all(self, "verified release")
+        import time as _t
+
+        now = _t.time()
+        os.utime(rtd, (now, now))
+        (self.root / "scratch.txt").write_text("dirty\n")
+        r = LastResortCommit._run_lastresort(self)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertGreater(rtd.stat().st_mtime, now - 60)
+        self.assertIn("verified", rtd.read_text())
+
+    def test_the_strand_commit_never_contains_an_armed_artifact(self):
+        # Finding 2's gate: the staged-clean check on the two artifact paths
+        # exists and guards the commit.
+        self.assertIn("ready-to-deploy.json", COMMIT_FN)
+        self.assertIn("git diff --cached --quiet -- \\", COMMIT_FN)
+        # And the disarm is INSIDE the retry loop: it appears after the
+        # `git add -A` line within the loop body.
+        add_at = COMMIT_FN.index("git add -A")
+        self.assertIn("_disarm_deploy_artifact ready-to-deploy.json", COMMIT_FN[add_at:])
+
+    def test_phase2_stands_down_when_wrapup_is_in_progress(self):
+        # Finding 1: mutual exclusion via the marker, checked before the
+        # last-resort commit; the marker is transient and iteration-cleared.
+        self.assertIn('.wrapup-in-progress', SOURCE)
+        arm_fn = _extract(r"^arm_deadline_watchdog\(\) \{", r"^\}")
+        self.assertIn("standing down", arm_fn)
+        self.assertIn('".wrapup-in-progress"', _extract(r"^TRANSIENT_SIGNALS=\(", r"^\)"))
+        self.assertIn('".wrapup-in-progress"', _extract(r"^HIDDEN_TRANSIENTS=\(", r"^\)"))
+        self.assertIn('rm -f "$ARTIFACTS_DIR/.wrapup-in-progress"', SOURCE)
+
+    def test_wrapup_commit_survives_a_stolen_index(self):
+        # Finding 1 interleave (b): the wrap-up's commit is tolerant — a
+        # failure must not propagate under set -e.
+        wrapup = _extract(r"^wrapup_commit\(\) \{", r"^\}")
+        self.assertIn('touch "$ARTIFACTS_DIR/.wrapup-in-progress"', wrapup)
+        self.assertIn("if ! git commit -m", wrapup)
+        self.assertNotIn("\n  git commit -m", wrapup)
+
+    def test_the_exit_trap_reaps_the_watchdog_before_clearing_the_baton(self):
+        # Finding 4: kill alone is asynchronous; wait makes the ordering real.
+        trap_fn = _extract(r"^run_until_done_exit_trap\(\) \{", r"^\}")
+        self.assertIn('wait "$DEADLINE_WATCHDOG_PID"', trap_fn)
+        self.assertLess(
+            trap_fn.index("wait"), trap_fn.index("clear_provisional_handoff_on_exit")
         )
 
 

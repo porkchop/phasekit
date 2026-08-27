@@ -118,6 +118,7 @@ TRANSIENT_SIGNALS=(
   ".scope-check.tmp"
   ".stop-hook-blocks"
   ".wrapup-nudge-sent"
+  ".wrapup-in-progress"
   "session-interrupted.json"
 )
 
@@ -135,6 +136,7 @@ HIDDEN_TRANSIENTS=(
   ".scope-check.tmp"
   ".stop-hook-blocks"
   ".wrapup-nudge-sent"
+  ".wrapup-in-progress"
   "session-interrupted.json"
 )
 
@@ -284,6 +286,10 @@ cleanup_artifacts() {
   # freshness idiom; clearing its marker here keeps the two hook budgets on
   # one lifecycle. A healthy iteration (no sentinel) never creates it.
   rm -f "$ARTIFACTS_DIR/.wrapup-nudge-sent"
+  # The wrap-up-in-progress marker (v0.13.1) is only ever written at session
+  # end; one surviving into an iteration start belongs to a previous session
+  # and would silently stand the deadline watchdog down for this whole one.
+  rm -f "$ARTIFACTS_DIR/.wrapup-in-progress"
 }
 
 print_json_summary() {
@@ -896,20 +902,10 @@ deadline_lastresort_commit() {
   # Disarm the deploy seam BEFORE the tree can go clean: an artifact the dead
   # session wrote mid-build is unverified by definition, and a wip commit that
   # carries it re-creates the 2026-08-27 04:09 incident (unverified code
-  # self-deployed off a strand commit). Restore to HEAD where tracked, delete
-  # where new; age the restored ready-to-deploy.json to its HEAD commit time
-  # so an mtime-based deploy seam sees nothing fresh.
-  local f ts
-  for f in ready-to-deploy.json project-complete.json; do
-    if git cat-file -e "HEAD:artifacts/$f" 2>/dev/null; then
-      git checkout -q HEAD -- "artifacts/$f" 2>/dev/null || true
-      ts="$(git log -1 --format=%cI HEAD -- "artifacts/$f" 2>/dev/null)" || ts=""
-      [[ -n "$ts" ]] && touch -d "$ts" "$ARTIFACTS_DIR/$f" 2>/dev/null || true
-    else
-      rm -f "$ARTIFACTS_DIR/$f" 2>/dev/null || true
-      git reset -q -- "$ARTIFACTS_DIR/$f" 2>/dev/null || true
-    fi
-  done
+  # self-deployed off a strand commit). Re-applied inside every commit attempt
+  # below — the session is still alive and can re-arm between restore and add.
+  _disarm_deploy_artifact ready-to-deploy.json
+  _disarm_deploy_artifact project-complete.json
 
   # Refresh the dead-man baton from OUTSIDE the loop process (the v0.10.1
   # baton was observed missing after one real kill — run 404, 2026-08-22 —
@@ -935,10 +931,32 @@ deadline_lastresort_commit() {
   # The commit. The model may hold index.lock mid-operation — bounded retry,
   # then give up open. --no-verify: this is corpse preservation, not a gated
   # release; the next session's gates judge the content.
+  #
+  # The disarm is re-applied INSIDE every attempt (v0.13.1, review finding 2):
+  # the model is alive by hypothesis until the kill, so a single-shot restore
+  # races a session that re-writes the artifact between the restore and a
+  # retried add — and a COMMITTED armed artifact survives git transport,
+  # which the mtime aging alone cannot protect against. The staged-clean
+  # check on exactly those two paths is what makes the disarm a gate rather
+  # than a hope.
   local attempt
   for attempt in 1 2 3 4 5; do
     git add -A 2>/dev/null || { sleep 2; continue; }
+    _disarm_deploy_artifact ready-to-deploy.json
+    _disarm_deploy_artifact project-complete.json
     unstage_transient_adds
+    # Belt-and-braces the wrap-up commit already wears (review finding 5):
+    # never sweep session logs or an in-repo custom sentinel into history on
+    # the strand path either.
+    git reset -q -- "$ARTIFACTS_DIR/logs" 2>/dev/null || true
+    git reset -q -- "$WRAPUP_SENTINEL" 2>/dev/null || true
+    if ! git diff --cached --quiet -- \
+        "$ARTIFACTS_DIR/ready-to-deploy.json" \
+        "$ARTIFACTS_DIR/project-complete.json" 2>/dev/null; then
+      # The disarm did not hold (the session re-wrote an artifact mid-race).
+      # Never commit an armed artifact — retry the whole attempt.
+      sleep 1; continue
+    fi
     if git diff --cached --quiet 2>/dev/null; then
       return 0
     fi
@@ -950,6 +968,27 @@ deadline_lastresort_commit() {
     sleep 2
   done
   echo "deadline watchdog: last-resort commit could not land (index contention?) — tree left as-is" >&2
+  return 0
+}
+
+_disarm_deploy_artifact() {
+  # One deploy-arming artifact: restore to HEAD where tracked-and-dirty
+  # (index or worktree), delete where untracked. Aging to the HEAD commit
+  # time happens ONLY on an actual restore (v0.13.1, review finding 7): a
+  # clean, legitimately-armed artifact from a verified commit earlier in the
+  # session keeps its fresh mtime, so a pending deploy the session honestly
+  # earned is not silently swallowed.
+  local f="$1" ts
+  if git cat-file -e "HEAD:artifacts/$f" 2>/dev/null; then
+    if ! git diff --quiet HEAD -- "artifacts/$f" 2>/dev/null; then
+      git checkout -q HEAD -- "artifacts/$f" 2>/dev/null || true
+      ts="$(git log -1 --format=%cI HEAD -- "artifacts/$f" 2>/dev/null)" || ts=""
+      [[ -n "$ts" ]] && touch -d "$ts" "$ARTIFACTS_DIR/$f" 2>/dev/null || true
+    fi
+  else
+    rm -f "$ARTIFACTS_DIR/$f" 2>/dev/null || true
+    git reset -q -- "$ARTIFACTS_DIR/$f" 2>/dev/null || true
+  fi
   return 0
 }
 
@@ -992,17 +1031,31 @@ arm_deadline_watchdog() {
           && echo "deadline watchdog: wrap-up sentinel self-armed at T-${lead}s" || true
       fi
     fi
-    # Phase 2: last-resort strand commit.
+    # Phase 2: last-resort strand commit. Stands down when the loop's own
+    # wrap-up is already landing the tree (v0.13.1, review finding 1): two
+    # concurrent committers in the same final minute can strand each other —
+    # the wrap-up is verify-gated and strictly better, so it wins.
     [[ "$lastresort" -gt 0 ]] || exit 0
     _sleep_until "$((deadline - lastresort))"
     kill -0 "$$" 2>/dev/null || exit 0
+    if [[ -f "$ARTIFACTS_DIR/.wrapup-in-progress" ]]; then
+      echo "deadline watchdog: wrap-up commit in progress — standing down"
+      exit 0
+    fi
     deadline_lastresort_commit
   ) >>"$ARTIFACTS_DIR/logs/deadline-watchdog.log" 2>&1 </dev/null &
   DEADLINE_WATCHDOG_PID=$!
 }
 
 run_until_done_exit_trap() {
-  [[ -n "$DEADLINE_WATCHDOG_PID" ]] && kill "$DEADLINE_WATCHDOG_PID" 2>/dev/null || true
+  # Kill AND reap (v0.13.1, review finding 4): kill alone is asynchronous — a
+  # watchdog already inside phase 2 could re-write the baton after the clear
+  # below removed it, leaving a lying "you were killed" note on a session
+  # that concluded. wait makes the ordering real.
+  if [[ -n "$DEADLINE_WATCHDOG_PID" ]]; then
+    kill "$DEADLINE_WATCHDOG_PID" 2>/dev/null || true
+    wait "$DEADLINE_WATCHDOG_PID" 2>/dev/null || true
+  fi
   clear_provisional_handoff_on_exit
 }
 trap run_until_done_exit_trap EXIT
@@ -1018,7 +1071,20 @@ wrapup_commit() {
   # LEARNINGS secret scan). On refusal the work is left in the tree — with a
   # handoff baton — for the next session (and the scheduler's
   # complete-but-dirty backstop) to reconcile.
-  git add -A
+  #
+  # The marker tells the deadline watchdog's phase 2 to stand down (v0.13.1):
+  # both committers wake in the same final minute, and an unguarded add/commit
+  # here under set -e once meant a lock collision could kill the loop
+  # mid-wrap-up. Never removed on the happy path — every wrap-up exit ends
+  # the session; the loop clears a stale one at startup beside the nudge
+  # marker, and the transient vocabulary keeps it uncommittable.
+  touch "$ARTIFACTS_DIR/.wrapup-in-progress" 2>/dev/null || true
+  local _wa
+  for _wa in 1 2 3 4 5; do
+    git add -A 2>/dev/null && break
+    echo "Wrap-up: git add contended (attempt $_wa) — retrying" >&2
+    sleep 2
+  done
   git reset -q -- "$ARTIFACTS_DIR/logs" 2>/dev/null || true
   git reset -q -- "$WRAPUP_SENTINEL" 2>/dev/null || true
   unstage_transient_adds
@@ -1045,7 +1111,20 @@ wrapup_commit() {
   fi
   write_session_handoff true "standing work was committed at wrap-up; re-orient and continue from the next unapproved phase"
   git add -f "$ARTIFACTS_DIR/session-handoff.json" 2>/dev/null || true
-  git commit -m "chore(workflow): session wrap-up — soft stop before session end"
+  # Tolerant commit (v0.13.1): under set -e a bare failure here killed the
+  # loop. "Nothing to commit" means a concurrent last-resort commit already
+  # landed the staged work (mislabeled wip, but landed — the next session's
+  # gates judge it); any other failure leaves the gated, staged work for the
+  # next session / the scheduler's complete-but-dirty backstop. Neither is
+  # worth dying over at session end.
+  if ! git commit -m "chore(workflow): session wrap-up — soft stop before session end" 2>/dev/null; then
+    if git diff --cached --quiet 2>/dev/null; then
+      echo "Wrap-up: staged work was already landed by a concurrent last-resort commit — nothing left to commit."
+    else
+      echo "Wrap-up: commit failed (index contention?) — gated, staged work left for the next session." >&2
+    fi
+    return 0
+  fi
   auto_push_if_enabled
 }
 
