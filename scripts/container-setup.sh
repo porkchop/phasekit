@@ -255,6 +255,15 @@ run_container() {
   if [[ -n "${PHASEKIT_SESSION_DEADLINE:-}" ]]; then
     docker_args+=(-e PHASEKIT_SESSION_DEADLINE="$PHASEKIT_SESSION_DEADLINE")
   fi
+  # Deadline-watchdog tuning knobs (v0.13.0) ride beside the deadline they
+  # qualify; defaults are computed in-loop, so forwarding is only needed when
+  # an operator overrides them.
+  if [[ -n "${PHASEKIT_WRAPUP_LEAD_SECONDS:-}" ]]; then
+    docker_args+=(-e PHASEKIT_WRAPUP_LEAD_SECONDS="$PHASEKIT_WRAPUP_LEAD_SECONDS")
+  fi
+  if [[ -n "${PHASEKIT_LASTRESORT_LEAD_SECONDS:-}" ]]; then
+    docker_args+=(-e PHASEKIT_LASTRESORT_LEAD_SECONDS="$PHASEKIT_LASTRESORT_LEAD_SECONDS")
+  fi
 
   # Cross-project contracts (v0.7.0). A provider — the Foundry orchestrator, or
   # a human running standalone — points PHASEKIT_CONTRACTS_MOUNT at a host

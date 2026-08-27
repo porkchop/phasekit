@@ -178,7 +178,13 @@ class SourcePins(Fixture):
                         "beside the marker it is scoped to")
 
     def test_the_exit_trap_is_registered(self):
-        self.assertIn("trap clear_provisional_handoff_on_exit EXIT", SOURCE)
+        # v0.13.0 folded the baton-clear into the loop's combined EXIT trap
+        # (one trap per shell; the deadline watchdog must be killed there
+        # too). The property this test protects is unchanged: the baton-clear
+        # runs on every normal exit.
+        self.assertIn("trap run_until_done_exit_trap EXIT", SOURCE)
+        trap_fn = _extract(r"^run_until_done_exit_trap\(\) \{", r"^\}")
+        self.assertIn("clear_provisional_handoff_on_exit", trap_fn)
 
     def test_the_provisional_is_a_hidden_transient(self):
         for array in ("TRANSIENT_SIGNALS", "HIDDEN_TRANSIENTS"):

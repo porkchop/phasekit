@@ -49,6 +49,22 @@
       "semantics": "Minimum remaining-time threshold for deadline pacing; no new iteration starts when less than max(this, 1.2 x average pass duration) remains before PHASEKIT_SESSION_DEADLINE. Non-numeric values fall back to the default."
     },
     {
+      "name": "PHASEKIT_WRAPUP_LEAD_SECONDS",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh"],
+      "default": "unset — computed as 15% of the session span, clamped to [300, 900]; a span too short for that lead gets half its span",
+      "container_forwarded": true,
+      "semantics": "Seconds before PHASEKIT_SESSION_DEADLINE at which the loop's own deadline watchdog self-arms the wrap-up sentinel (v0.13.0) — the supervisor's touch stays idempotent with it. 0 disables self-arming (supervisor-only). Ignored when no deadline is set."
+    },
+    {
+      "name": "PHASEKIT_LASTRESORT_LEAD_SECONDS",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh"],
+      "default": "60",
+      "container_forwarded": true,
+      "semantics": "Seconds before PHASEKIT_SESSION_DEADLINE at which the deadline watchdog makes the last-resort strand commit (v0.13.0): if the tree is dirty it restores ready-to-deploy.json and project-complete.json to HEAD (an unverified mid-build artifact must never arm a deploy seam off a strand), refreshes the dead-man baton, and commits --no-verify with transients unstaged. 0 disables. Ignored when no deadline is set."
+    },
+    {
       "name": "PHASEKIT_VERIFY_CMD",
       "kind": "consumed",
       "read_by": ["scripts/run-until-done.sh"],

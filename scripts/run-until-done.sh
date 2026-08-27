@@ -827,7 +827,185 @@ clear_provisional_handoff_on_exit() {
   done
   echo "run-until-done: dead-man handoff left in place (no verdict this iteration) — the next session orients from it" >&2
 }
-trap clear_provisional_handoff_on_exit EXIT
+
+# --- Deadline watchdog (v0.13.0) --------------------------------------------
+# The 2026-08-26/27 strand run: five heavy first sessions in a row were killed
+# at their bound (exit 124) with a full session of coherent work uncommitted —
+# every one needed an out-of-band hand (operator or orchestrator) to commit the
+# strand and lift a pause. Two gaps owned HERE, not by the supervisor:
+#
+#   (1) the wrap-up sentinel is armed by the SUPERVISOR's timer, so a
+#       supervisor that arms late, arms with too short a lead for this repo's
+#       landing cost, or never arms at all (deadline classes (b) and (c))
+#       leaves the loop blind until the kill;
+#   (2) nothing at all runs INSIDE the final minute, so the kill always
+#       strands whatever the wrap-up did not land.
+#
+# One background watchdog closes both, armed only when the supervisor already
+# tells us the kill time (PHASEKIT_SESSION_DEADLINE — no deadline, no
+# watchdog, behavior unchanged):
+#
+#   phase 1 (self-armed lead): at deadline − LEAD, touch the same wrap-up
+#     sentinel the supervisor would. Idempotent with the supervisor's own
+#     touch; the nudge hook and the loop's boundary check consume it
+#     unchanged. LEAD scales with the session (15% of span, clamped 300–900s)
+#     instead of being a fixed number chosen for a smaller repo — the
+#     post-mortem's "scale the LEAD, not just arm it".
+#
+#   phase 2 (last-resort strand commit): at deadline − LASTRESORT (default
+#     60s), if the loop is still alive and the tree is dirty, commit the tree
+#     AS A STRAND: --no-verify, transients unstaged, and — the 2026-08-27
+#     04:09 incident's lesson — the deploy-arming artifacts restored to HEAD
+#     first, so an unverified mid-build ready-to-deploy.json/
+#     project-complete.json can never make the post-kill tree look like a
+#     verified release to a deploy seam. The dead-man baton is refreshed by
+#     this independent process, so a kill path that eats the loop's own EXIT
+#     trap can no longer lose it.
+#
+# The watchdog is a subshell: no signal-delivery assumptions (a TERM the shell
+# defers while waiting on the model, a SIGKILL that runs nothing — neither
+# matters; the commit already happened before the kill). Fail-open throughout.
+
+compute_wrapup_lead() {
+  # Lead seconds for a session spanning $1 seconds. Override:
+  # PHASEKIT_WRAPUP_LEAD_SECONDS (0 disables phase 1). Default: 15% of span,
+  # clamped to [300, 900]; a session too short to afford that lead gets half
+  # its span, so tiny sessions still do half a session of work.
+  local span="$1" lead
+  lead="${PHASEKIT_WRAPUP_LEAD_SECONDS:-}"
+  if [[ -n "$lead" && "$lead" =~ ^[0-9]+$ ]]; then
+    echo "$lead"; return 0
+  fi
+  lead=$((span * 15 / 100))
+  [[ "$lead" -lt 300 ]] && lead=300
+  [[ "$lead" -gt 900 ]] && lead=900
+  if [[ $((span - lead)) -lt "$lead" ]]; then
+    lead=$((span / 2))
+  fi
+  echo "$lead"
+}
+
+deadline_lastresort_commit() {
+  # Phase 2 body. Runs in the watchdog subshell ~LASTRESORT seconds before the
+  # kill, possibly while the model still holds the tree. Every step is
+  # best-effort: a failure here must only ever mean "no better off than
+  # before the watchdog existed".
+  cd "$ROOT_DIR" 2>/dev/null || return 0
+  [[ -n "$(git status --porcelain 2>/dev/null)" ]] || return 0
+
+  # Disarm the deploy seam BEFORE the tree can go clean: an artifact the dead
+  # session wrote mid-build is unverified by definition, and a wip commit that
+  # carries it re-creates the 2026-08-27 04:09 incident (unverified code
+  # self-deployed off a strand commit). Restore to HEAD where tracked, delete
+  # where new; age the restored ready-to-deploy.json to its HEAD commit time
+  # so an mtime-based deploy seam sees nothing fresh.
+  local f ts
+  for f in ready-to-deploy.json project-complete.json; do
+    if git cat-file -e "HEAD:artifacts/$f" 2>/dev/null; then
+      git checkout -q HEAD -- "artifacts/$f" 2>/dev/null || true
+      ts="$(git log -1 --format=%cI HEAD -- "artifacts/$f" 2>/dev/null)" || ts=""
+      [[ -n "$ts" ]] && touch -d "$ts" "$ARTIFACTS_DIR/$f" 2>/dev/null || true
+    else
+      rm -f "$ARTIFACTS_DIR/$f" 2>/dev/null || true
+      git reset -q -- "$ARTIFACTS_DIR/$f" 2>/dev/null || true
+    fi
+  done
+
+  # Refresh the dead-man baton from OUTSIDE the loop process (the v0.10.1
+  # baton was observed missing after one real kill — run 404, 2026-08-22 —
+  # and this write does not depend on any trap running). Six-key schema
+  # preserved; jq-update where one exists, else the minimal truthful one.
+  local baton="$ARTIFACTS_DIR/session-interrupted.json" now_iso
+  now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [[ -f "$baton" ]] && jq -e . "$baton" >/dev/null 2>&1; then
+    jq --arg ts "$now_iso" \
+       '.note += " A last-resort wip commit preserved this tree seconds before the kill; only the final moments of work can be missing." | .ts = $ts' \
+       "$baton" > "$baton.tmp" 2>/dev/null && mv "$baton.tmp" "$baton" 2>/dev/null || rm -f "$baton.tmp" 2>/dev/null || true
+  else
+    jq -n --arg ts "$now_iso" '{
+      stopped_at_phase: "unknown",
+      in_flight: "an iteration was IN FLIGHT when the session was killed at its deadline; the last-resort watchdog committed the tree seconds beforehand",
+      verified: false,
+      next_step: "audit the last wip commit as IN-PROGRESS IMPLEMENTATION from a killed session: re-derive what is verified, keep it, finish or revert the rest",
+      note: "dead-man baton written by the deadline watchdog (v0.13.0): the loop was killed before it could conclude. Ephemeral: delete after orienting.",
+      ts: $ts
+    }' > "$baton" 2>/dev/null || true
+  fi
+
+  # The commit. The model may hold index.lock mid-operation — bounded retry,
+  # then give up open. --no-verify: this is corpse preservation, not a gated
+  # release; the next session's gates judge the content.
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    git add -A 2>/dev/null || { sleep 2; continue; }
+    unstage_transient_adds
+    if git diff --cached --quiet 2>/dev/null; then
+      return 0
+    fi
+    if git commit -q --no-verify \
+      -m "wip: last-resort deadline commit (phasekit deadline watchdog) — the session was about to be killed at its bound; unverified in-progress work preserved, deploy artifacts restored to HEAD" 2>/dev/null; then
+      echo "deadline watchdog: last-resort commit landed $(git rev-parse --short HEAD 2>/dev/null) — the kill strands nothing but the final seconds" >&2
+      return 0
+    fi
+    sleep 2
+  done
+  echo "deadline watchdog: last-resort commit could not land (index contention?) — tree left as-is" >&2
+  return 0
+}
+
+DEADLINE_WATCHDOG_PID=""
+arm_deadline_watchdog() {
+  # $1 = deadline (epoch seconds). Spawns the two-phase watchdog; the EXIT
+  # trap below kills it on any normal conclusion.
+  local deadline="$1" now span lead lastresort arm_at
+  now="$(date +%s)"
+  span=$((deadline - now))
+  [[ "$span" -gt 0 ]] || return 0
+  lead="$(compute_wrapup_lead "$span")"
+  lastresort="${PHASEKIT_LASTRESORT_LEAD_SECONDS:-60}"
+  [[ "$lastresort" =~ ^[0-9]+$ ]] || lastresort=60
+  arm_at=$((deadline - lead))
+  echo "deadline watchdog: armed — sentinel at T-${lead}s, last-resort commit at T-${lastresort}s (span ${span}s)"
+  # The subshell's stdio is DETACHED (log file, /dev/null stdin): it must not
+  # inherit the loop's pipes, or any harness reading the loop's output blocks
+  # on EOF until the watchdog's sleeps finish — long after the loop exited.
+  mkdir -p "$ARTIFACTS_DIR/logs" 2>/dev/null || true
+  (
+    # Sleep in short slices with an is-the-loop-alive check, so a watchdog
+    # orphaned by any kill path (even one the EXIT trap never saw) dies
+    # within seconds instead of holding on for the whole span.
+    _sleep_until() {
+      local target="$1" now left
+      while :; do
+        now="$(date +%s)"; left=$((target - now))
+        [[ "$left" -le 0 ]] && return 0
+        kill -0 "$$" 2>/dev/null || exit 0
+        sleep $(( left < 15 ? left : 15 ))
+      done
+    }
+    # Phase 1: self-armed wrap-up lead.
+    if [[ "$lead" -gt 0 ]]; then
+      _sleep_until "$arm_at"
+      kill -0 "$$" 2>/dev/null || exit 0
+      if [[ ! -f "$WRAPUP_SENTINEL" ]]; then
+        touch "$WRAPUP_SENTINEL" 2>/dev/null \
+          && echo "deadline watchdog: wrap-up sentinel self-armed at T-${lead}s" || true
+      fi
+    fi
+    # Phase 2: last-resort strand commit.
+    [[ "$lastresort" -gt 0 ]] || exit 0
+    _sleep_until "$((deadline - lastresort))"
+    kill -0 "$$" 2>/dev/null || exit 0
+    deadline_lastresort_commit
+  ) >>"$ARTIFACTS_DIR/logs/deadline-watchdog.log" 2>&1 </dev/null &
+  DEADLINE_WATCHDOG_PID=$!
+}
+
+run_until_done_exit_trap() {
+  [[ -n "$DEADLINE_WATCHDOG_PID" ]] && kill "$DEADLINE_WATCHDOG_PID" 2>/dev/null || true
+  clear_provisional_handoff_on_exit
+}
+trap run_until_done_exit_trap EXIT
 
 wrapup_commit() {
   # Soft wrap-up (v0.6.0). When the outer supervisor signals imminent shutdown
@@ -1190,6 +1368,12 @@ fi
 # Floor override is a test/tuning knob; production default is 3 minutes.
 PACING_FLOOR_SECONDS="${PHASEKIT_PACING_FLOOR_SECONDS:-180}"
 [[ "$PACING_FLOOR_SECONDS" =~ ^[0-9]+$ ]] || PACING_FLOOR_SECONDS=180
+# Deadline watchdog (v0.13.0): self-armed wrap-up lead + last-resort strand
+# commit. Armed only when the deadline is known; see the block above
+# wrapup_commit for the full argument.
+if [[ -n "$SESSION_DEADLINE" ]]; then
+  arm_deadline_watchdog "$SESSION_DEADLINE"
+fi
 pass_elapsed_total=0
 passes_done=0
 last_pass_start=""
