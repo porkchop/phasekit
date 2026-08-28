@@ -157,6 +157,79 @@ may block per iteration before stepping aside (default `2`).
   `PHASEKIT_ITER_MARKER` environment is present, so interactive sessions
   never see it.
 
+## Branch-per-iteration + squash-to-target (v0.14.0)
+
+Opt-in, per session, via `PHASEKIT_SQUASH_TARGET=<integration branch>`
+(`main`, `master`, …). Unset — the default, and what every standalone user
+gets — leaves every commit path exactly as before.
+
+**Why.** On a long-running autonomous project the integration branch fills
+with checkpoints, wrap-ups, strand commits and heals: nothing on it is a
+bisect or revert unit. With the target set, the loop keeps all of that on a
+**work branch** and the integration branch gains **one commit per approved
+phase**.
+
+**How it works.**
+
+- **Loop start:** HEAD must be on a work branch. Standing on the target, the
+  loop creates one — `PHASEKIT_WORK_BRANCH` if given (a supervisor passes
+  `iter/<N>-<slug>`), else `iter/<UTC stamp>` — and checks it out. Already on
+  a work branch: nothing happens. On some other branch than the one named:
+  the loop blocks rather than guess.
+- **Every commit the loop makes lands on the work branch** — checkpoints
+  (`phase-update.json`), wrap-up, the deadline watchdog's strand commit,
+  upgrade and heal commits. Off-box durability is the supervisor's push of
+  that branch, as today (`AUTO_PUSH=1` pushes both the branch and the target).
+- **At an approval-class commit** (`phase-approval.json`,
+  `project-complete.json`), after the branch commit passes the usual gates,
+  the loop squashes: one commit on the target whose tree is the branch tree
+  and whose message is the artifact's `suggested_commit_message` plus a
+  trailer `phasekit-squash: <work-branch>@<short-sha>`; then a **merge-back**
+  commit on the work branch (`chore(workflow): merge-back <target> after
+  squash (phasekit v0.14.0)`) recording the target's new tip as a parent, so
+  the next squash diffs only the next phase. Both are plumbing operations
+  (`commit-tree` + old-value-guarded `update-ref`): the index and working
+  tree are never touched, nothing is rewritten, nothing is force-pushed, and
+  the branch keeps its full checkpoint history.
+- **At completion** HEAD rests on the target (trees are identical, so no file
+  changes); the work branch is kept for forensics — retention is the
+  supervisor's business.
+
+**Squash-integrity guard (fails closed).** The target may only move through
+the loop's own squash, so its tip must be an ancestor of the work branch. A
+hand commit, a hotfix, or a hand-merge on the target — or, best-effort, on
+`origin/<target>` (the loop fetches when it can; the last-seen remote tip
+counts when it cannot) — makes the next squash **refuse**: the branch commit
+stays, the target is untouched, `artifacts/phase-blocked.json` is written
+with `blocker_kind: branch-integrity` and a `next_step`, and the loop exits
+2. Every later loop start re-attempts the squash **before spending a token**
+and blocks again until an operator merges the target into the work branch
+(or resets it). A squash the target is still owed for a different reason —
+an approval that landed through a wrap-up or strand commit — is caught up at
+the next loop start behind the verify gate.
+
+**Interrupted mid-squash** (a kill between the two ref updates: target
+advanced, merge-back missing) is recognised at the next boundary by the
+squash commit's own trailer — the named branch commit must be an ancestor of
+HEAD and carry the target's tree — and completed idempotently, even if the
+branch gained commits in between (an intake, a strand).
+
+**Known limitation.** If an approval's squash was refused and the completion
+was then swept into the same branch commit, the catch-up squashes both under
+the completion's message — one commit for the last phase plus completion,
+not two. Recorded rather than solved (v0.14.0 review); it only follows an
+operator-resolved integrity block.
+
+**Supervisor contract** (pinned in `contracts/interface.json` conventions,
+`branch-per-iteration-squash`): *fully merged* ⇔ `git diff --quiet <target>
+<work-branch>`; a completed iteration whose final squash was refused is not
+resting. The supervisor pushes both refs after a session (`git push -u origin
+HEAD` + `git push origin <target>` — a plain `git push` fails on a fresh
+work branch with no upstream and leaves the session's commits host-local),
+fetches `origin/<target>` before a session so the remote guard sees fresh
+data (inside a credential-less container the fetch always fails), and decides
+branch retention.
+
 ## Loop integrity (v0.6.0)
 
 Two guarantees added to `run-until-done.sh`:

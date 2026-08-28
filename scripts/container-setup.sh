@@ -264,6 +264,15 @@ run_container() {
   if [[ -n "${PHASEKIT_LASTRESORT_LEAD_SECONDS:-}" ]]; then
     docker_args+=(-e PHASEKIT_LASTRESORT_LEAD_SECONDS="$PHASEKIT_LASTRESORT_LEAD_SECONDS")
   fi
+  # Branch-per-iteration + squash-to-target (v0.14.0): the supervisor names
+  # the integration branch and (optionally) the iteration's work branch per
+  # session. Unset = the loop's commit paths are unchanged.
+  if [[ -n "${PHASEKIT_SQUASH_TARGET:-}" ]]; then
+    docker_args+=(-e PHASEKIT_SQUASH_TARGET="$PHASEKIT_SQUASH_TARGET")
+  fi
+  if [[ -n "${PHASEKIT_WORK_BRANCH:-}" ]]; then
+    docker_args+=(-e PHASEKIT_WORK_BRANCH="$PHASEKIT_WORK_BRANCH")
+  fi
 
   # Cross-project contracts (v0.7.0). A provider — the Foundry orchestrator, or
   # a human running standalone — points PHASEKIT_CONTRACTS_MOUNT at a host

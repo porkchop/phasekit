@@ -65,6 +65,22 @@
       "semantics": "Seconds before PHASEKIT_SESSION_DEADLINE at which the deadline watchdog makes the last-resort strand commit (v0.13.0): if the tree is dirty it restores ready-to-deploy.json and project-complete.json to HEAD (an unverified mid-build artifact must never arm a deploy seam off a strand), refreshes the dead-man baton, and commits --no-verify with transients unstaged. 0 disables. Ignored when no deadline is set."
     },
     {
+      "name": "PHASEKIT_SQUASH_TARGET",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh"],
+      "default": "",
+      "container_forwarded": true,
+      "semantics": "Branch-per-iteration + squash-to-target (v0.14.0). Names the integration branch (e.g. main or master). When set, the loop works on a WORK BRANCH (see PHASEKIT_WORK_BRANCH) and every approval-class commit (phase-approval.json, project-complete.json) is additionally squashed onto this branch as ONE commit whose message is the artifact's suggested_commit_message plus a 'phasekit-squash: <branch>@<sha>' trailer, followed by a merge-back commit on the work branch so the next squash diffs only the next phase. Checkpoints, wrap-up and strand commits stay on the work branch. Nothing is force-pushed. The squash-integrity guard fails closed: if the target's tip (or origin/<target>, best-effort fetch) is not an ancestor of the work branch, the loop writes phase-blocked.json (blocker_kind branch-integrity) and exits 2 with the target untouched. At completion HEAD rests on the target; the work branch is kept. Unset = every commit path behaves as before (byte-identical pin)."
+    },
+    {
+      "name": "PHASEKIT_WORK_BRANCH",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh"],
+      "default": "",
+      "container_forwarded": true,
+      "semantics": "Name of the iteration's work branch under PHASEKIT_SQUASH_TARGET (a supervisor passes e.g. iter/<N>-<slug>). When HEAD is on the target, the loop creates it (or re-enters an existing one that carries nothing the target lacks); when HEAD is already on it, nothing happens; when HEAD is on some other branch the loop blocks rather than guess. Unset with HEAD on the target: the loop creates iter/<UTC stamp>. Ignored when PHASEKIT_SQUASH_TARGET is unset."
+    },
+    {
       "name": "PHASEKIT_VERIFY_CMD",
       "kind": "consumed",
       "read_by": ["scripts/run-until-done.sh"],
@@ -438,8 +454,8 @@
       "verdict": true,
       "transient_signal": true,
       "hidden": false,
-      "when": "Written by the session when it needs external input, or by the loop itself when VERIFY_MAX_ATTEMPTS consecutive verify failures trip the circuit breaker. Either way the loop stops with exit 2.",
-      "keys": ["blocked", "blocker_kind", "reason", "summary", "command", "attempts", "next_step"]
+      "when": "Written by the session when it needs external input, or by the loop itself when VERIFY_MAX_ATTEMPTS consecutive verify failures trip the circuit breaker, or (v0.14.0, blocker_kind branch-integrity) when branch-per-iteration cannot proceed: the squash target moved out-of-band, HEAD is detached / on an unexpected branch, or the target branch is missing. Either way the loop stops with exit 2.",
+      "keys": ["blocked", "blocker_kind", "reason", "summary", "command", "attempts", "next_step", "target", "branch", "ts"]
     },
     {
       "name": "phase-verify-failed.json",
@@ -669,6 +685,13 @@
       "declared_in": ["docs/QUALITY_GATES.md"],
       "consumers": ["session", "supervisor"],
       "semantics": "The exact 'reason' literal a session writes into artifacts/phase-blocked.json when the review-fix convergence gate trips (two consecutive fix rounds each introduced new MAJOR findings). Sessions must use the literal verbatim; a supervisor branching on blocked-reason may key on it to route non-convergence to an operator or redesign lane rather than a generic stall path."
+    },
+    {
+      "name": "branch-per-iteration-squash",
+      "marker": "phasekit-squash: ",
+      "declared_in": ["docs/EXECUTION_MODES.md"],
+      "consumers": ["supervisor"],
+      "semantics": "Under PHASEKIT_SQUASH_TARGET, each squash commit on the target carries a trailer line '<marker><work-branch>@<short-sha>' naming the work-branch commit it was squashed from, and each merge-back commit on the work branch is titled 'chore(workflow): merge-back <target> after squash (phasekit v0.14.0)'. A supervisor's FULLY-MERGED predicate is tree equality: `git diff --quiet <target> <work-branch>` — a completed iteration whose final squash was refused is NOT resting. The target moves only through the loop's squash; any other movement fails the next squash closed (phase-blocked.json, blocker_kind branch-integrity)."
     }
   ],
   "exit_codes": {

@@ -24,6 +24,16 @@ CLAUDE_MODE="${CLAUDE_MODE:-new}"
 # requires a configured (non-stub) verify gate; see docs/EXECUTION_MODES.md.
 ITERATION_MODE="${PHASEKIT_ITERATION_MODE:-standard}"
 
+# Branch-per-iteration + squash-to-target (v0.14.0). Opt-in per session via
+# PHASEKIT_SQUASH_TARGET=<integration branch>; unset = every commit path below
+# behaves exactly as v0.13.x (the flag-off pin in tests/test_branch_squash.py).
+# See the function block above staged_touches_security_pair for the model.
+SQUASH_TARGET="${PHASEKIT_SQUASH_TARGET:-}"
+# Set by write_branch_integrity_block; the loop-start sites branch on THIS,
+# not on phase-blocked.json's presence — a block left by the previous session
+# is still on disk until cleanup_artifacts (v0.14.0 review, MINOR-3).
+BRANCH_INTEGRITY_BLOCKED=0
+
 # Circuit breaker for the pre-commit verify gate. After this many consecutive
 # failures on the same approval artifact, the loop writes phase-blocked.json
 # and exits so a human can intervene. Override with VERIFY_MAX_ATTEMPTS.
@@ -549,11 +559,343 @@ auto_push_if_enabled() {
     return 0
   fi
   echo "AUTO_PUSH=1 — pushing to remote..."
+  if squash_mode; then
+    # Branch-per-iteration: the work branch may be brand new (no upstream
+    # yet), and the target moved locally at the last squash — push both.
+    if git push -u origin HEAD 2>&1 && git push origin "$SQUASH_TARGET" 2>&1; then
+      echo "  Pushed (work branch + $SQUASH_TARGET)."
+    else
+      echo "  WARN: git push failed (commits are local; continuing loop)" >&2
+    fi
+    return 0
+  fi
   if git push 2>&1; then
     echo "  Pushed."
   else
     echo "  WARN: git push failed (commit is local; continuing loop)" >&2
   fi
+}
+
+# --- Branch-per-iteration + squash-to-target (v0.14.0) -----------------------
+# Design: foundry-meta designs/DESIGN-branch-per-iteration.md (approved
+# 2026-08-13, forks: squash per PHASE; branches kept; per-project pilot).
+#
+# The model. With PHASEKIT_SQUASH_TARGET=<branch> set, the loop works on a
+# WORK BRANCH (PHASEKIT_WORK_BRANCH, or `iter/<utc-stamp>` created on the
+# spot when the loop finds HEAD on the target) and commits there exactly as
+# before: checkpoints, wrap-ups, strand commits, heals. The target only ever
+# moves at an APPROVAL-CLASS commit (phase-approval.json /
+# project-complete.json), and only through squash_to_target:
+#
+#   S = commit-tree(HEAD^{tree}, parent = target tip, message = the approval's
+#       suggested_commit_message + a `phasekit-squash: <branch>@<sha>` trailer)
+#   target := S                       (update-ref, old-value guarded: atomic)
+#   M = commit-tree(HEAD^{tree}, parents = HEAD + S)   ("merge-back")
+#   work   := M
+#
+# The merge-back is what makes the NEXT squash diff only the next phase: the
+# target tip is now an ancestor of the work branch, so the branch's tree
+# relative to the target is exactly the work since this approval. Nothing is
+# ever rewritten or force-pushed — not the target, not the branch; checkpoint
+# history survives on the branch for forensics (fork B keeps branches).
+# Plumbing (commit-tree/update-ref) rather than checkout+merge --squash on
+# purpose: the working tree and index are never touched, so a kill at any
+# instant leaves at most a half-done squash (target advanced, merge-back
+# missing) — which repair_half_squash completes idempotently at the next
+# boundary. Hooks do not run for S; its tree is the branch commit's tree,
+# which just passed the verify gate and the project's own hooks.
+#
+# Squash-integrity guard (field-scan steal-list #1, Gas Town's Refinery):
+# the target may only move through this function, so its tip must be an
+# ancestor of the work branch. Anything else — a hand commit, a hotfix, a
+# hand-merge — fails the squash CLOSED: phase-blocked.json (blocker_kind
+# branch-integrity), exit 2, target untouched, and the loop re-attempts at
+# every later boundary without spending a token until an operator merges the
+# target into the branch (or resets it). A best-effort fetch extends the same
+# rule to origin/<target> when a remote is known. Under a supervisor that
+# serializes sessions per project, the guard never fires on a healthy repo.
+#
+# Standalone users pay nothing for this: unset, no function here runs.
+
+squash_mode() {
+  [[ -n "$SQUASH_TARGET" ]]
+}
+
+current_branch() {
+  git symbolic-ref -q --short HEAD 2>/dev/null || echo "HEAD"
+}
+
+write_branch_integrity_block() {
+  local reason="$1" next_step="$2"
+  jq -n \
+    --arg reason "$reason" \
+    --arg next "$next_step" \
+    --arg target "$SQUASH_TARGET" \
+    --arg branch "$(current_branch)" \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{
+      blocked: true,
+      blocker_kind: "branch-integrity",
+      reason: $reason,
+      summary: ("branch-per-iteration: " + $reason),
+      target: $target,
+      branch: $branch,
+      next_step: $next,
+      ts: $ts
+    }' > "$ARTIFACTS_DIR/phase-blocked.json"
+  BRANCH_INTEGRITY_BLOCKED=1
+  echo "run-until-done: BLOCKED (branch-integrity) — $reason. See artifacts/phase-blocked.json." >&2
+}
+
+squash_applies_to() {
+  # Only approval-class records move the target; checkpoints stay on the branch.
+  squash_mode || return 1
+  case "$(basename "$1")" in
+    phase-approval.json|project-complete.json) return 0 ;;
+  esac
+  return 1
+}
+
+squash_pending() {
+  # An approval-class record is committed on the work branch that the target
+  # does not carry. Stateless and exact: the target only ever receives a tree
+  # through squash_to_target, after which both sides hold identical blobs.
+  # Checkpoint-only differences (phase-update commits) are NOT pending — they
+  # belong to a phase that has not been approved yet.
+  squash_mode || return 1
+  local f hb tb
+  for f in phase-approval.json project-complete.json; do
+    hb="$(git rev-parse -q --verify "HEAD:artifacts/$f" 2>/dev/null)" || continue
+    tb="$(git rev-parse -q --verify "refs/heads/$SQUASH_TARGET:artifacts/$f" 2>/dev/null)" || tb=""
+    [[ "$hb" == "$tb" ]] || return 0
+  done
+  return 1
+}
+
+merge_back_from_target() {
+  # Record the target's tip as a second parent of the work branch. Trees are
+  # identical by construction, so this is history-only: index and working tree
+  # are untouched and `git status` reads the same before and after.
+  local tree m head
+  head="$(git rev-parse HEAD)" || return 1
+  tree="$(git rev-parse "$head^{tree}")" || return 1
+  m="$(git commit-tree "$tree" -p "$head" -p "refs/heads/$SQUASH_TARGET" \
+        -m "chore(workflow): merge-back $SQUASH_TARGET after squash (phasekit v0.14.0)")" || return 1
+  git update-ref -m "phasekit merge-back" "refs/heads/$(current_branch)" "$m" "$head"
+}
+
+repair_half_squash() {
+  # A kill between the two ref updates leaves the target at S with no
+  # merge-back on the branch — which the ancestry guard would otherwise read
+  # as an out-of-band move. Recognise our own half-done squash by S's own
+  # trailer (`phasekit-squash: <branch>@<sha>`): the named commit must be an
+  # ancestor of HEAD and S must carry exactly its tree. Commits the branch
+  # gained since the kill (an intake, a strand) do not defeat the match
+  # (v0.14.0 review, MINOR-1). Idempotent; a no-op on every other state.
+  squash_mode || return 0
+  git rev-parse -q --verify "refs/heads/$SQUASH_TARGET" >/dev/null 2>&1 || return 0
+  git merge-base --is-ancestor "refs/heads/$SQUASH_TARGET" HEAD 2>/dev/null && return 0
+  local from
+  from="$(git log -1 --format=%B "refs/heads/$SQUASH_TARGET" 2>/dev/null \
+          | sed -n 's/^phasekit-squash: [^@]*@\([0-9a-f]\{7,40\}\)$/\1/p' | tail -n1)" || from=""
+  [[ -n "$from" ]] || return 0
+  git rev-parse -q --verify "$from^{commit}" >/dev/null 2>&1 || return 0
+  git merge-base --is-ancestor "$from" HEAD 2>/dev/null || return 0
+  [[ "$(git rev-parse "refs/heads/$SQUASH_TARGET^{tree}")" == "$(git rev-parse "$from^{tree}")" ]] || return 0
+  echo "Branch-per-iteration: completing an interrupted squash (merge-back was missing)."
+  merge_back_from_target
+}
+
+ensure_work_branch() {
+  # Loop start. Decide where HEAD should be and put it there, or block.
+  squash_mode || return 0
+  local cur want
+  cur="$(current_branch)"
+  if ! git rev-parse -q --verify "refs/heads/$SQUASH_TARGET" >/dev/null 2>&1; then
+    write_branch_integrity_block \
+      "PHASEKIT_SQUASH_TARGET='$SQUASH_TARGET' is not a local branch" \
+      "create or fetch branch '$SQUASH_TARGET', or unset PHASEKIT_SQUASH_TARGET, then re-run"
+    return 1
+  fi
+  if [[ "$cur" == "HEAD" ]]; then
+    write_branch_integrity_block \
+      "detached HEAD — the loop needs a work branch" \
+      "check out '$SQUASH_TARGET' (the loop creates the work branch) or an existing work branch, then re-run"
+    return 1
+  fi
+  want="${PHASEKIT_WORK_BRANCH:-}"
+  if [[ "$cur" == "$SQUASH_TARGET" ]]; then
+    [[ -n "$want" ]] || want="iter/$(date -u +%Y%m%dT%H%M%SZ)"
+    if git rev-parse -q --verify "refs/heads/$want" >/dev/null 2>&1; then
+      # Re-entering an existing work branch from the target is only safe when
+      # it carries nothing the target lacks: its tree is one the target has
+      # already held (the target may have advanced since — an intake commit
+      # after a finished iteration; v0.14.0 review, MINOR-4).
+      if ! git log -n 500 --format=%T "refs/heads/$SQUASH_TARGET" 2>/dev/null \
+           | grep -qx "$(git rev-parse "refs/heads/$want^{tree}")"; then
+        write_branch_integrity_block \
+          "work branch '$want' already exists with content '$SQUASH_TARGET' does not carry, while HEAD is on '$SQUASH_TARGET'" \
+          "check out '$want' and re-run (the loop squashes it at the next approval), or retire the branch by hand"
+        return 1
+      fi
+      git checkout -q "$want" || { write_branch_integrity_block "could not check out work branch '$want'" "resolve the checkout failure by hand, then re-run"; return 1; }
+      # The target may have advanced since this branch finished (an intake
+      # commit); bring it in — a clean merge by construction, the branch holds
+      # nothing beyond a tree the target already had.
+      if ! git merge-base --is-ancestor "refs/heads/$SQUASH_TARGET" HEAD 2>/dev/null; then
+        git merge -q --no-edit "refs/heads/$SQUASH_TARGET" >/dev/null 2>&1 \
+          || { git merge --abort >/dev/null 2>&1 || true; write_branch_integrity_block "could not bring '$SQUASH_TARGET' into re-entered work branch '$want'" "merge $SQUASH_TARGET into '$want' by hand, then re-run"; return 1; }
+      fi
+    else
+      git checkout -q -b "$want" || { write_branch_integrity_block "could not create work branch '$want'" "resolve the checkout failure by hand, then re-run"; return 1; }
+    fi
+    echo "Branch-per-iteration: work branch '$want' (squash target '$SQUASH_TARGET')."
+  elif [[ -n "$want" && "$cur" != "$want" ]]; then
+    write_branch_integrity_block \
+      "HEAD is on '$cur' but PHASEKIT_WORK_BRANCH='$want'" \
+      "check out '$want' (or '$SQUASH_TARGET', and the loop will create/enter '$want'), then re-run"
+    return 1
+  else
+    echo "Branch-per-iteration: on work branch '$cur' (squash target '$SQUASH_TARGET')."
+  fi
+  repair_half_squash || true
+  # The same guard the squash applies, applied before any token is spent: a
+  # target that moved out-of-band will refuse every squash this session.
+  if ! git merge-base --is-ancestor "refs/heads/$SQUASH_TARGET" HEAD 2>/dev/null; then
+    write_branch_integrity_block \
+      "'$SQUASH_TARGET' moved out-of-band (its tip is not an ancestor of the work branch)" \
+      "git merge $SQUASH_TARGET into the work branch by hand (resolve conflicts, re-verify), then re-run"
+    return 1
+  fi
+  return 0
+}
+
+squash_to_target() {
+  # $1 = commit message for the squash commit
+  # $2 = 1 when HEAD's tree just passed the verify gate (the commit path),
+  #      0 to run the gate here first (a squash caught up at a boundary —
+  #      the tree may have landed via a --no-verify strand commit).
+  # Returns 0 on success or nothing-to-do; 1 with phase-blocked.json written
+  # (or phase-verify-failed.json, when the gate is what refused).
+  local msg="$1" verified="${2:-1}"
+  squash_mode || return 0
+  local work old_target head tree remote_target trailer s
+  work="$(current_branch)"
+  if [[ "$work" == "HEAD" || "$work" == "$SQUASH_TARGET" ]]; then
+    write_branch_integrity_block "cannot squash: HEAD is on '$work', not a work branch" \
+      "check out '$SQUASH_TARGET' and re-run (the loop creates the work branch)"
+    return 1
+  fi
+  if ! git rev-parse -q --verify "refs/heads/$SQUASH_TARGET" >/dev/null 2>&1; then
+    write_branch_integrity_block "PHASEKIT_SQUASH_TARGET='$SQUASH_TARGET' is not a local branch" \
+      "create or fetch branch '$SQUASH_TARGET', then re-run"
+    return 1
+  fi
+  repair_half_squash || true
+  old_target="$(git rev-parse "refs/heads/$SQUASH_TARGET")"
+  # One HEAD snapshot for tree, trailer and merge-back parent: a strand commit
+  # landing between two reads must not produce a merge-back whose tree
+  # silently omits it (v0.14.0 review, MINOR-2).
+  head="$(git rev-parse HEAD)"
+  tree="$(git rev-parse "$head^{tree}")"
+  # Guard 1 (local ancestry) runs BEFORE the nothing-to-do short-circuit: an
+  # unrelated target that happens to hold this tree is still an integrity
+  # failure, not a finished squash (MINOR-5).
+  if ! git merge-base --is-ancestor "$old_target" "$head" 2>/dev/null; then
+    write_branch_integrity_block \
+      "squash refused: '$SQUASH_TARGET' moved out-of-band (tip $(git rev-parse --short "$old_target") is not an ancestor of '$work')" \
+      "git merge $SQUASH_TARGET into '$work' by hand (resolve conflicts, re-verify), then re-run — the squash retries at the next boundary"
+    return 1
+  fi
+  if [[ "$tree" == "$(git rev-parse "$old_target^{tree}")" ]]; then
+    echo "Branch-per-iteration: '$SQUASH_TARGET' already carries this tree — nothing to squash."
+    return 0
+  fi
+  # Guard 2 (remote, best-effort): when origin/<target> is known, it must not
+  # be ahead either — the push would be rejected anyway, and a target that
+  # diverged upstream must never be papered over locally. Fetch may fail
+  # (no credentials inside a container): the last-seen remote tip still
+  # counts, and a fetch that hangs is bounded.
+  if git rev-parse -q --verify "refs/remotes/origin/$SQUASH_TARGET" >/dev/null 2>&1; then
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 20 git fetch -q origin "$SQUASH_TARGET" >/dev/null 2>&1 \
+        || echo "  (branch-per-iteration: remote fetch unavailable — last-seen origin/$SQUASH_TARGET used for the guard)"
+    else
+      git fetch -q origin "$SQUASH_TARGET" >/dev/null 2>&1 \
+        || echo "  (branch-per-iteration: remote fetch unavailable — last-seen origin/$SQUASH_TARGET used for the guard)"
+    fi
+    remote_target="$(git rev-parse "refs/remotes/origin/$SQUASH_TARGET")"
+    if ! git merge-base --is-ancestor "$remote_target" "$head" 2>/dev/null; then
+      write_branch_integrity_block \
+        "squash refused: origin/$SQUASH_TARGET ($(git rev-parse --short "$remote_target")) is ahead of the work branch" \
+        "git fetch, then git merge origin/$SQUASH_TARGET into '$work' by hand (resolve conflicts, re-verify), then re-run"
+      return 1
+    fi
+  fi
+  if [[ "$verified" != "1" ]]; then
+    echo "Branch-per-iteration: squash caught up at a boundary — running the verify gate on the branch tree first."
+    if ! run_verify_gate; then
+      echo "Branch-per-iteration: squash deferred — the verify gate is red (artifacts/phase-verify-failed.json); the next approval carries this work." >&2
+      return 1
+    fi
+  fi
+  trailer="phasekit-squash: $work@$(git rev-parse --short "$head")"
+  if ! s="$(git commit-tree "$tree" -p "$old_target" -m "$msg" -m "$trailer")"; then
+    write_branch_integrity_block "git commit-tree failed while squashing" "inspect the repository (git fsck), then re-run"
+    return 1
+  fi
+  if ! git update-ref -m "phasekit squash ($work)" "refs/heads/$SQUASH_TARGET" "$s" "$old_target"; then
+    write_branch_integrity_block "'$SQUASH_TARGET' moved while the squash was in progress" "re-run — the guard re-evaluates at the next boundary"
+    return 1
+  fi
+  if ! merge_back_from_target; then
+    write_branch_integrity_block "merge-back failed after squashing to $(git rev-parse --short "$s")" "re-run — repair_half_squash completes the merge-back at the next boundary"
+    return 1
+  fi
+  echo "Branch-per-iteration: squashed '$work' onto '$SQUASH_TARGET' as $(git rev-parse --short "$s") (was $(git rev-parse --short "$old_target"))."
+  return 0
+}
+
+rest_on_target() {
+  # Iteration complete and fully squashed: leave HEAD on the target so the
+  # repo rests where the next intake (and a standalone user) expects it. The
+  # work branch is kept, not deleted (fork B). Trees are identical, so the
+  # checkout changes no file. Best-effort.
+  squash_mode || return 0
+  local work
+  work="$(current_branch)"
+  [[ "$work" != "$SQUASH_TARGET" && "$work" != "HEAD" ]] || return 0
+  [[ "$(git rev-parse "HEAD^{tree}")" == "$(git rev-parse "refs/heads/$SQUASH_TARGET^{tree}")" ]] || return 0
+  if git checkout -q "$SQUASH_TARGET" 2>/dev/null; then
+    echo "Branch-per-iteration: iteration complete — resting on '$SQUASH_TARGET' (work branch '$work' kept)."
+  else
+    echo "  WARN: branch-per-iteration: could not check out '$SQUASH_TARGET' at completion — HEAD stays on '$work'." >&2
+  fi
+  return 0
+}
+
+ensure_squashed_or_block() {
+  # $1 = verified (see squash_to_target); $2 = "completion" to rest on the
+  # target afterwards. Catches up any approval-class record the target does
+  # not carry yet (a squash refused last session, or an approval that landed
+  # through a wrap-up/strand commit instead of the commit path).
+  local verified="${1:-0}" completion="${2:-}" msg
+  squash_mode || return 0
+  if squash_pending; then
+    msg="$(git show "HEAD:artifacts/phase-approval.json" 2>/dev/null | jq -r '.suggested_commit_message // empty' 2>/dev/null)" || msg=""
+    if git rev-parse -q --verify "HEAD:artifacts/project-complete.json" >/dev/null 2>&1 \
+       && [[ "$(git rev-parse -q --verify "HEAD:artifacts/project-complete.json" 2>/dev/null)" != "$(git rev-parse -q --verify "refs/heads/$SQUASH_TARGET:artifacts/project-complete.json" 2>/dev/null)" ]]; then
+      msg="$(git show "HEAD:artifacts/project-complete.json" 2>/dev/null | jq -r '.suggested_commit_message // empty' 2>/dev/null)" || msg=""
+      [[ -n "$msg" ]] || msg="chore(workflow): project completion record (squash caught up at a boundary)"
+    fi
+    [[ -n "$msg" ]] || msg="chore(workflow): approved phase (squash caught up at a boundary)"
+    echo "Branch-per-iteration: an approval-class commit on the work branch has not reached '$SQUASH_TARGET' — squashing now."
+    squash_to_target "$msg" "$verified" || return 1
+  fi
+  if [[ "$completion" == "completion" ]]; then
+    rest_on_target
+  fi
+  return 0
 }
 
 staged_touches_security_pair() {
@@ -706,6 +1048,16 @@ commit_from_artifact() {
   post_verify_commit_gates iteration || return $?
 
   git commit -m "$msg"
+  # Branch-per-iteration (v0.14.0): an approval-class commit also lands on the
+  # target as one squash commit. A refused squash leaves the branch commit in
+  # place and returns 1 with phase-blocked.json written — the caller's
+  # blocked path stops the loop (exit 2) and the next boundary retries.
+  if squash_applies_to "$file"; then
+    if ! squash_to_target "$msg" 1; then
+      auto_push_if_enabled   # the branch commit is real work — keep it durable
+      return 1
+    fi
+  fi
   auto_push_if_enabled
 }
 
@@ -1273,6 +1625,10 @@ maybe_escalate_light_commit() {
     exit 2
   fi
   if [[ -f "$ARTIFACTS_DIR/phase-blocked.json" ]]; then
+    if [[ "$(jq -r '.blocker_kind // empty' "$ARTIFACTS_DIR/phase-blocked.json" 2>/dev/null)" == "branch-integrity" ]]; then
+      write_light_escalation "branch_integrity" "the squash onto $SQUASH_TARGET was refused (see phase-blocked.json)"
+      exit 2
+    fi
     write_light_escalation "verify_failures" "pre-commit verify failed $VERIFY_MAX_ATTEMPTS times"
     exit 2
   fi
@@ -1485,6 +1841,15 @@ check_for_scaffold_update || true
 # order is deliberate: it fails closed (an exclude line for a still-tracked
 # path is inert; untracked-and-unexcluded is the state to avoid).
 ensure_transients_excluded || true
+
+# Branch-per-iteration (v0.14.0): put HEAD on the work branch before any
+# loop-made commit can land — the heal commit just below and the recovery
+# commits after it must ride the branch, never the target. A refusal here is
+# a blocked verdict at zero token cost.
+if ! ensure_work_branch; then
+  echo "Stopping: branch-per-iteration preconditions not met (see artifacts/phase-blocked.json)." >&2
+  exit 2
+fi
 heal_tracked_transients || true
 
 # Stranded-artifact recovery (v0.6.3). v0.6.0's atomicity gate correctly
@@ -1547,8 +1912,15 @@ if artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then
     "$ARTIFACTS_DIR/project-complete.json" \
     "chore(workflow): final session work + project completion record" || crc=$?
   if [[ "$crc" -eq 0 || "$crc" -eq 2 ]]; then
-    echo "Run finished successfully."
-    exit 0
+    if ensure_squashed_or_block "$([[ "$crc" -eq 0 ]] && echo 1 || echo 0)" completion; then
+      echo "Run finished successfully."
+      exit 0
+    fi
+    if [[ "$BRANCH_INTEGRITY_BLOCKED" -eq 1 ]]; then
+      echo "Stranded completion committed on the work branch but its squash was refused:" >&2
+      print_json_summary "$ARTIFACTS_DIR/phase-blocked.json"
+      exit 2
+    fi
   fi
   echo "Stranded completion did not pass the commit gates — entering the loop to fix and re-complete." >&2
 elif artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json"; then
@@ -1557,6 +1929,31 @@ elif artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json"; then
   # none: the artifact IS the phase being committed).
   echo "Stranded phase-approval.json from a prior session detected — its commit will be retried at the first iteration boundary."
   PENDING_COMMIT_RETRY="phase-approval"
+fi
+
+# Branch-per-iteration (v0.14.0): catch up a squash the target is still owed
+# (refused last session, or an approval that landed via a wrap-up/strand
+# commit). Verify-gated here, since that tree may never have been verified.
+# A refused squash is a blocked verdict at zero token cost; a red verify
+# gate is NOT — the session that follows is exactly what fixes it. When the
+# record caught up is the COMPLETION, the run is finished right here: entering
+# the loop would delete project-complete.json and spend a session on a
+# complete project (v0.14.0 review, MAJOR-2).
+if [[ -z "$PENDING_COMMIT_RETRY" ]] && squash_pending; then
+  completion_owed=0
+  if git rev-parse -q --verify "HEAD:artifacts/project-complete.json" >/dev/null 2>&1; then
+    completion_owed=1
+  fi
+  if ensure_squashed_or_block 0; then
+    if [[ "$completion_owed" -eq 1 ]]; then
+      rest_on_target
+      echo "Run finished successfully."
+      exit 0
+    fi
+  elif [[ "$BRANCH_INTEGRITY_BLOCKED" -eq 1 ]]; then
+    echo "Stopping: the work branch cannot be squashed onto $SQUASH_TARGET (see artifacts/phase-blocked.json)." >&2
+    exit 2
+  fi
 fi
 
 while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
@@ -1730,9 +2127,14 @@ VERDICT_RETRY_EOF
     fi
     if [[ "$crc" -eq 0 || "$crc" -eq 2 ]]; then
       # 0 = final work committed; 2 = nothing substantive left (already
-      # committed) — both are a clean finish.
-      echo "Run finished successfully."
-      exit 0
+      # committed) — both are a clean finish, once the target carries it
+      # (branch-per-iteration: rc 0 squashed inside the commit path; rc 2
+      # may still owe the target a squash, verify-gated there).
+      if ensure_squashed_or_block "$([[ "$crc" -eq 0 ]] && echo 1 || echo 0)" completion; then
+        echo "Run finished successfully."
+        exit 0
+      fi
+      crc=1
     fi
     maybe_escalate_light_commit "$crc"
     # Verify gate failed on the final commit: the completion claim is not
