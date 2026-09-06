@@ -198,5 +198,115 @@ class PushesWhenThereIsSomewhereToPush(UpgradeFixture):
         self.assertIn("no upstream", r.stdout + r.stderr)
 
 
+class TimestampsAreNotChurn(UpgradeFixture):
+    """v0.14.1. Two families of "when" live in the manifest — `enriched_at`
+    and every entry's `installed_at` — and both used to be re-stamped on any
+    write. The `_timeless` guard already kept a byte-identical re-run from
+    writing at all, but a real re-baseline (one project-owned doc edited since
+    the last upgrade) rewrote every stamp, so a weekly upgrade across an
+    unchanged fleet produced a ~100-line diff per project carrying one or two
+    sha lines (foundry-orchestrator #495, 2026-09-06). The 1.1s sleeps force
+    a clock-second boundary so each pin fails against the old behavior on any
+    machine."""
+
+    def manifest(self):
+        return json.loads((self.project / ".scaffold" / "manifest.json").read_text())
+
+    @staticmethod
+    def stamps(m):
+        return {f["path"]: f["installed_at"] for f in m["files"]}
+
+    @staticmethod
+    def shas(m):
+        return {f["path"]: (f["sha256"], f["sha256_strict"]) for f in m["files"]}
+
+    def test_an_install_stamps_only_the_installed_entry(self):
+        """A file the manifest has never seen. (The fixture's own aged hook is
+        NOT the case to pin: it is reinstalled byte-identical, so the only
+        thing that would move is its stamp, and the timestamps-only guard
+        correctly declines to write at all — that is the guard doing its job,
+        not a missed stamp.)"""
+        hook = ".claude/hooks/require-verdict.sh"
+        mpath = self.project / ".scaffold" / "manifest.json"
+        before = self.manifest()
+        before["files"] = [f for f in before["files"] if f["path"] != hook]
+        mpath.write_text(json.dumps(before, indent=2) + "\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "forget the hook")
+        time.sleep(1.1)
+        r = self.upgrade()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        after = self.manifest()
+        self.assertIn(hook, self.stamps(after), "the new install must be recorded")
+        self.assertGreater(self.stamps(after)[hook], before["enriched_at"],
+                           "the installed file must carry a fresh installed_at")
+        for path, stamp in self.stamps(before).items():
+            self.assertEqual(self.stamps(after)[path], stamp,
+                             f"{path}: installed_at re-stamped though it was not installed")
+        self.assertNotEqual(after["enriched_at"], before["enriched_at"],
+                            "a run that installed a file is an enrichment")
+
+    def test_a_re_baseline_moves_only_the_sha_lines(self):
+        self.upgrade()
+        base = self.manifest()
+        head = self.git("rev-parse", "HEAD").stdout.strip()
+        spec = self.project / "docs" / "SPEC.md"
+        spec.write_text(spec.read_text(encoding="utf-8") + "\nAC #99: edited by the project\n",
+                        encoding="utf-8")
+        self.git("add", "docs/SPEC.md")
+        self.git("commit", "-qm", "project edits its own spec")
+        time.sleep(1.1)
+        r = self.upgrade()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        after = self.manifest()
+        # The manifest caught up with the edited doc — and committed that.
+        self.assertNotEqual(self.shas(after)["docs/SPEC.md"], self.shas(base)["docs/SPEC.md"])
+        self.assertNotEqual(self.git("rev-parse", "HEAD").stdout.strip(), head)
+        self.assertEqual(self.head_files(), {".scaffold/manifest.json"})
+        # ...and nothing else moved: not one stamp, not one other sha.
+        self.assertEqual(self.stamps(after), self.stamps(base))
+        self.assertEqual(after["enriched_at"], base["enriched_at"])
+        others = {p: v for p, v in self.shas(after).items() if p != "docs/SPEC.md"}
+        self.assertEqual(others, {p: v for p, v in self.shas(base).items() if p != "docs/SPEC.md"})
+
+    def test_a_second_upgrade_leaves_the_manifest_byte_identical(self):
+        self.upgrade()
+        path = self.project / ".scaffold" / "manifest.json"
+        before = path.read_bytes()
+        time.sleep(1.1)
+        r = self.upgrade()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_a_malformed_prior_manifest_does_not_break_recovery(self):
+        """Fail-open (review finding #1): `--reconcile --force` is the
+        documented recovery path for a broken manifest, so reading the prior
+        for its stamps must never raise. `"files": null` parses as JSON and
+        used to crash the carry-forward read."""
+        mpath = self.project / ".scaffold" / "manifest.json"
+        m = json.loads(mpath.read_text())
+        m["files"] = None
+        mpath.write_text(json.dumps(m, indent=2) + "\n", encoding="utf-8")
+        r = subprocess.run(
+            [sys.executable, str(ENRICH), "--reconcile", "--force", str(self.project)],
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rebuilt = self.manifest()
+        self.assertTrue(rebuilt["files"], "reconcile must rebuild the entries")
+        self.assertTrue(all(f.get("installed_at") for f in rebuilt["files"]))
+
+    def test_a_profile_switch_is_an_enrichment(self):
+        """Review finding #2: no bytes move on a profile switch, but the
+        manifest's meaning does, so `enriched_at` must not be carried."""
+        self.upgrade()
+        before = self.manifest()
+        time.sleep(1.1)
+        r = self.upgrade("--profile", "static-web")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        after = self.manifest()
+        self.assertNotEqual(after["profile"], before["profile"])
+        self.assertNotEqual(after["enriched_at"], before["enriched_at"])
+
+
 if __name__ == "__main__":
     unittest.main()

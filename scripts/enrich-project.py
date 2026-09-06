@@ -912,6 +912,7 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
             file_specs_for_manifest.append({
                 "path": path, "ownership": p["ownership"],
                 "text": p["text"], "rendered_from": p["rendered_from"],
+                "installed": False,
             })
         elif action == ACTION_TAKE_NEW or action == ACTION_INSTALL:
             spec = {"path": path, "ownership": p["ownership"], "text": p["text"],
@@ -922,20 +923,23 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
                 print(f"  REFUSE: {e}", file=sys.stderr)
                 return 1
             print(f"  {action}: {path}")
-            file_specs_for_manifest.append(spec)
+            file_specs_for_manifest.append({**spec, "installed": True})
         elif action == ACTION_KEEP_LOCAL:
             # Leave on-disk file as-is. Manifest sha will be updated to current.
             print(f"  keep-local: {path}")
             file_specs_for_manifest.append({
                 "path": path, "ownership": p["ownership"],
                 "text": p["text"], "rendered_from": p["rendered_from"],
+                "installed": False,
             })
         elif action == ACTION_ADOPT:
             # collision-novel: trust on-disk content; record under scaffold-new path
             print(f"  adopt: {path}")
+            # Adoption is a decision made now: the stamp records it.
             file_specs_for_manifest.append({
                 "path": path, "ownership": p["ownership"],
                 "text": p["text"], "rendered_from": p["rendered_from"],
+                "installed": True,
             })
         elif action == ACTION_RENAME_LOCAL:
             # Move on-disk file aside; install scaffold-new on the original path
@@ -954,7 +958,7 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
                 print(f"  REFUSE: {e}", file=sys.stderr)
                 return 1
             print(f"  rename-local: {path} -> {new_path}; installed scaffold-new at {path}")
-            file_specs_for_manifest.append(spec)
+            file_specs_for_manifest.append({**spec, "installed": True})
         elif action == ACTION_DELETE:
             try:
                 dest.unlink()
@@ -968,6 +972,7 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
             file_specs_for_manifest.append({
                 "path": path, "ownership": OWNERSHIP_CLASS_ORPHAN,
                 "text": p["text"], "rendered_from": p["rendered_from"],
+                "installed": False,
             })
 
     sync_hook_registrations(target)
@@ -1549,8 +1554,15 @@ def lookup_template_info(scaffold_manifest, downstream_path):
 
 
 def build_manifest_entry(downstream_path, ownership, target_dir,
-                          scaffold_manifest, is_text=True, rendered_from_override=None):
-    """Build one entry for the downstream `.scaffold/manifest.json`."""
+                          scaffold_manifest, is_text=True, rendered_from_override=None,
+                          installed_at=None):
+    """Build one entry for the downstream `.scaffold/manifest.json`.
+
+    `installed_at` defaults to now. `write_downstream_manifest` passes the
+    PRIOR entry's stamp for a file this run did not install, so the stamp
+    keeps meaning "when phasekit last wrote this file" rather than "when the
+    manifest was last rewritten" (v0.14.1).
+    """
     file_path = Path(target_dir) / downstream_path
     if not file_path.exists():
         return None  # Caller decides how to surface missing files
@@ -1564,7 +1576,7 @@ def build_manifest_entry(downstream_path, ownership, target_dir,
         "sha256": sha_norm,
         "sha256_strict": sha_strict_val,
         "overlays": [],
-        "installed_at": utc_now_iso(),
+        "installed_at": installed_at or utc_now_iso(),
     }
 
     if ownership == "bootstrap-with-template-tracking":
@@ -1586,8 +1598,29 @@ def build_manifest_entry(downstream_path, ownership, target_dir,
 def write_downstream_manifest(target_dir, scaffold_manifest, profile, file_specs):
     """Write `.scaffold/manifest.json` atomically via tmp + os.replace.
 
-    file_specs: list of dicts with keys {path, ownership, text, rendered_from?}.
-    Returns the manifest path on success.
+    file_specs: list of dicts with keys {path, ownership, text, rendered_from?,
+    installed?}. `installed` (default True) says whether THIS run wrote the
+    file. Returns the manifest path on success.
+
+    Timestamps are not churn (v0.14.1). Two families of "when" live in this
+    file, and both used to be re-stamped on every write: `enriched_at` at the
+    top and `installed_at` on every entry. The `_timeless` guard below kept a
+    byte-identical re-run from writing at all, but any real re-baseline — one
+    project-owned doc edited since the last upgrade, whose sha the manifest
+    must catch up with — rewrote every stamp in the file, so a weekly
+    maintenance upgrade across an unchanged fleet produced a ~100-line
+    manifest diff per project whose only content was one or two sha lines,
+    and a commit and a deploy to carry it (foundry-orchestrator #495,
+    2026-09-06). Now:
+
+    * an entry's `installed_at` is CARRIED from the prior manifest unless this
+      run installed the file (`installed: True`) or the path is new;
+    * `enriched_at` is carried unless this run installed or removed a file,
+      or the scaffold version/commit moved — a sha re-baseline alone is
+      bookkeeping, not an enrichment.
+
+    The diff a re-baseline writes is therefore exactly the sha lines that
+    moved, and nothing else.
     """
     target = Path(target_dir).resolve()
     scaffold_dir = target / ".scaffold"
@@ -1595,8 +1628,35 @@ def write_downstream_manifest(target_dir, scaffold_manifest, profile, file_specs
 
     version, commit = get_scaffold_version()
 
+    manifest_path = scaffold_dir / "manifest.json"
+    prior = None
+    if manifest_path.is_file():
+        try:
+            prior = json.loads(manifest_path.read_text())
+        except (ValueError, OSError):
+            prior = None
+    # Fail-open on a prior that parses but is malformed: `--reconcile` is
+    # the documented recovery path for a broken manifest, so nothing read
+    # here may raise. A non-dict prior, a `files` that is not a list, an
+    # entry that is not a dict — all read as "no prior", which stamps fresh.
+    prior_entries = {}
+    if isinstance(prior, dict):
+        prior_files = prior.get("files")
+        if not isinstance(prior_files, list):
+            prior_files = []
+        prior_entries = {
+            f.get("path"): f for f in prior_files if isinstance(f, dict)
+        }
+
     entries = []
+    installed_any = False
     for spec in file_specs:
+        installed = bool(spec.get("installed", True))
+        carried_stamp = None
+        if not installed:
+            prior_entry = prior_entries.get(spec["path"])
+            if prior_entry is not None:
+                carried_stamp = prior_entry.get("installed_at") or None
         entry = build_manifest_entry(
             spec["path"],
             spec["ownership"],
@@ -1604,9 +1664,31 @@ def write_downstream_manifest(target_dir, scaffold_manifest, profile, file_specs
             scaffold_manifest,
             is_text=spec.get("text", True),
             rendered_from_override=spec.get("rendered_from"),
+            installed_at=carried_stamp,
         )
         if entry is not None:
             entries.append(entry)
+            if installed or carried_stamp is None:
+                installed_any = True
+
+    # Carried only when this run enriched nothing: no install, no removal,
+    # same scaffold version/commit, same profile, and the same set of
+    # (path, ownership) — a profile switch or an orphan reclassification IS
+    # an enrichment even though no bytes moved (review finding, v0.14.1).
+    enriched_at = utc_now_iso()
+    prior_shape = {
+        (path, f.get("ownership")) for path, f in prior_entries.items()
+    }
+    if (
+        isinstance(prior, dict)
+        and not installed_any
+        and prior.get("enriched_at")
+        and prior.get("scaffold_version") == version
+        and prior.get("scaffold_commit") == commit
+        and prior.get("profile") == profile
+        and prior_shape == {(e["path"], e["ownership"]) for e in entries}
+    ):
+        enriched_at = prior["enriched_at"]
 
     manifest = {
         "schema_version": SCHEMA_VERSION_CURRENT,
@@ -1614,7 +1696,7 @@ def write_downstream_manifest(target_dir, scaffold_manifest, profile, file_specs
         "scaffold_commit": commit,
         "origin_url": get_scaffold_origin_url(),
         "profile": profile,
-        "enriched_at": utc_now_iso(),
+        "enriched_at": enriched_at,
         "normalization": {
             "recipe": NORMALIZATION_RECIPE,
             "version": NORMALIZATION_VERSION,
@@ -1622,7 +1704,6 @@ def write_downstream_manifest(target_dir, scaffold_manifest, profile, file_specs
         "files": entries,
     }
 
-    manifest_path = scaffold_dir / "manifest.json"
     # A re-run that changes nothing must write nothing new. TWO timestamp
     # families differ between two identical enrichments — the top-level
     # `enriched_at` and every file entry's `installed_at` — and a
@@ -1906,7 +1987,7 @@ def cmd_reconcile(target_dir, profile=None, no_lock=False, force=False):
 
     resolved = resolve_profile(profiles, profile)
     targets = enumerate_install_targets(scaffold_manifest, resolved)
-    on_disk = [s for s in targets if (target / s["path"]).exists()]
+    on_disk = [{**s, "installed": False} for s in targets if (target / s["path"]).exists()]
     missing = [s["path"] for s in targets if not (target / s["path"]).exists()]
 
     print(f"--reconcile: {len(on_disk)} files found on disk, {len(missing)} missing")
@@ -2227,6 +2308,7 @@ def cmd_enrich(args):
         except RuntimeError as e:
             print(f"  REFUSE: {e}", file=sys.stderr)
             sys.exit(1)
+        spec["installed"] = bool(installed)
         if installed:
             copied += 1
         else:

@@ -244,7 +244,7 @@ These are deferred to later sub-phases:
 
 **`--check` exits 3 on a file you intentionally edited** — That's the drift detection working. Either revert your edits, or run `--reconcile --force` to record the current state as the new baseline. A future `--upgrade --keep-local <path>` (Slice C) will let you preserve edits while still pulling in scaffold updates elsewhere.
 
-**Manifest is committed but `git status` shows it changed after every enrich** — Expected. The `enriched_at` and per-file `installed_at` timestamps update on every run. If this churn is undesirable in your workflow, `--check` is the read-only alternative.
+**Manifest is committed but `git status` shows it changed after an enrich or upgrade** — It changed because a recorded sha moved (a file phasekit installed, or a project-owned file whose edits the manifest re-baselined). Since v0.14.1 the timestamps are not churn: `installed_at` is carried forward for every file the run did not write, and `enriched_at` moves only when a file was installed or removed or the scaffold version changed — so a re-run that changes nothing writes nothing, and a re-baseline diff is exactly the sha lines that moved. `--check` is the read-only alternative.
 
 **`--upgrade` interrupted partway (disk full, SIGTERM, etc.)** — Files that were successfully copied are scaffold-canonical on disk; the manifest, written last, may still record pre-upgrade shas for them. A subsequent `--check` will report drift on those files even though they match the scaffold. Recovery: re-run `--upgrade --yes` (or with the same per-file flags). The second pass sees clean files and is a no-op for them; any tmp files from the interrupt are swept by the orphan sweep at engine startup.
 
