@@ -1860,6 +1860,11 @@ PENDING_COMMIT_RETRY=""
 # exit 0 instead of starting an iteration the guillotine would truncate.
 WRAPUP_SENTINEL="${PHASEKIT_WRAPUP_SENTINEL:-$ARTIFACTS_DIR/wrapup-requested}"
 WRAPUP_UNVERIFIED=0   # set by wrapup_commit's verify-red fall-through (v0.14.2)
+# Project env the supervisor forwarded (v0.14.3): names only, so a session log
+# answers "did the build see its keys?" without a docker inspect on the host.
+if [[ -n "${PHASEKIT_FORWARD_ENV:-}" ]]; then
+  echo "Project env forwarded by the supervisor: ${PHASEKIT_FORWARD_ENV//$'\n'/,}"
+fi
 if [[ -f "$WRAPUP_SENTINEL" ]]; then
   echo "Clearing stale wrap-up sentinel from a prior run: $WRAPUP_SENTINEL"
   rm -f "$WRAPUP_SENTINEL"

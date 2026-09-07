@@ -81,6 +81,14 @@
       "semantics": "Name of the iteration's work branch under PHASEKIT_SQUASH_TARGET (a supervisor passes e.g. iter/<N>-<slug>). When HEAD is on the target, the loop creates it (or re-enters an existing one that carries nothing the target lacks); when HEAD is already on it, nothing happens; when HEAD is on some other branch the loop blocks rather than guess. Unset with HEAD on the target: the loop creates iter/<UTC stamp>. Ignored when PHASEKIT_SQUASH_TARGET is unset."
     },
     {
+      "name": "PHASEKIT_FORWARD_ENV",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh", "scripts/run-until-done.sh"],
+      "default": "",
+      "container_forwarded": true,
+      "semantics": "Comma-separated NAMES of project-specific environment keys a supervisor has placed in container-setup.sh's process env (v0.14.3) — the one door for non-PHASEKIT_ keys such as the backend URL a client bakes at build time. container-setup.sh adds `-e NAME=<value>` for every listed name that is set, skips unset names silently and malformed names loudly, refuses the names the script itself sets for the container (HOME, PATH, CLAUDE_CONFIG_DIR, IS_SANDBOX), forwards the list itself (the loop prints `Project env forwarded by the supervisor: …` at start), and prints a names-only witness (`container: forwarding project env: …`); values never touch a file or a log — a token written as NAME=value is reported by its name part only. Newlines count as separators. Unset: nothing beyond the fixed allowlist crosses the container wall. The Foundry orchestrator sets it from a project's declared env_file (its #562)."
+    },
+    {
       "name": "PHASEKIT_VERIFY_CMD",
       "kind": "consumed",
       "read_by": ["scripts/run-until-done.sh"],

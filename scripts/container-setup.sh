@@ -274,6 +274,55 @@ run_container() {
     docker_args+=(-e PHASEKIT_WORK_BRANCH="$PHASEKIT_WORK_BRANCH")
   fi
 
+  # Project build environment (v0.14.3). A supervisor names, in
+  # PHASEKIT_FORWARD_ENV, the comma-separated NAMES of project-specific keys it
+  # has already placed in this script's process env — an operator-held env
+  # file the orchestrator reads, e.g. the backend URL a client bakes at build
+  # time. This is the one door for non-PHASEKIT_ project keys: the allowlist
+  # above stays fixed, the names travel as a list, the VALUES travel only in
+  # the process env (never a file, never a log), and the witness below names
+  # keys only. A listed name that is unset is skipped silently — the project's
+  # own build then fails honestly; a malformed name is skipped loudly. The list
+  # itself is forwarded too, so the loop can say which keys it was given.
+  if [[ -n "${PHASEKIT_FORWARD_ENV:-}" ]]; then
+    local _fwd_list _fwd_name _fwd_names=() _fwd_shown
+    # Newlines are separators too (a YAML block scalar is a natural source).
+    IFS=',' read -r -a _fwd_list <<< "${PHASEKIT_FORWARD_ENV//$'\n'/,}"
+    for _fwd_name in "${_fwd_list[@]}"; do
+      # Trim the EDGES only: interior whitespace makes a name malformed, and
+      # malformed is loud, never silently repaired into a different name.
+      _fwd_name="${_fwd_name#"${_fwd_name%%[![:space:]]*}"}"
+      _fwd_name="${_fwd_name%"${_fwd_name##*[![:space:]]}"}"
+      [[ -n "$_fwd_name" ]] || continue
+      if [[ ! "$_fwd_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        # The loud path must not become the leak: a token written as
+        # NAME=value (env-file syntax pasted into the list) is shown by its
+        # name part only, and any token is cut at 40 characters.
+        _fwd_shown="${_fwd_name%%=*}"
+        [[ "$_fwd_shown" == "$_fwd_name" ]] || _fwd_shown="$_fwd_shown=…"
+        echo "container: PHASEKIT_FORWARD_ENV: skipping malformed name '${_fwd_shown:0:40}' (names only — no '=', no spaces)" >&2
+        continue
+      fi
+      case "$_fwd_name" in
+        HOME|PATH|CLAUDE_CONFIG_DIR|IS_SANDBOX)
+          # docker's last -e wins: a project key with one of these names would
+          # silently override what this script set for the container.
+          echo "container: PHASEKIT_FORWARD_ENV: refusing '$_fwd_name' — the container script owns that name" >&2
+          continue ;;
+      esac
+      if [[ -n "${!_fwd_name:-}" ]]; then
+        docker_args+=(-e "$_fwd_name=${!_fwd_name}")
+        _fwd_names+=("$_fwd_name")
+      fi
+    done
+    docker_args+=(-e PHASEKIT_FORWARD_ENV="$PHASEKIT_FORWARD_ENV")
+    if [[ ${#_fwd_names[@]} -gt 0 ]]; then
+      echo "container: forwarding project env: ${_fwd_names[*]}"
+    else
+      echo "container: PHASEKIT_FORWARD_ENV is set but none of its names are set in the environment — nothing forwarded" >&2
+    fi
+  fi
+
   # Cross-project contracts (v0.7.0). A provider — the Foundry orchestrator, or
   # a human running standalone — points PHASEKIT_CONTRACTS_MOUNT at a host
   # directory holding index.json plus one directory per dependency slug. We
