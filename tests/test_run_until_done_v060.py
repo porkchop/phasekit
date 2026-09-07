@@ -192,6 +192,14 @@ class LoopHarness(unittest.TestCase):
         self._git("add", "-A")
         self._git("commit", "-qm", "fixture setup")
 
+    def _prepare_next_session(self, scenario: str) -> None:
+        """A follow-on session's scenario, committed ALONE: `git add -A` here
+        would sweep the previous session's stranded artifacts into a fixture
+        commit, which no production path does."""
+        self._write("scripts/scenario.sh", scenario)
+        self._git("add", "scripts/scenario.sh")
+        self._git("commit", "-qm", "fixture: next session")
+
     def _run_loop(self, scenario: str | None, env: dict | None = None) -> subprocess.CompletedProcess:
         if scenario is not None:
             self._prepare_scenario(scenario)
@@ -315,20 +323,52 @@ class LoopFunctionalTest(LoopHarness):
         self.assertIn("Clearing stale wrap-up sentinel", r.stdout)
         self.assertEqual(self._calls(), 1)
 
-    def test_wrapup_never_commits_failing_verify(self) -> None:
+    def test_wrapup_with_red_verify_falls_through_to_a_labeled_wip_commit(self) -> None:
+        """v0.14.2 (foundry-meta #517). Before: a red verify at wrap-up left
+        the tree dirty under 'wrapped up cleanly' and the watchdog's
+        last-resort commit never fired (the loop was gone) — every such stop
+        became a stall row. Now the same LABELED unverified wip commit the
+        hard-kill path makes lands instead; the approval's own message is
+        never used, the deploy artifacts stay disarmed, the tree is clean."""
         self._write("scripts/phasekit-verify.sh", VERIFY_BAD_FILE, executable=True)
         scenario = (
             "echo w >> src.txt; touch BAD\n"
             "jq -n '{suggested_commit_message: \"phase-2: red\"}'"
             " > artifacts/phase-approval.json\n"
+            "jq -n '{armed: true}' > artifacts/ready-to-deploy.json\n"
             "touch artifacts/wrapup-requested\n"
         )
         self._prepare_scenario(scenario)
         before = self._messages()
         r = self._run_loop(None)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("Wrap-up: verify failed", r.stdout + r.stderr)
-        self.assertEqual(before, self._messages())
+        out = r.stdout + r.stderr
+        self.assertIn("Wrap-up: verify failed", out)
+        self.assertIn("UNVERIFIED wip commit", out)
+        self.assertIn("Run wrapped up with UNVERIFIED work committed (soft stop)", out)
+        self.assertNotIn("Run wrapped up cleanly", out)
+        after = self._messages()
+        self.assertNotEqual(before, after)
+        self.assertTrue(after.startswith("wip: last-resort deadline commit"), after)
+        self.assertIn("RED verify gate", after.splitlines()[0])
+        self.assertNotIn("phase-2: red", after)
+        committed = self._git("show", "--name-only", "--format=", "HEAD").split()
+        self.assertIn("src.txt", committed)
+        self.assertNotIn("artifacts/ready-to-deploy.json", committed)
+        # The unverified deploy claim is disarmed exactly as on the kill path;
+        # the approval stays on disk UNCOMMITTED (a stranded artifact for the
+        # next session's verify-gated recovery), so the wip is a plain
+        # checkpoint, never an approval-class record.
+        self.assertNotIn("artifacts/phase-approval.json", committed)
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "artifacts", "ready-to-deploy.json")))
+        self.assertTrue(os.path.exists(os.path.join(self.repo, "artifacts", "phase-approval.json")))
+        # Committed work = no stall row; what remains dirty is only artifacts/.
+        dirty = [l for l in self._git("status", "--porcelain").splitlines()
+                 if "artifacts/" not in l]
+        self.assertEqual(dirty, [], dirty)
+        handoff = os.path.join(self.repo, "artifacts", "session-handoff.json")
+        with open(handoff) as f:
+            self.assertIn("UNVERIFIED wip commit", f.read())
 
     # --- light execution mode ---------------------------------------------
 
@@ -442,6 +482,21 @@ class LoopV061FunctionalTest(LoopHarness):
         self.assertIn("Run wrapped up cleanly (deadline pacing).", r.stdout)
         self.assertEqual(self._calls(), 0)
 
+    def test_pacing_stop_with_red_verify_falls_through_and_says_so(self) -> None:
+        """The pacing path shares wrapup_commit, so the same fall-through and
+        the honest banner apply there (this is the shape of the 2026-09-06
+        xmeo stalls: pacing stop + red verify)."""
+        self._write("scripts/phasekit-verify.sh", VERIFY_BAD_FILE, executable=True)
+        self._write("src.txt", "dirty\n")
+        self._write("BAD", "")
+        deadline = int(time.time()) + 60
+        r = self._run_loop(None, env={"PHASEKIT_SESSION_DEADLINE": str(deadline)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("deadline pacing: not starting iteration 1", r.stdout)
+        self.assertIn("Run wrapped up with UNVERIFIED work committed (deadline pacing)", r.stdout)
+        self.assertTrue(self._messages().startswith("wip: last-resort deadline commit"))
+        self.assertEqual(self._calls(), 0)
+
     def test_far_deadline_changes_nothing(self) -> None:
         scenario = (
             "jq -n '{suggested_commit_message: \"final: done\"}'"
@@ -490,7 +545,12 @@ class LoopV061FunctionalTest(LoopHarness):
         self.assertIn('"verified": true', handoff)
         self.assertIn("src.txt", handoff)
 
-    def test_handoff_uncommitted_on_wrapup_verify_failure(self) -> None:
+    def test_handoff_written_and_work_preserved_on_wrapup_verify_failure(self) -> None:
+        """Was `test_handoff_uncommitted_on_wrapup_verify_failure` (v0.6.1):
+        the baton is unchanged — verified:false, the phase, the pointer at
+        phase-verify-failed.json — but since v0.14.2 the standing work is
+        preserved as a labeled unverified wip commit rather than left dirty
+        (foundry-meta #517)."""
         self._write("scripts/phasekit-verify.sh", VERIFY_BAD_FILE, executable=True)
         scenario = (
             "echo w >> src.txt; touch BAD\n"
@@ -502,12 +562,124 @@ class LoopV061FunctionalTest(LoopHarness):
         before = self._messages()
         r = self._run_loop(None)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(before, self._messages())  # nothing committed
+        after = self._messages()
+        self.assertNotEqual(before, after)
+        self.assertTrue(after.startswith("wip: last-resort deadline commit"), after)
+        self.assertNotIn("phase-9: red", after)  # the approval's message is never used unverified
         with open(os.path.join(self.repo, "artifacts", "session-handoff.json")) as f:
             handoff = f.read()
         self.assertIn('"verified": false', handoff)
         self.assertIn("phase-9", handoff)
         self.assertIn("phase-verify-failed.json", handoff)
+        self.assertIn("UNVERIFIED wip commit", handoff)
+
+    def test_the_session_after_a_fallthrough_relands_under_a_fresh_verdict(self) -> None:
+        """v0.14.2, the recovery half. Session 1 wraps up with a red verify:
+        the fall-through preserves the WORK in a labeled wip commit and leaves
+        the (unverified) approval artifact on disk, uncommitted — a stranded
+        artifact for the existing verify-gated recovery. Session 2's model
+        re-validates and writes a fresh verdict; the loop commits under the
+        fresh message. One wip, no duplicate, clean tree at the end."""
+        self._write("scripts/phasekit-verify.sh", VERIFY_BAD_FILE, executable=True)
+        session1 = (
+            "echo w >> src.txt; touch BAD\n"
+            "jq -n '{phase: \"phase-2\", suggested_commit_message: \"phase-2: red\"}'"
+            " > artifacts/phase-approval.json\n"
+            "touch artifacts/wrapup-requested\n"
+        )
+        r = self._run_loop(session1)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(self._messages().startswith("wip: last-resort deadline commit"))
+        session2 = (
+            'case "$CALL_N" in\n'
+            # The stub's call counter spans both sessions: session 1 was call 1.
+            "  2) rm -f BAD; echo fixed >> src.txt;"
+            " jq -n '{phase: \"phase-2\", suggested_commit_message: \"phase-2: re-verified\"}'"
+            " > artifacts/phase-approval.json ;;\n"
+            "  3) jq -n '{suggested_commit_message: \"final: done\"}'"
+            " > artifacts/project-complete.json ;;\n"
+            "esac\n"
+        )
+        self._prepare_next_session(session2)
+        r = self._run_loop(None)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        msgs = self._messages()
+        self.assertIn("phase-2: re-verified", msgs)
+        self.assertIn("final: done", msgs)
+        self.assertNotIn("phase-2: red", msgs)  # the red-verify approval never drives a commit
+        self.assertEqual(msgs.count("wip: last-resort"), 1)  # no duplicate wip
+        dirty = [l for l in self._git("status", "--porcelain").splitlines()
+                 if "session-" not in l and "phase-verify-failed" not in l]
+        self.assertEqual(dirty, [], dirty)
+
+    def test_a_no_work_stop_after_a_fallthrough_lands_no_second_wip(self) -> None:
+        """Re-review finding (v0.14.2): with the approval stranded on disk, a
+        later stop that did NO work must not stage it (or the previous
+        session's baton) into a wip of its own — HEAD moving with zero work
+        would hide a real stall from the orchestrator."""
+        self._write("scripts/phasekit-verify.sh", VERIFY_BAD_FILE, executable=True)
+        session1 = (
+            "echo w >> src.txt; touch BAD\n"
+            "jq -n '{phase: \"phase-2\", suggested_commit_message: \"phase-2: red\"}'"
+            " > artifacts/phase-approval.json\n"
+            "touch artifacts/wrapup-requested\n"
+        )
+        r = self._run_loop(session1)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        head_after_1 = self._git("rev-parse", "HEAD").strip()
+        self.assertTrue(self._messages().startswith("wip: last-resort deadline commit"))
+        # Session 2: pacing stop before iteration 1, nothing changed, verify still red.
+        deadline = int(time.time()) + 60
+        r = self._run_loop(None, env={"PHASEKIT_SESSION_DEADLINE": str(deadline)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self._calls(), 1)  # no model work in session 2
+        self.assertEqual(self._git("rev-parse", "HEAD").strip(), head_after_1, "HEAD moved with zero work")
+        self.assertEqual(self._messages().count("wip: last-resort"), 1)
+        self.assertIn("leaving work uncommitted", r.stdout + r.stderr)
+        self.assertIn("Run wrapped up cleanly (deadline pacing).", r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.repo, "artifacts", "phase-approval.json")))
+
+    def test_a_fallthrough_wip_never_triggers_the_next_sessions_catchup_squash(self) -> None:
+        """Review finding (v0.14.2): in squash mode a wip that carried the
+        approval artifact was an approval-class record, so the NEXT session's
+        loop-start catch-up squash ran the verify gate with no model work and
+        burned a breaker attempt. The approval is unstaged from the wip, so
+        no catch-up fires and the first verify of session 2 belongs to the
+        model's own work."""
+        self._write("scripts/phasekit-verify.sh", VERIFY_BAD_FILE, executable=True)
+        target = self._git("rev-parse", "--abbrev-ref", "HEAD").strip()
+        env = {"PHASEKIT_SQUASH_TARGET": target, "PHASEKIT_WORK_BRANCH": "iter/1-fixture"}
+        session1 = (
+            "echo w >> src.txt; touch BAD\n"
+            "jq -n '{phase: \"phase-2\", suggested_commit_message: \"phase-2: red\"}'"
+            " > artifacts/phase-approval.json\n"
+            "touch artifacts/wrapup-requested\n"
+        )
+        r = self._run_loop(session1, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("UNVERIFIED wip commit", r.stdout + r.stderr)
+        self.assertEqual(self._git("rev-parse", "--abbrev-ref", "HEAD").strip(), "iter/1-fixture")
+        head_files = self._git("show", "--name-only", "--format=", "HEAD").split()
+        self.assertNotIn("artifacts/phase-approval.json", head_files, head_files)
+        self.assertEqual(self._git("diff", "--cached", "--name-only").strip(), "",
+                         "index not clean after the fall-through")
+        branch_only = self._git("log", "--format=%s", target + "..HEAD").strip().splitlines()
+        self.assertEqual(len(branch_only), 1, branch_only)  # exactly the wip, nothing approval-class
+        session2 = (
+            'case "$CALL_N" in\n'
+            "  2) rm -f BAD; echo fixed >> src.txt;"
+            " jq -n '{phase: \"phase-2\", suggested_commit_message: \"phase-2: re-verified\"}'"
+            " > artifacts/phase-approval.json ;;\n"
+            "  3) jq -n '{suggested_commit_message: \"final: done\"}'"
+            " > artifacts/project-complete.json ;;\n"
+            "esac\n"
+        )
+        self._prepare_next_session(session2)
+        r = self._run_loop(None, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("has not reached", r.stdout)  # no catch-up squash at session start
+        self.assertIn("phase-2: re-verified", self._git("log", target, "--format=%s"))
+        self.assertNotIn("wip: last-resort", self._git("log", target, "--format=%s"))
 
     def test_handoff_survives_cleanup_into_next_session(self) -> None:
         # A baton left by a prior session must still exist when the next

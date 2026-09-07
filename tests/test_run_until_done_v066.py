@@ -29,6 +29,11 @@ LOOP_SCRIPT = os.path.join(REPO_ROOT, "scripts", "run-until-done.sh")
 # Credential-shaped but obviously fake; assembled so secret scanners aimed at
 # this repo never trip on the test file itself.
 FAKE_KEY = "sk-ant-" + "x" * 16
+VERIFY_BAD_FILE = (
+    "#!/usr/bin/env bash\nPHASEKIT_VERIFY_CONFIGURED=1\n"
+    'ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"\n'
+    'if [ -f "$ROOT/BAD" ]; then exit 1; fi\nexit 0\n'
+)
 
 
 class LoopV066StructuralTest(unittest.TestCase):
@@ -88,6 +93,28 @@ class LoopV066WrapupGatesTest(LoopHarness):
         # The refusal leaves a handoff baton so the next session isn't blind.
         self.assertTrue(os.path.exists(
             os.path.join(self.repo, "artifacts", "session-handoff.json")))
+
+    def test_wrapup_with_red_verify_still_refuses_a_learnings_secret(self) -> None:
+        """v0.14.2: the verify-red fall-through is gated by the SAME post-verify
+        gates — a credential-shaped LEARNINGS line refuses the wip commit too.
+        Nothing lands; the tree stays dirty for the stall backstop."""
+        self._write("scripts/phasekit-verify.sh", VERIFY_BAD_FILE, executable=True)
+        self._write("docs/LEARNINGS.md", "# Learnings\n")
+        scenario = (
+            "echo w >> src.txt; touch BAD\n"
+            f"echo '- 2026-09-07: pasted error echoing {FAKE_KEY}' >> docs/LEARNINGS.md\n"
+            "touch artifacts/wrapup-requested\n"
+            "exit 7\n"
+        )
+        self._prepare_scenario(scenario)
+        before = self._messages()
+        r = self._run_loop(None, env={"PHASEKIT_ITER_RETRY": "1"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        out = r.stdout + r.stderr
+        self.assertIn("REFUSED", out)
+        self.assertIn("leaving work uncommitted", out)
+        self.assertNotIn("UNVERIFIED wip commit", out)
+        self.assertEqual(before, self._messages())
 
     def test_wrapup_commits_benign_learnings(self) -> None:
         # Control: the shared gates must not block an ordinary wrap-up.

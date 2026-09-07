@@ -1248,6 +1248,24 @@ deadline_lastresort_commit() {
   # kill, possibly while the model still holds the tree. Every step is
   # best-effort: a failure here must only ever mean "no better off than
   # before the watchdog existed".
+  #
+  #   $1 = mode: "kill" (default — the watchdog, seconds before the bound) or
+  #        "wrapup" (v0.14.2 — wrapup_commit falls through here when its verify
+  #        gate is RED but every other commit gate passed; the session is
+  #        ending by pacing or soft stop, and a labeled unverified wip on the
+  #        work branch beats a dirty tree, a stall row and a resolver session).
+  #        Same commit, same disarm, same baton — only the wording differs.
+  local mode="${1:-kill}" why in_flight note_tail
+  case "$mode" in
+    wrapup)
+      why="the session wrapped up (pacing or soft stop) with a RED verify gate (phasekit wrap-up fall-through)"
+      in_flight="the verify gate was red when the session wrapped up; the standing work was preserved as an UNVERIFIED wip commit (v0.14.2 fall-through)"
+      note_tail=" A last-resort wip commit preserved this tree at wrap-up because the verify gate was red; the next session's gates judge it." ;;
+    *)
+      why="the session was about to be killed at its bound"
+      in_flight="an iteration was IN FLIGHT when the session was killed at its deadline; the last-resort watchdog committed the tree seconds beforehand"
+      note_tail=" A last-resort wip commit preserved this tree seconds before the kill; only the final moments of work can be missing." ;;
+  esac
   cd "$ROOT_DIR" 2>/dev/null || return 0
   [[ -n "$(git status --porcelain 2>/dev/null)" ]] || return 0
 
@@ -1266,16 +1284,22 @@ deadline_lastresort_commit() {
   local baton="$ARTIFACTS_DIR/session-interrupted.json" now_iso
   now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   if [[ -f "$baton" ]] && jq -e . "$baton" >/dev/null 2>&1; then
-    jq --arg ts "$now_iso" \
-       '.note += " A last-resort wip commit preserved this tree seconds before the kill; only the final moments of work can be missing." | .ts = $ts' \
+    jq --arg ts "$now_iso" --arg tail "$note_tail" \
+       '.note += $tail | .ts = $ts' \
        "$baton" > "$baton.tmp" 2>/dev/null && mv "$baton.tmp" "$baton" 2>/dev/null || rm -f "$baton.tmp" 2>/dev/null || true
   else
-    jq -n --arg ts "$now_iso" '{
+    local next_step="audit the last wip commit as IN-PROGRESS IMPLEMENTATION from a killed session: re-derive what is verified, keep it, finish or revert the rest"
+    local note="dead-man baton written by the deadline watchdog (v0.13.0): the loop was killed before it could conclude. Ephemeral: delete after orienting."
+    if [[ "$mode" == "wrapup" ]]; then
+      next_step="audit the last wip commit as UNVERIFIED work from a session whose verify gate was red at wrap-up; the approval artifact (if any) was left on disk uncommitted for the stranded-artifact recovery to re-verify"
+      note="baton written by the wrap-up fall-through (v0.14.2): the session ended by pacing or soft stop with a red verify gate. Ephemeral: delete after orienting."
+    fi
+    jq -n --arg ts "$now_iso" --arg in_flight "$in_flight" --arg next_step "$next_step" --arg note "$note" '{
       stopped_at_phase: "unknown",
-      in_flight: "an iteration was IN FLIGHT when the session was killed at its deadline; the last-resort watchdog committed the tree seconds beforehand",
+      in_flight: $in_flight,
       verified: false,
-      next_step: "audit the last wip commit as IN-PROGRESS IMPLEMENTATION from a killed session: re-derive what is verified, keep it, finish or revert the rest",
-      note: "dead-man baton written by the deadline watchdog (v0.13.0): the loop was killed before it could conclude. Ephemeral: delete after orienting.",
+      next_step: $next_step,
+      note: $note,
       ts: $ts
     }' > "$baton" 2>/dev/null || true
   fi
@@ -1296,6 +1320,27 @@ deadline_lastresort_commit() {
     git add -A 2>/dev/null || { sleep 2; continue; }
     _disarm_deploy_artifact ready-to-deploy.json
     _disarm_deploy_artifact project-complete.json
+    if [[ "$mode" == "wrapup" ]]; then
+      # The approval artifact never rides the wrap-up wip (v0.14.2, review
+      # finding 1+2): committed, it makes the wip an approval-class record —
+      # in squash mode the NEXT session's loop-start catch-up squash then runs
+      # the verify gate with no model work and burns a breaker attempt; without
+      # a squash target it reads as "landed" and the phase's named commit is
+      # lost. Unstaged, it stays on disk as a STRANDED artifact, which the
+      # existing verify-gated stranded-artifact recovery already handles at the
+      # first boundary. The deploy artifacts above are disarmed exactly as on
+      # the kill path: an unverified deploy claim must never survive into a
+      # later commit's `git add -A`.
+      git reset -q -- "$ARTIFACTS_DIR/phase-approval.json" 2>/dev/null || true
+      # Nor the batons (re-review finding 1): with an approval stranded on
+      # disk, a LATER stop that did no work would otherwise sweep the previous
+      # session's handoff into a wip of its own — HEAD moving with zero work,
+      # which reads as progress to the orchestrator and hides a real stall.
+      # With approval and batons unstaged, a no-work stop stages nothing, the
+      # staged-clean check below returns without a commit, and the caller
+      # writes the ordinary "leaving work uncommitted" handoff.
+      git reset -q -- "$ARTIFACTS_DIR/session-handoff.json" "$ARTIFACTS_DIR/session-interrupted.json" 2>/dev/null || true
+    fi
     unstage_transient_adds
     # Belt-and-braces the wrap-up commit already wears (review finding 5):
     # never sweep session logs or an in-repo custom sentinel into history on
@@ -1313,8 +1358,12 @@ deadline_lastresort_commit() {
       return 0
     fi
     if git commit -q --no-verify \
-      -m "wip: last-resort deadline commit (phasekit deadline watchdog) — the session was about to be killed at its bound; unverified in-progress work preserved, deploy artifacts restored to HEAD" 2>/dev/null; then
-      echo "deadline watchdog: last-resort commit landed $(git rev-parse --short HEAD 2>/dev/null) — the kill strands nothing but the final seconds" >&2
+      -m "wip: last-resort deadline commit (phasekit deadline watchdog) — ${why}; unverified in-progress work preserved, deploy artifacts restored to HEAD" 2>/dev/null; then
+      if [[ "$mode" == "wrapup" ]]; then
+        echo "wrap-up fall-through: last-resort commit landed $(git rev-parse --short HEAD 2>/dev/null) — unverified work preserved on the branch instead of a dirty tree" >&2
+      else
+        echo "deadline watchdog: last-resort commit landed $(git rev-parse --short HEAD 2>/dev/null) — the kill strands nothing but the final seconds" >&2
+      fi
       return 0
     fi
     sleep 2
@@ -1452,6 +1501,33 @@ wrapup_commit() {
     return 0
   fi
   if ! run_verify_gate; then
+    # Fall-through (v0.14.2, Aaron 2026-09-07, foundry-meta #517). A red
+    # verify at wrap-up used to leave the tree dirty under a "wrapped up
+    # cleanly" banner, and the watchdog's last-resort commit never fired
+    # because the loop was already gone — every such stop became a stall row,
+    # a 20-minute pause and a resolver session (three on 2026-09-06). The
+    # hard-kill path already trusts a LABELED unverified wip commit, and with
+    # branch-per-iteration that commit lands on the work branch and folds into
+    # the next phase's squash, never on the target. So: when the ONLY thing
+    # wrong is the verify gate — the security pair untouched (checked above)
+    # and the post-verify gates (secret scan, scope, SPEC attestation) still
+    # passing on the staged tree — make the same last-resort commit the
+    # watchdog would have made. Any other refusal keeps refusing: this never
+    # commits what a gate other than verify would refuse.
+    if post_verify_commit_gates wrapup; then
+      local _head_before
+      _head_before="$(git rev-parse HEAD 2>/dev/null || true)"
+      deadline_lastresort_commit wrapup || true
+      if [[ "$(git rev-parse HEAD 2>/dev/null || true)" != "$_head_before" ]]; then
+        # Written only once the commit is real (review finding 5): a baton
+        # that says "preserved as a wip commit" over a commit that never
+        # landed would misdirect the next session.
+        write_session_handoff false "the verify gate was RED at wrap-up and the standing work was preserved as an UNVERIFIED wip commit (fall-through); the approval artifact, if any, is on disk uncommitted for the stranded-artifact recovery: audit the wip, fix the verify failure recorded in artifacts/phase-verify-failed.json, then land the work properly"
+        echo "Wrap-up: verify failed — standing work preserved as an UNVERIFIED wip commit $(git rev-parse --short HEAD 2>/dev/null) (fall-through); the next session's gates judge it. phase-verify-failed.json + session-handoff.json record the state." >&2
+        WRAPUP_UNVERIFIED=1
+        return 0
+      fi
+    fi
     write_session_handoff false "fix the verify failure recorded in artifacts/phase-verify-failed.json, then re-commit the standing work"
     echo "Wrap-up: verify failed — leaving work uncommitted (phase-verify-failed.json + session-handoff.json record the state for the next session)." >&2
     return 0
@@ -1783,6 +1859,7 @@ PENDING_COMMIT_RETRY=""
 # Between iterations the loop honors it: commit what stands (verify-gated) and
 # exit 0 instead of starting an iteration the guillotine would truncate.
 WRAPUP_SENTINEL="${PHASEKIT_WRAPUP_SENTINEL:-$ARTIFACTS_DIR/wrapup-requested}"
+WRAPUP_UNVERIFIED=0   # set by wrapup_commit's verify-red fall-through (v0.14.2)
 if [[ -f "$WRAPUP_SENTINEL" ]]; then
   echo "Clearing stale wrap-up sentinel from a prior run: $WRAPUP_SENTINEL"
   rm -f "$WRAPUP_SENTINEL"
@@ -1972,7 +2049,11 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
     echo "=== Wrap-up requested (sentinel present) — not starting iteration $iteration ==="
     rm -f "$WRAPUP_SENTINEL"
     wrapup_commit
-    echo "Run wrapped up cleanly (soft stop)."
+    if [[ "$WRAPUP_UNVERIFIED" == 1 ]]; then
+      echo "Run wrapped up with UNVERIFIED work committed (soft stop) — see the wip commit and session-handoff.json."
+    else
+      echo "Run wrapped up cleanly (soft stop)."
+    fi
     exit 0
   fi
 
@@ -1988,7 +2069,11 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
     if [[ "$remaining" -lt "$pacing_threshold" ]]; then
       echo "deadline pacing: not starting iteration $iteration (${remaining}s remain, threshold ${pacing_threshold}s from $passes_done completed passes)"
       wrapup_commit
-      echo "Run wrapped up cleanly (deadline pacing)."
+      if [[ "$WRAPUP_UNVERIFIED" == 1 ]]; then
+        echo "Run wrapped up with UNVERIFIED work committed (deadline pacing) — see the wip commit and session-handoff.json."
+      else
+        echo "Run wrapped up cleanly (deadline pacing)."
+      fi
       exit 0
     fi
   fi
