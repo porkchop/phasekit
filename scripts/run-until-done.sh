@@ -218,6 +218,13 @@ unstage_transient_adds() {
   # the last point before the commit where it can be restored
   # (see heal_tracked_transients).
   local sig
+  # v0.14.4: the COMPLETION commit never carries the promoted baton — a
+  # concluded iteration explains its own tree, and a baton in history is a
+  # stale note the next session would read as current. It stays on disk
+  # until the commit is known to succeed (clear_consumed_batons_at_completion).
+  if [[ "${COMPLETION_COMMIT_IN_PROGRESS:-0}" == 1 ]]; then  # untracked only: a TRACKED baton's staged deletion must ride the commit
+    git cat-file -e "HEAD:artifacts/session-handoff.json" 2>/dev/null || git reset -q -- "$ARTIFACTS_DIR/session-handoff.json" 2>/dev/null || true
+  fi
   for sig in "${TRANSIENT_SIGNALS[@]}"; do
     if git cat-file -e "HEAD:artifacts/$sig" 2>/dev/null; then
       git rm --cached -q --ignore-unmatch -- "$ARTIFACTS_DIR/$sig" 2>/dev/null || true
@@ -733,10 +740,34 @@ ensure_work_branch() {
       # after a finished iteration; v0.14.0 review, MINOR-4).
       if ! git log -n 500 --format=%T "refs/heads/$SQUASH_TARGET" 2>/dev/null \
            | grep -qx "$(git rev-parse "refs/heads/$want^{tree}")"; then
-        write_branch_integrity_block \
-          "work branch '$want' already exists with content '$SQUASH_TARGET' does not carry, while HEAD is on '$SQUASH_TARGET'" \
-          "check out '$want' and re-run (the loop squashes it at the next approval), or retire the branch by hand"
-        return 1
+        # v0.14.4: a kept branch that differs from the target ONLY by the
+        # loop's own transient signals or batons (a kill-path wip commits
+        # session-handoff.json with `add -A`; the squash never carries it) is
+        # merged in every sense that matters — re-enter it. Anything else is
+        # real content, and the block names it so the operator sees WHAT the
+        # target lacks instead of guessing (2026-09-07 04:01 incident).
+        # `--no-renames` (review finding): rename detection would fold a real
+        # deletion into the baton path and admit it; `T...B` compares against
+        # the merge base so an intake commit on the target is not counted as
+        # branch content.
+        # git prints repo-relative paths; compare against the artifacts dir
+        # as git names it, not as the filesystem does.
+        local _bd _bd_real=() _bd_path _art_rel
+        _art_rel="$(realpath --relative-to="$ROOT_DIR" "$ARTIFACTS_DIR" 2>/dev/null || echo artifacts)"
+        while IFS= read -r _bd_path; do
+          [[ -n "$_bd_path" ]] || continue
+          if [[ "$_bd_path" == "$_art_rel/session-handoff.json" || "$_bd_path" == "$_art_rel/session-interrupted.json" ]]; then continue; fi
+          _bd=0
+          for sig in "${TRANSIENT_SIGNALS[@]}"; do [[ "$_bd_path" == "$_art_rel/$sig" ]] && { _bd=1; break; }; done
+          [[ "$_bd" -eq 1 ]] || _bd_real+=("$_bd_path")
+        done < <(git diff --no-renames --name-only "refs/heads/$SQUASH_TARGET...refs/heads/$want" 2>/dev/null)
+        if [[ ${#_bd_real[@]} -gt 0 ]]; then
+          write_branch_integrity_block \
+            "work branch '$want' already exists with content '$SQUASH_TARGET' does not carry (differs in: ${_bd_real[*]:0:5}), while HEAD is on '$SQUASH_TARGET'" \
+            "check out '$want' and re-run (the loop squashes it at the next approval), or retire the branch by hand"
+          return 1
+        fi
+        echo "Branch-per-iteration: re-entering '$want' — it differs from '$SQUASH_TARGET' only by transient signals or batons."
       fi
       git checkout -q "$want" || { write_branch_integrity_block "could not check out work branch '$want'" "resolve the checkout failure by hand, then re-run"; return 1; }
       # The target may have advanced since this branch finished (an intake
@@ -856,6 +887,23 @@ squash_to_target() {
   return 0
 }
 
+clear_consumed_batons_at_completion() {
+  # v0.14.4. An iteration that CONCLUDED explains its own tree; a baton left
+  # on disk from a previous killed session (promoted into session-handoff.json
+  # at this session's start) would lie to the next session — and, untracked,
+  # it read as "uncommitted work" to a supervisor's completion-gap detector
+  # (2026-09-07 04:01: a finished iteration was re-dispatched into its own
+  # kept branch). Only UNTRACKED batons are removed: a tracked one is history
+  # and its removal would dirty the tree the completion just cleaned.
+  # Only the promoted/real baton: the provisional session-interrupted.json is
+  # the exit trap's business (clear_provisional_handoff_on_exit, verdict rule).
+  local f="$ARTIFACTS_DIR/session-handoff.json"
+  [[ -f "$f" ]] || return 0
+  if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then return 0; fi
+  rm -f "$f" && echo "run-until-done: removed consumed baton session-handoff.json — the iteration concluded, nothing is in flight"
+  return 0
+}
+
 rest_on_target() {
   # Iteration complete and fully squashed: leave HEAD on the target so the
   # repo rests where the next intake (and a standalone user) expects it. The
@@ -868,6 +916,7 @@ rest_on_target() {
   [[ "$(git rev-parse "HEAD^{tree}")" == "$(git rev-parse "refs/heads/$SQUASH_TARGET^{tree}")" ]] || return 0
   if git checkout -q "$SQUASH_TARGET" 2>/dev/null; then
     echo "Branch-per-iteration: iteration complete — resting on '$SQUASH_TARGET' (work branch '$work' kept)."
+    clear_consumed_batons_at_completion
   else
     echo "  WARN: branch-per-iteration: could not check out '$SQUASH_TARGET' at completion — HEAD stays on '$work'." >&2
   fi
@@ -1860,6 +1909,7 @@ PENDING_COMMIT_RETRY=""
 # exit 0 instead of starting an iteration the guillotine would truncate.
 WRAPUP_SENTINEL="${PHASEKIT_WRAPUP_SENTINEL:-$ARTIFACTS_DIR/wrapup-requested}"
 WRAPUP_UNVERIFIED=0   # set by wrapup_commit's verify-red fall-through (v0.14.2)
+COMPLETION_COMMIT_IN_PROGRESS=0   # v0.14.4: a completion commit never carries a baton
 # Project env the supervisor forwarded (v0.14.3): names only, so a session log
 # answers "did the build see its keys?" without a docker inspect on the host.
 if [[ -n "${PHASEKIT_FORWARD_ENV:-}" ]]; then
@@ -1988,12 +2038,15 @@ if artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then
   # is the likeliest truth — the wrong-phase risk the in-loop site guards
   # against does not apply to a tree no new iteration has touched. rc
   # ignored: this path's failure already falls into the loop below.
+  COMPLETION_COMMIT_IN_PROGRESS=1   # spans the stranded-approval commit too (re-review)
   commit_pending_approval_first || true
   crc=0
   commit_from_artifact \
     "$ARTIFACTS_DIR/project-complete.json" \
     "chore(workflow): final session work + project completion record" || crc=$?
+  COMPLETION_COMMIT_IN_PROGRESS=0
   if [[ "$crc" -eq 0 || "$crc" -eq 2 ]]; then
+    clear_consumed_batons_at_completion
     if ensure_squashed_or_block "$([[ "$crc" -eq 0 ]] && echo 1 || echo 0)" completion; then
       echo "Run finished successfully."
       exit 0
@@ -2199,6 +2252,7 @@ VERDICT_RETRY_EOF
     # (the staged work belongs to that phase, so its message is right —
     # the same two conditions the phase-commit branch below trusts).
     apcrc=0
+    COMPLETION_COMMIT_IN_PROGRESS=1   # the whole completion block: stranded-approval commit + completion commit (re-review)
     if artifact_written_this_iteration "$ARTIFACTS_DIR/phase-approval.json" \
        || [[ "$PENDING_COMMIT_RETRY" == "phase-approval" ]]; then
       commit_pending_approval_first || apcrc=$?
@@ -2214,8 +2268,10 @@ VERDICT_RETRY_EOF
       commit_from_artifact \
         "$ARTIFACTS_DIR/project-complete.json" \
         "chore(workflow): final session work + project completion record" || crc=$?
+      COMPLETION_COMMIT_IN_PROGRESS=0
     fi
     if [[ "$crc" -eq 0 || "$crc" -eq 2 ]]; then
+      clear_consumed_batons_at_completion
       # 0 = final work committed; 2 = nothing substantive left (already
       # committed) — both are a clean finish, once the target carries it
       # (branch-per-iteration: rc 0 squashed inside the commit path; rc 2

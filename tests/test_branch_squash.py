@@ -53,6 +53,22 @@ def _extract_block(start_re, end_re):
 FUNCTIONS = _extract_block(r"^# --- Branch-per-iteration \+ squash-to-target",
                            r"^staged_touches_security_pair\(\) \{")
 
+# The loop's transient vocabulary, extracted rather than restated (v0.14.4:
+# the guard consults it to tell a baton/transient from real content).
+def _transient_array():
+    """Rebuild `TRANSIENT_SIGNALS=( … )` from the loop's own list — extracted,
+    never restated, and valid bash regardless of how _extract_block bounds.
+    Only lines that ARE a quoted entry count, so a comment inside the array
+    cannot smuggle a name in."""
+    m = re.search(r"^TRANSIENT_SIGNALS=\((.*?)^\)", SOURCE, re.S | re.M)
+    if not m:
+        raise AssertionError("could not find TRANSIENT_SIGNALS in the loop")
+    names = re.findall(r'^\s*"([^"]+)"\s*$', m.group(1), re.M)
+    return "TRANSIENT_SIGNALS=(" + " ".join('"%s"' % n for n in names) + ")"
+
+
+TRANSIENTS = _transient_array()
+
 VERIFY_STUB = '''
 run_verify_gate() {
   echo "verify-stub called" >> "$ARTIFACTS_DIR/logs/verify-calls"
@@ -94,13 +110,14 @@ class Fixture(unittest.TestCase):
     def bash(self, body, env=None, target=None):
         prelude = [
             f'cd "{self.repo}"',
+            f'ROOT_DIR="{self.repo}"',
             f'ARTIFACTS_DIR="{self.artifacts}"',
             f'SQUASH_TARGET="{self.target if target is None else target}"',
             'ITERATION_MODE="standard"',
             'VERIFY_MAX_ATTEMPTS=3',
             'BRANCH_INTEGRITY_BLOCKED=0',
         ]
-        script = "\n".join(prelude) + "\n" + VERIFY_STUB + "\n" + FUNCTIONS + "\n" + body
+        script = "\n".join(prelude) + "\n" + TRANSIENTS + "\n" + VERIFY_STUB + "\n" + FUNCTIONS + "\n" + body
         full_env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1"}
         full_env.pop("PHASEKIT_WORK_BRANCH", None)
         full_env.pop("PHASEKIT_SQUASH_TARGET", None)
@@ -213,6 +230,42 @@ class WorkBranch(Fixture):
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertEqual(self.head_branch(), "iter/1-done")
         self.assertEqual(self.git("diff", "--stat", "main", "HEAD"), "")
+
+    def test_a_kept_branch_differing_only_by_a_baton_is_reentered(self):
+        """v0.14.4: a kill-path wip commits session-handoff.json on the branch;
+        the squash never carries it, so after completion the kept branch's
+        tree is not in the target's history — that is not content."""
+        self.git("checkout", "-q", "-b", "iter/1-baton")
+        self.commit("artifacts/session-handoff.json", content='{"note":"baton"}\n', msg="wip: last-resort")
+        self.commit("artifacts/phase-blocked.json", content="{}\n", msg="wip: transient")
+        self.git("checkout", "-q", "main")
+        r = self.bash("ensure_work_branch", env={"PHASEKIT_WORK_BRANCH": "iter/1-baton"})
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("only by transient signals or batons", r.stdout)
+        self.assertEqual(self.head_branch(), "iter/1-baton")
+
+    def test_a_rename_into_the_baton_path_is_not_admitted(self):
+        """Review finding: rename detection would fold a real deletion into
+        the baton path; --no-renames keeps the deleted file visible."""
+        self.commit("src.json", content='{"note":"real content"}\n', msg="real file on the target")
+        self.git("checkout", "-q", "-b", "iter/1-rename")
+        self.git("mv", "src.json", "artifacts/session-handoff.json")
+        self.git("commit", "-qm", "wip: moved into the baton slot")
+        self.git("checkout", "-q", "main")
+        r = self.bash("ensure_work_branch", env={"PHASEKIT_WORK_BRANCH": "iter/1-rename"})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("differs in: src.json", self.blocked()["reason"])
+
+    def test_the_block_names_the_differing_paths(self):
+        self.git("checkout", "-q", "-b", "iter/1-real")
+        self.commit("src/real.txt")
+        self.commit("artifacts/session-handoff.json", content="{}\n", msg="baton too")
+        self.git("checkout", "-q", "main")
+        r = self.bash("ensure_work_branch", env={"PHASEKIT_WORK_BRANCH": "iter/1-real"})
+        self.assertEqual(r.returncode, 1)
+        reason = self.blocked()["reason"]
+        self.assertIn("differs in: src/real.txt", reason)
+        self.assertNotIn("session-handoff", reason)
 
     def test_reentering_an_unmerged_work_branch_from_target_blocks(self):
         self.git("checkout", "-q", "-b", "iter/1-wip")

@@ -681,6 +681,72 @@ class LoopV061FunctionalTest(LoopHarness):
         self.assertIn("phase-2: re-verified", self._git("log", target, "--format=%s"))
         self.assertNotIn("wip: last-resort", self._git("log", target, "--format=%s"))
 
+    def test_an_untracked_baton_is_removed_when_the_iteration_concludes(self) -> None:
+        """v0.14.4: a previous killed session's baton (promoted into
+        session-handoff.json at start) must not outlive an iteration that
+        concluded — untracked, it read as uncommitted work to the supervisor."""
+        scenario = (
+            "jq -n '{suggested_commit_message: \"final: done\"}'"
+            " > artifacts/project-complete.json\n"
+        )
+        self._prepare_scenario(scenario)
+        # Written AFTER the fixture commit so it is untracked, as a promoted
+        # dead-man baton from a killed session would be.
+        self._write("artifacts/session-handoff.json", '{"note": "dead-man baton from a killed session"}\n')
+        r = self._run_loop(None)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("removed consumed baton session-handoff.json", r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "artifacts", "session-handoff.json")))
+
+    def test_a_red_completion_verify_keeps_the_baton_for_orientation(self) -> None:
+        """Review finding: a completion record found at session START (before
+        any model orientation) whose commit fails verify must NOT have eaten
+        the promoted baton — the session would orient from a dirty tree with
+        no note. The baton is deleted only once the completion commit landed,
+        and the completion commit never carries it."""
+        self._write("scripts/phasekit-verify.sh", VERIFY_BAD_FILE, executable=True)
+        self._prepare_scenario("echo fixing >> src.txt\n")
+        self._write("BAD", "")
+        self._write("src.txt", "stranded work\n")
+        self._write("artifacts/project-complete.json", '{"suggested_commit_message": "final: done"}\n')
+        self._write("artifacts/session-handoff.json", '{"note": "promoted dead-man baton"}\n')
+        r = self._run_loop(None, env={"VERIFY_MAX_ATTEMPTS": "1"})
+        self.assertIn("Verify FAILED", r.stdout + r.stderr)
+        self.assertTrue(os.path.exists(os.path.join(self.repo, "artifacts", "session-handoff.json")),
+                        "the baton must survive a red completion commit")
+        self.assertNotIn("artifacts/session-handoff.json", self._git("ls-files"))
+
+    def test_a_deleted_tracked_baton_rides_the_completion_commit(self) -> None:
+        """Re-review finding: a baton the green wrap-up COMMITTED, which the
+        next session read and deleted per its own note, must have its
+        deletion committed by the completion — the completion-time reset only
+        applies to a baton HEAD does not track, else the tree rests dirty."""
+        self._write("artifacts/session-handoff.json", '{"note": "committed by a green wrap-up"}\n')
+        self._git("add", "-f", "artifacts/session-handoff.json")
+        self._git("commit", "-qm", "wrap-up committed its baton")
+        scenario = (
+            "rm -f artifacts/session-handoff.json\n"
+            "jq -n '{suggested_commit_message: \"final: done\"}'"
+            " > artifacts/project-complete.json\n"
+        )
+        r = self._run_loop(scenario)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self._git("status", "--porcelain").strip(), "", "tree must rest clean")
+        self.assertNotIn("artifacts/session-handoff.json", self._git("ls-files"))
+
+    def test_a_tracked_baton_is_left_alone_at_completion(self) -> None:
+        self._write("artifacts/session-handoff.json", '{"note": "committed by a green wrap-up"}\n')
+        self._git("add", "-f", "artifacts/session-handoff.json")
+        self._git("commit", "-qm", "wrap-up committed its baton")
+        scenario = (
+            "jq -n '{suggested_commit_message: \"final: done\"}'"
+            " > artifacts/project-complete.json\n"
+        )
+        r = self._run_loop(scenario)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("removed consumed baton", r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.repo, "artifacts", "session-handoff.json")))
+
     def test_handoff_survives_cleanup_into_next_session(self) -> None:
         # A baton left by a prior session must still exist when the next
         # session's first iteration runs (cleanup_artifacts leaves it alone);
