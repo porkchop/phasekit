@@ -769,17 +769,18 @@ class LoopV063FunctionalTest(LoopHarness):
     # --- stranded-artifact recovery ---------------------------------------
 
     def test_stranded_approval_committed_at_first_boundary(self) -> None:
-        # The live 2026-08-11 pathology: a prior session was killed after
-        # writing phase-approval.json but before its commit. The next session's
-        # model re-validates and writes nothing; the loop must still land the
-        # stranded work — under the approval's own message — at the first
-        # iteration boundary.
+        """The live 2026-08-11 pathology: a prior session was killed after
+        writing phase-approval.json but before its commit; the loop must still
+        land the stranded work under the approval's own message.
+        Changed for v0.14.5 (message + timing): the stranded approval now
+        lands at loop START, before any model turn (boundary recovery), so the
+        model's first turn sees a clean tree with the phase landed and moves
+        on — the scenario's first call writes the completion instead of the
+        second. Same assertions: both messages land, the approval commit
+        carries the stranded work."""
         scenario = (
-            'case "$CALL_N" in\n'
-            "  1) : ;;\n"  # model re-validates, writes no artifact
-            "  2) jq -n '{suggested_commit_message: \"final: done\"}'"
-            " > artifacts/project-complete.json ;;\n"
-            "esac\n"
+            "jq -n '{suggested_commit_message: \"final: done\"}'"
+            " > artifacts/project-complete.json\n"
         )
         self._prepare_scenario(scenario)
         # Simulate the guillotine: work + approval on disk, never committed.

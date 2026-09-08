@@ -9,6 +9,22 @@
   },
   "env": [
     {
+      "name": "PHASEKIT_BOUNDARY_KILL_PROBE",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh"],
+      "default": "unset — inert",
+      "container_forwarded": false,
+      "semantics": "Fault injection for the generated kill-point test ONLY (tests/test_boundary_state.py, v0.14.5): '<step>:<pre|post>' SIGKILLs the loop right before (pre) or right after (post) artifacts/boundary-state.json advances to <step> inside land_boundary — a real kill of the shipped code at every seam of the landing sequence. Never set in production; a supervisor never forwards it."
+    },
+    {
+      "name": "PHASEKIT_VERIFY_MEMO_TTL_SECONDS",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh"],
+      "default": "86400",
+      "container_forwarded": false,
+      "semantics": "How long (seconds) the verify memo in artifacts/boundary-state.json is honoured (v0.14.5) — a green or red verdict recorded for an exact tree older than this is re-run. The memo cannot see inputs outside the tree (a container image, ignored files, dependencies resolved at build time), so its trust is bounded in time. 0 = never expires."
+    },
+    {
       "name": "PHASEKIT_SESSION_DEADLINE",
       "kind": "consumed",
       "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh"],
@@ -426,8 +442,8 @@
       "verdict": true,
       "transient_signal": false,
       "hidden": false,
-      "when": "Written by the Claude session at the end of a phase to approve it; the loop commits it (freshness-gated against the iteration-start marker).",
-      "keys": ["phase", "approved", "summary", "suggested_commit_message", "deferrals"]
+      "when": "Written by the Claude session at the end of a phase to approve it; the loop commits it (freshness-gated against the iteration-start marker). v0.14.5: an optional 'final_phase': true names it the project's last approval — the loop then records artifacts/project-complete.json itself (derived: summary + deferrals carried, provenance named) when the session has not written one, so 'approved but unrecorded' cannot survive a kill. Every 'deferrals' entry is committed with a stable 'key' (explicit, else the cited AC#n, else a slug of the item's first words — never a hash); a keyless entry with no item text stays keyless with a WARN and is dropped by the supervisor's reader.",
+      "keys": ["phase", "approved", "summary", "suggested_commit_message", "deferrals", "final_phase"]
     },
     {
       "name": "phase-update.json",
@@ -444,14 +460,14 @@
     {
       "name": "project-complete.json",
       "path": "artifacts/project-complete.json",
-      "writers": ["session"],
+      "writers": ["session", "scripts/run-until-done.sh"],
       "consumers": ["scripts/run-until-done.sh", "scripts/enrich-project.py", "supervisor"],
-      "lifecycle": "durable — committed as the project's completion record; deleted at each iteration start until real",
+      "lifecycle": "durable — committed as the project's completion record; deleted at each iteration start until real. v0.14.5: the loop itself writes it (recorded_by names the step) when the landed approval carries final_phase: true and the session left none",
       "verdict": true,
       "transient_signal": false,
       "hidden": false,
       "when": "Written by the session when every phase is approved and acceptance criteria are met; in light mode it must survive an adversarial final review to count. Its presence after the final commit is the loop's exit-0 signal.",
-      "keys": ["summary", "suggested_commit_message", "deferrals"]
+      "keys": ["summary", "suggested_commit_message", "deferrals", "done", "final_phase", "recorded_by", "ts"]
     },
     {
       "name": "phase-blocked.json",
@@ -670,6 +686,19 @@
       "internal": true,
       "when": "The Stop hook's bounded-block bookkeeping. Do not rely on it.",
       "keys": []
+    },
+    {
+      "name": "boundary-state.json",
+      "path": "artifacts/boundary-state.json",
+      "writers": ["scripts/run-until-done.sh"],
+      "consumers": ["scripts/run-until-done.sh", "supervisor"],
+      "lifecycle": "the ONE record of the landing sequence (v0.14.5): reset to step 0 at every iteration start, advanced only by the loop's land_boundary as each step is PROVEN from git/disk (0 idle, 1 approved, 2 committed, 3 recorded, 4 squashed, 5 merged-back, 6 armed, 7 rested); survives across sessions so the next loop start continues an unfinished boundary before any model turn. Never committed; hidden from git status",
+      "verdict": false,
+      "transient_signal": true,
+      "hidden": true,
+      "internal": false,
+      "when": "A supervisor READS it instead of inferring 'done' from file presence and mtimes: step 7 with final true = the project's completion landed and HEAD rests; step 7 with final false = a phase boundary landed; step < 7 = the previous session ended mid-sequence (killed_after names the step the deadline watchdog observed at the kill, killed_mode 'kill' or 'wrapup'). sha_at_step maps '2','3','5','7' to the work-branch commit and '4' to the target tip that proved the step; verify_memo is the last GREEN gate {tree_sha (git write-tree), tier fast|full, label, command, passed_at} the loop reuses for the same tree; deploy records whether ready-to-deploy.json was present (and its mtime) when the boundary armed — the mtime rule stays the supervisor's; previous is the boundary that ended before the current idle record began (its final step, phase, final flag and shas), so 'what last landed' survives the next iteration's reset. Steps 4-5 are proven trivially without PHASEKIT_SQUASH_TARGET.",
+      "keys": ["schema", "iteration", "branch", "target", "mode", "phase", "final", "step", "step_name", "step_at", "began_at", "sha_at_step", "verify_memo", "deploy", "killed_after", "killed_mode", "killed_at", "context", "recovered_at", "discarded_at", "discarded_reason", "previous", "verify_red"]
     }
   ],
   "conventions": [
@@ -685,7 +714,7 @@
       "marker": "deferrals",
       "declared_in": ["docs/QUALITY_GATES.md", "CONTINUE_PROMPT.txt"],
       "consumers": ["session", "supervisor"],
-      "semantics": "Verdict artifacts (phase-approval.json, project-complete.json) may carry a top-level 'deferrals' array of {item, reason, suggested_task} objects plus an optional 'key', one entry per in-scope acceptance item the session deliberately did not implement. 'item' MUST name the AC number when the deferral maps to a criterion. 'key' is the stable dedupe identifier: it defaults to that AC number (e.g. 'AC#3') when 'item' cites one, and MUST be supplied explicitly (kebab-case) otherwise; entries with the same key across artifact rewrites or successive approvals are the SAME deferral and are never refiled. The supervisor files one queue task per new key so deferred scope cannot lose its slot — and those tasks land HELD (ops lane or approval-gated), never pre-approved: a session's own deferral entry is not self-granted authorization for follow-up work. Absence of the field claims everything in scope shipped; a deferral recorded only in prose is a violation of the deferred-scope gate — this field is the sole machine-readable home."
+      "semantics": "Verdict artifacts (phase-approval.json, project-complete.json) may carry a top-level 'deferrals' array of {item, reason, suggested_task} objects plus an optional 'key', one entry per in-scope acceptance item the session deliberately did not implement. 'item' MUST name the AC number when the deferral maps to a criterion. 'key' is the stable dedupe identifier: it defaults to that AC number (e.g. 'AC#3') when 'item' cites one, and MUST be supplied explicitly (kebab-case) otherwise; entries with the same key across artifact rewrites or successive approvals are the SAME deferral and are never refiled. v0.14.5: the loop writes the key into the committed artifact itself (explicit, else AC#n, else a slug of the item's first words; a derived one carries key_derived: ac|slug), so a supervisor never mints a hash; an entry with neither key nor item text stays keyless with a WARN and is dropped by the reader. The supervisor files one queue task per new key so deferred scope cannot lose its slot — and those tasks land HELD (ops lane or approval-gated), never pre-approved: a session's own deferral entry is not self-granted authorization for follow-up work. Absence of the field claims everything in scope shipped; a deferral recorded only in prose is a violation of the deferred-scope gate — this field is the sole machine-readable home."
     },
     {
       "name": "blocked-reason-review-nonconvergence",

@@ -230,6 +230,59 @@ fetches `origin/<target>` before a session so the remote guard sees fresh
 data (inside a credential-less container the fetch always fails), and decides
 branch retention.
 
+## Boundary state (v0.14.5)
+
+Every "did this phase land?" question the loop or a supervisor used to answer
+by inference — file presence, mtimes, git status, the squash trailer — is
+answered by **one record**, `artifacts/boundary-state.json` (transient for
+git: never committed, hidden from `git status`), written before and advanced
+after each step of **one landing sequence**:
+
+| step | name | proven by |
+|---|---|---|
+| 0 | `idle` | a new iteration began; nothing approved yet |
+| 1 | `approved` | an approval-class artifact is on disk (`final_phase` read here) |
+| 2 | `committed` | `phase-approval.json` is clean in git — committed under its own message |
+| 3 | `recorded` | `project-complete.json` is committed (final boundaries only; the loop writes it from a `final_phase: true` approval when the session did not) |
+| 4 | `squashed` | the target carries the approval-class blobs (squash mode; trivial otherwise) |
+| 5 | `merged-back` | the target tip is an ancestor of the work branch |
+| 6 | `armed` | `ready-to-deploy.json` observed — presence and mtime recorded; the loop never writes it |
+| 7 | `rested` | tree clean; on a final boundary HEAD is on the target and the consumed batons are gone |
+
+`land_boundary` in `scripts/run-until-done.sh` is the only code that advances
+the record. It walks the steps from the one its caller can prove; each step
+has a *proof* (git and disk alone) and an *action* (the mechanism that used to
+decide for itself — `commit_pending_approval_first`, `commit_from_artifact`,
+`squash_to_target`, `repair_half_squash`, `rest_on_target`,
+`clear_consumed_batons_at_completion`). A proven step is recorded and skipped;
+an unproven one gets its action and must then prove. Every entry point — the
+iteration commit, the completion commit, a stranded artifact at loop start,
+the catch-up squash — is a call to this function, so a session killed at any
+instant leaves a tree the proofs describe exactly, and **recovery is the same
+call at the next loop start, before any model turn.** A red verify stops the
+walk at the last proven step with `phase-verify-failed.json` on disk; a
+refused squash stops it with `phase-blocked.json` (branch-integrity) — never
+dirty-and-silent. The deadline watchdog and the wrap-up fall-through record
+`killed_after` (the step observed at the kill) so the next session's first
+line says where the sequence stood.
+
+Fields a supervisor reads (pinned in `contracts/interface.json`): `step`,
+`step_name`, `final`, `phase`, `iteration`, `sha_at_step` (`"2"`/`"3"`/`"5"`/`"7"`
+→ the work-branch commit, `"4"` → the target tip), `verify_memo` / `verify_red`,
+`deploy`, `killed_after`/`killed_mode`, and `previous` (the boundary that
+ended before the current idle record began — what last landed). *Step 7 with `final: true` is "the completion
+landed and HEAD rests"; step 7 with `final: false` is a phase boundary landed;
+step < 7 is a boundary the previous session did not finish.* A record whose
+shas neither HEAD, the target nor the recorded work branch reach (an operator
+moved HEAD) is named, discarded, and only git's own evidence counts.
+
+The generated test `tests/test_boundary_state.py` SIGKILLs a real session of
+the shipped loop at every step boundary (before and after the record
+advances), for every entry point, in both modes, for final and non-final
+boundaries, with a green and a red gate at the resume — and asserts the
+sequence's owed properties each time. `PHASEKIT_BOUNDARY_KILL_PROBE` is that
+test's fault-injection knob; it is inert unless set.
+
 ## Loop integrity (v0.6.0)
 
 Two guarantees added to `run-until-done.sh`:

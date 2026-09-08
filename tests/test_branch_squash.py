@@ -545,31 +545,51 @@ class StructuralPins(unittest.TestCase):
         self.assertIn("auto_push_if_enabled", block[refuse:block.index("return 1", refuse)])
 
     def test_work_branch_is_ensured_before_stranded_recovery_and_catch_up_after(self):
+        """Re-aimed for v0.14.5: the stranded-artifact recovery and the
+        catch-up squash are ONE loop-start call now (land_boundary, context
+        stranded). The ordering this pin protects is unchanged: the work
+        branch is ensured before any loop-made commit, and the recovery runs
+        before the first iteration."""
         head = SOURCE.index("if ! ensure_work_branch; then")
         stranded = SOURCE.index('if artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then')
-        catch_up = SOURCE.index("ensure_squashed_or_block 0; then", stranded)
+        catch_up = SOURCE.index('land_boundary "$recover_from" stranded 1', stranded)
         loop = SOURCE.index('while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do')
         self.assertTrue(head < stranded < catch_up < loop)
 
     def test_every_successful_finish_passes_through_the_completion_squash(self):
+        """Re-aimed for v0.14.5: every finish now follows a land_boundary call
+        whose rc 0/2 means step 7 (rested) was PROVEN — the target carries the
+        tree and HEAD rests on it (the squash and the rest are steps 4 and 7
+        of the one sequence). Four finishes: loop-start recovery, the in-loop
+        completion, the final-phase approval, and the no-artifact fall-through
+        that records a final-phase completion."""
         finishes = [m.start() for m in re.finditer(r'echo "Run finished successfully\."', SOURCE)]
-        self.assertEqual(len(finishes), 3)
+        self.assertEqual(len(finishes), 4)
         for pos in finishes:
-            window = SOURCE[max(0, pos - 700):pos]
-            self.assertIn("ensure_squashed_or_block", window)
-            self.assertTrue("completion; then" in window or "rest_on_target" in window)
+            window = SOURCE[max(0, pos - 1400):pos]
+            self.assertIn("land_boundary", window)
+            self.assertIn('"$crc" -eq 0 || "$crc" -eq 2', window)
+        # and the sequence's own step 7 is where the rest happens
+        fn = _extract_block(r"^boundary_do\(\) \{", r"^\}")
+        seven = fn[fn.index("    7)"):]
+        self.assertIn("rest_on_target", seven)
+        self.assertIn("clear_consumed_batons_at_completion", seven)
 
     def test_catch_up_of_a_completion_finishes_the_run_instead_of_entering_the_loop(self):
-        # MAJOR-2 (v0.14.0 review): a caught-up completion must not fall into
-        # the while loop, whose cleanup deletes project-complete.json.
-        start = SOURCE.index("if [[ -z \"$PENDING_COMMIT_RETRY\" ]] && squash_pending; then")
+        """MAJOR-2 (v0.14.0 review): a caught-up completion must not fall into
+        the while loop, whose cleanup deletes project-complete.json. Re-aimed
+        for v0.14.5: the catch-up is the loop-start recovery block; a final
+        boundary that lands finishes the run there, and a refused squash still
+        branches on BRANCH_INTEGRITY_BLOCKED (never on the blocked file's
+        presence — MINOR-3)."""
+        start = SOURCE.index("# --- Boundary recovery at loop start (v0.14.5)")
         loop = SOURCE.index('while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do')
         block = SOURCE[start:loop]
-        self.assertIn("completion_owed=1", block)
-        self.assertIn("rest_on_target", block)
+        self.assertIn("elif squash_pending; then", block)
+        self.assertIn("if boundary_final && [[ -f \"$ARTIFACTS_DIR/project-complete.json\" ]]", block)
         self.assertIn('echo "Run finished successfully."', block)
         self.assertIn('[[ "$BRANCH_INTEGRITY_BLOCKED" -eq 1 ]]', block)
-        self.assertNotIn('-f "$ARTIFACTS_DIR/phase-blocked.json"', block)
+        self.assertNotIn('-f "$ARTIFACTS_DIR/phase-blocked.json" ]]; then', block)
 
     def test_work_branch_is_ensured_before_the_heal_commit(self):
         # MINOR-6: the heal commit is a loop-made commit; it rides the branch.

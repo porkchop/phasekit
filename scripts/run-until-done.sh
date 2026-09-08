@@ -130,6 +130,7 @@ TRANSIENT_SIGNALS=(
   ".wrapup-nudge-sent"
   ".wrapup-in-progress"
   "session-interrupted.json"
+  "boundary-state.json"
 )
 
 # The subset also hidden from `git status` via .git/info/exclude: consumed from
@@ -148,6 +149,7 @@ HIDDEN_TRANSIENTS=(
   ".wrapup-nudge-sent"
   ".wrapup-in-progress"
   "session-interrupted.json"
+  "boundary-state.json"
 )
 
 # --- The verdict vocabulary -------------------------------------------------
@@ -321,7 +323,10 @@ record_verify_failure() {
   # breaker behave identically no matter which gate refused. (A second copy of
   # this logic is exactly how wrapup_commit silently lost the post-verify gates
   # before v0.6.6.)
-  local cmd="$1" label="$2" exit_code="$3" log="$4"
+  # $5 = "memo" (v0.14.5): the verdict came from the red verify memo for an
+  # exact tree that already failed — re-surface the capture for the model
+  # but spend NO breaker attempt and never trip the breaker from here.
+  local cmd="$1" label="$2" exit_code="$3" log="$4" mode="${5:-}"
 
   local prior_attempts=0
   # A zero-byte artifact (crashed earlier writer) makes `jq -r` emit nothing
@@ -337,6 +342,7 @@ record_verify_failure() {
   fi
   [[ "$prior_attempts" =~ ^[0-9]+$ ]] || prior_attempts=0
   local attempts=$((prior_attempts + 1))
+  [[ "$mode" == "memo" ]] && attempts="$prior_attempts"
   local tail_output
   tail_output="$(tail -n 200 "$log")"
   if ! jq -n \
@@ -362,6 +368,10 @@ record_verify_failure() {
       > "$ARTIFACTS_DIR/phase-verify-failed.json"
   fi
 
+  if [[ "$mode" == "memo" ]]; then
+    echo "  Verify FAILED — known RED for this exact tree (verify memo); attempts unchanged at $attempts/$VERIFY_MAX_ATTEMPTS; see artifacts/phase-verify-failed.json" >&2
+    return 0
+  fi
   echo "  Verify FAILED (attempt $attempts/$VERIFY_MAX_ATTEMPTS); see artifacts/phase-verify-failed.json" >&2
   echo "----- last 50 lines of verify output -----" >&2
   tail -n 50 "$log" >&2
@@ -512,6 +522,41 @@ run_verify_gate() {
     return 0
   fi
 
+  # Verify memo (v0.14.5): a green gate on this EXACT tree, same command,
+  # same-or-stronger tier, is reused instead of re-run — the squash caught up
+  # at a boundary and the completion commit after an approval commit were
+  # each spending a whole session bound on a suite the tree already passed.
+  # Never for a new tree. The contracts gate above always runs.
+  local memo_tree="" memo_tier=fast
+  if command -v verify_memo_hit >/dev/null 2>&1; then
+    memo_tree="$(git write-tree 2>/dev/null)" || memo_tree=""
+    memo_tier="$(verify_memo_tier)"
+    if [[ -n "$memo_tree" ]] && verify_memo_hit "$memo_tree" "$memo_tier" "$label" "$cmd"; then
+      echo "Pre-commit verify: $label — reusing the green verdict recorded for this exact tree (${memo_tree:0:12}, $(boundary_get '.verify_memo.tier // "?"') tier, passed $(boundary_get '.verify_memo.passed_at // "?"')); not re-run (v0.14.5 verify memo)."
+      rm -f "$ARTIFACTS_DIR/phase-verify-failed.json"
+      return 0
+    fi
+    if [[ -n "$memo_tree" && "${BOUNDARY_WALK_CONTEXT:-}" == "stranded" ]] \
+       && verify_memo_hit_red "$memo_tree" "$label" "$cmd"; then
+      # Known red for this exact tree, and NO gate has run since it was
+      # recorded (loop-start recovery only — round-2 F2/F3: honoured
+      # in-loop, the memo would let a model that re-touches the artifact
+      # without changing the tree dodge VERIFY_MAX_ATTEMPTS forever, and
+      # would pin a red the model fixed outside the tree). Answer from the
+      # memo, re-surface the capture for the model, spend NO breaker attempt.
+      echo "Pre-commit verify: $label — this exact tree (${memo_tree:0:12}) is recorded RED (failed $(boundary_get '.verify_red.failed_at // "?"')); not re-run, no attempt spent (v0.14.5 verify memo). Fix the failure in artifacts/phase-verify-failed.json first." >&2
+      local memo_log memo_code
+      memo_log="$(mktemp)"
+      boundary_get '.verify_red.log_tail // ""' > "$memo_log" 2>/dev/null || true
+      memo_code="$(boundary_get '.verify_red.exit_code // 1')"; [[ "$memo_code" =~ ^[0-9]+$ ]] || memo_code=1
+      # ONE capture path for every verify failure (the v0.6.6 lesson): the
+      # shared writer, in its no-attempt mode.
+      record_verify_failure "$cmd" "$label" "$memo_code" "$memo_log" memo
+      rm -f "$memo_log"
+      return 1
+    fi
+  fi
+
   echo "Pre-commit verify: $label"
   local log
   log="$(mktemp)"
@@ -542,11 +587,17 @@ run_verify_gate() {
   if [[ "$verify_status" -eq 0 ]]; then
     echo "  Verify passed."
     rm -f "$log" "$ARTIFACTS_DIR/phase-verify-failed.json"
+    if [[ -n "$memo_tree" ]] && verify_memo_exact_tree; then
+      verify_memo_record "$memo_tree" "$memo_tier" "$label" "$cmd"
+    fi
     return 0
   fi
 
   # Failure path. Capture context so the next iteration can diagnose.
   record_verify_failure "$cmd" "$label" "$verify_status" "$log"
+  if [[ -n "$memo_tree" ]] && command -v verify_memo_record_red >/dev/null 2>&1 && verify_memo_exact_tree; then
+    verify_memo_record_red "$memo_tree" "$label" "$cmd" "$verify_status" "$log"
+  fi
   rm -f "$log"
   return 1
 }
@@ -1041,6 +1092,17 @@ commit_from_artifact() {
     msg="$fallback_msg"
   fi
 
+  # Deferred-scope gate, machine side (v0.14.5): every deferral in EVERY
+  # approval-class artifact this commit may sweep (`git add -A` takes both
+  # when both are on disk — review finding 2) leaves with a stable key.
+  # Only an artifact that is NOT yet landed is rewritten: touching a landed
+  # one would turn it into a "stranded" artifact the moment this commit is
+  # refused (the generated matrix caught exactly that).
+  local _art
+  for _art in phase-approval.json project-complete.json; do
+    if artifact_never_landed "$ARTIFACTS_DIR/$_art"; then normalize_deferral_keys "$ARTIFACTS_DIR/$_art"; fi
+  done
+
   # Force-add tracked artifact files (they may be partially gitignored)
   git add -f "$file" 2>/dev/null || true
 
@@ -1235,6 +1297,624 @@ clear_provisional_handoff_on_exit() {
   echo "run-until-done: dead-man handoff left in place (no verdict this iteration) — the next session orients from it" >&2
 }
 
+# --- Boundary state (v0.14.5) ------------------------------------------------
+# Four incidents in three days (2026-09-07/08), none a regression, each a SEAM
+# between two correct mechanisms: a consumed baton nobody deleted; a final
+# phase approved and squashed whose completion record was never written; a
+# release credited only when the deploy came second; a light breaker tripped
+# by pins a new field legitimately reddens. Root cause, stated once: "done"
+# was a DERIVED state, inferred by eight accreted mechanisms from different
+# subsets of five files/rows, and every pair of them disagreed at some kill
+# point. Foundry-meta kickoffs/KICKOFF-phasekit-v0145-boundary-state.md.
+#
+# This block makes the landing sequence ONE record and ONE path:
+#
+#   artifacts/boundary-state.json   (transient for git: never committed; hidden)
+#   steps, per boundary, in order:
+#     0 idle          nothing approved this boundary
+#     1 approved      an approval-class artifact is on disk (final_phase carried)
+#     2 committed     the phase approval commit is on the work branch
+#     3 recorded      project-complete.json is committed (final boundaries only)
+#     4 squashed      the target carries the approval-class blobs (squash mode)
+#     5 merged-back   the target tip is an ancestor of the work branch
+#     6 armed         ready-to-deploy.json observed (presence + mtime; the loop
+#                     never writes it — the mtime rule is the supervisor's)
+#     7 rested        tree clean; on a final boundary HEAD is on the target and
+#                     the consumed batons are gone
+#
+# land_boundary is the ONLY code path that advances the record. It walks the
+# steps from the one its caller can prove: each step has a PROOF (git/disk
+# alone answers "is it done?") and an ACTION (the existing mechanism —
+# commit_pending_approval_first, commit_from_artifact, squash_to_target,
+# repair_half_squash, rest_on_target, clear_consumed_batons_at_completion —
+# now a callee, not a decider). A proven step is recorded and skipped; an
+# unproven one gets its action, then must prove. So "recovery" is not a
+# separate mechanism: it is land_boundary called at loop start, and a session
+# killed at ANY instant leaves a tree the proofs describe exactly. The eight
+# mechanisms of §1 become callers; the record is what a supervisor READS.
+#
+# The verify memo: a green gate records `git write-tree` + tier + command; a
+# later gate on the SAME tree (the squash caught up at a boundary, the
+# completion commit after an approval commit) reuses the verdict instead of
+# spending a whole session bound on a suite the tree already passed (sessions
+# 669/670, 2026-09-08). Never for a new tree; never across a changed command;
+# a fast-tier memo never satisfies a full-tier gate.
+#
+# Nothing loosens: every gate and doctrine — the security pair, the LEARNINGS
+# scan, the scope warning, the SPEC attestation, the transient vocabulary, the
+# atomicity marker, the verify-budget doctrine, the branch-integrity refusals,
+# the deploy-artifact disarm on the kill path — runs exactly where it did.
+# The record is observability of the sequence, never a gate on it: a record
+# that cannot be written prints once and the sequence continues.
+
+BOUNDARY_STATE_FILE="$ARTIFACTS_DIR/boundary-state.json"
+BOUNDARY_APPROVAL_RIDES_COMPLETION=0   # set by step 2 when a stale approval is left to the completion sweep (walk-local: reset at land_boundary entry)
+BOUNDARY_STEP2_ATTEMPTED=0             # set by step 2's action (walk-local): a FRESH in-loop approval always drives its commit once
+BOUNDARY_STEP_NAMES=(idle approved committed recorded squashed merged-back armed rested)
+BOUNDARY_STEP_RESTED=7
+
+boundary_step() {
+  # The record's current step; 0 when absent or unreadable.
+  local s
+  [[ -f "$BOUNDARY_STATE_FILE" ]] || { echo 0; return 0; }
+  s="$(jq -r '.step // 0' "$BOUNDARY_STATE_FILE" 2>/dev/null)" || s=0
+  [[ "$s" =~ ^[0-7]$ ]] || s=0
+  echo "$s"
+}
+
+boundary_get() {
+  # $1 = jq expression; prints the raw value, empty when the record is absent.
+  [[ -f "$BOUNDARY_STATE_FILE" ]] || return 0
+  jq -r "$1" "$BOUNDARY_STATE_FILE" 2>/dev/null || true
+}
+
+_boundary_write() {
+  # $1 = jq filter applied to the current record ({} when absent); the rest
+  # are jq arguments. $now is always bound. Read-modify-write under a lock
+  # (the deadline watchdog subshell writes killed_after while the loop may be
+  # advancing a step — review finding 8), through a per-writer tmp file
+  # under artifacts/logs/ (never in git status, never swept by add -A —
+  # finding 7), then an atomic mv. Best-effort: never gates the sequence.
+  local filter="$1"; shift
+  local tmp="$ARTIFACTS_DIR/logs/.boundary-state.$BASHPID.tmp" lock="$ARTIFACTS_DIR/logs/.boundary-state.lock"
+  mkdir -p "$ARTIFACTS_DIR/logs" 2>/dev/null || true
+  _boundary_write_locked() {
+    local cur='{}'
+    if [[ -f "$BOUNDARY_STATE_FILE" ]] && jq -e . "$BOUNDARY_STATE_FILE" >/dev/null 2>&1; then
+      cur="$(cat "$BOUNDARY_STATE_FILE")"
+    fi
+    jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$@" "$filter" <<<"$cur" > "$tmp" 2>/dev/null \
+      && mv -f "$tmp" "$BOUNDARY_STATE_FILE" 2>/dev/null
+  }
+  local ok=0
+  if command -v flock >/dev/null 2>&1; then
+    { flock -w 5 9 2>/dev/null || true; _boundary_write_locked "$@" && ok=1; } 9>>"$lock" 2>/dev/null || true
+  else
+    _boundary_write_locked "$@" && ok=1
+  fi
+  if [[ "$ok" -eq 1 ]]; then return 0; fi
+  rm -f "$tmp" 2>/dev/null || true
+  echo "boundary-state: WARN — could not write artifacts/boundary-state.json; the sequence continues, the record is stale" >&2
+  return 0
+}
+
+boundary_begin() {
+  # $1 = iteration number. A NEW boundary: step 0, nothing approved yet. The
+  # verify memo is carried forward (it is keyed by tree, so a stale entry is
+  # inert); everything else belongs to the boundary that just ended.
+  local iter="$1" mode=plain
+  squash_mode && mode=squash
+  # `previous` keeps the boundary that just ended (its final step, phase,
+  # shas) so a reader arriving between sessions can see what last landed
+  # even after a later iteration began a new, idle record.
+  _boundary_write '{
+      schema: 1,
+      iteration: ($iter | tonumber),
+      branch: $branch, target: $target, mode: $mode,
+      phase: null, final: false,
+      step: 0, step_name: "idle", step_at: $now, began_at: $now,
+      sha_at_step: {}, deploy: null, killed_after: null, killed_mode: null, killed_at: null,
+      verify_memo: (.verify_memo // null), verify_red: (.verify_red // null),
+      previous: (if (.step // 0) > 0 then (del(.verify_memo) | del(.previous)) else (.previous // null) end)
+    }' --arg iter "$iter" --arg branch "$(current_branch)" \
+       --arg target "$SQUASH_TARGET" --arg mode "$mode"
+}
+
+boundary_advance() {
+  # $1 = step 1..7, $2 = the sha that proves it (optional). Called ONLY from
+  # land_boundary. Monotonic: a record never moves backwards inside a
+  # boundary; a lower step is a no-op (the property pin in
+  # tests/test_boundary_state.py).
+  local step="$1" sha="${2:-}"
+  [[ "$step" -ge "$(boundary_step)" ]] || return 0
+  _boundary_write '.step = ($step | tonumber) | .step_name = $name | .step_at = $now
+      | (if $sha != "" then .sha_at_step[$step] = $sha else . end)' \
+    --arg step "$step" --arg name "${BOUNDARY_STEP_NAMES[$step]}" --arg sha "$sha"
+}
+
+boundary_mark_killed() {
+  # $1 = "kill" (the deadline watchdog, seconds before the bound) or "wrapup"
+  # (the v0.14.2 fall-through). Records the step observed at the kill — the
+  # one field written outside land_boundary, and not a step advance: the
+  # next session's recovery names it in its first line.
+  [[ -f "$BOUNDARY_STATE_FILE" ]] || return 0
+  _boundary_write '.killed_after = ($step | tonumber) | .killed_mode = $mode | .killed_at = $now' \
+    --arg step "$(boundary_step)" --arg mode "${1:-kill}"
+}
+
+boundary_phase_rested() {
+  # $1 = phase. Does the record (current or previous) show this phase rested?
+  [[ -f "$BOUNDARY_STATE_FILE" ]] || return 1
+  jq -e --arg p "$1" '
+      ((.phase // "") == $p and (.step // 0) == 7)
+      or (((.previous // {}).phase // "") == $p and ((.previous // {}).step // 0) == 7)' \
+    "$BOUNDARY_STATE_FILE" >/dev/null 2>&1
+}
+
+approval_final_unrecorded() {
+  # The 2026-09-08 06:22 shape, and ONLY that shape: the approval on disk is
+  # landed, names the final phase, no completion record exists on disk or in
+  # HEAD, AND no commit since the approval landed has ever touched
+  # project-complete.json. A project that COMPLETED and was then resumed
+  # carries a deletion (an intake rename, the "deleted until real" checkpoint)
+  # after its approval — that is a resumed project, not an unrecorded one
+  # (review BLOCKER 1: the loop once re-recorded "complete" over a resumed
+  # project's half-done work, exit 0, zero model turns).
+  local ap="$ARTIFACTS_DIR/phase-approval.json" ap_commit
+  [[ -f "$ap" ]] || return 1
+  [[ "$(jq -r '.final_phase // false' "$ap" 2>/dev/null)" == "true" ]] || return 1
+  artifact_never_landed "$ap" && return 1
+  [[ -f "$ARTIFACTS_DIR/project-complete.json" ]] && return 1
+  git cat-file -e "HEAD:artifacts/project-complete.json" 2>/dev/null && return 1
+  # The range starts at the OLDEST commit anywhere in the path's history
+  # that carries the CURRENT approval blob, not at the last commit that
+  # touched the path: a later re-touch with identical content — a mode
+  # change, a delete-and-restore, an edit-and-revert (operator hand-commits
+  # after the completion's deletion; round-2 F6, round-3 finding 1) — must
+  # not hide that deletion. A re-land with DIFFERENT content later is the
+  # one genuinely ambiguous shape (an operator re-asserted final_phase on a
+  # resumed project) and is an accepted limitation, stated in
+  # docs/QUALITY_GATES.md.
+  local blob c
+  blob="$(git rev-parse -q --verify "HEAD:artifacts/phase-approval.json" 2>/dev/null)" || return 1
+  ap_commit=""
+  while IFS= read -r c; do
+    [[ -n "$c" ]] || continue
+    [[ "$(git rev-parse -q --verify "$c:artifacts/phase-approval.json" 2>/dev/null)" == "$blob" ]] || continue
+    ap_commit="$c"
+  done < <(git log --format=%H -- artifacts/phase-approval.json 2>/dev/null)
+  [[ -n "$ap_commit" ]] || return 1
+  [[ -z "$(git rev-list "$ap_commit..HEAD" -- artifacts/project-complete.json 2>/dev/null)" ]]
+}
+
+boundary_final() {
+  # Is this boundary the project's last? Read, not inferred: the record's
+  # `final` (from the approval's final_phase at step 1), or a completion
+  # record on disk (a completion-only boundary is final by definition).
+  [[ "$(boundary_get '.final // false')" == "true" ]] && return 0
+  [[ -f "$ARTIFACTS_DIR/project-complete.json" ]]
+}
+
+_boundary_kill_probe() {
+  # Fault injection for the generated kill-point test ONLY
+  # (tests/test_boundary_state.py): PHASEKIT_BOUNDARY_KILL_PROBE="<step>:<pre|post>"
+  # SIGKILLs this process right before (pre) or right after (post) the record
+  # advances to <step> — a real kill, of the shipped code, at every seam. Never
+  # set in production; inert when unset.
+  [[ -n "${PHASEKIT_BOUNDARY_KILL_PROBE:-}" ]] || return 0
+  [[ "${PHASEKIT_BOUNDARY_KILL_PROBE}" == "$1:$2" ]] || return 0
+  echo "boundary-state: KILL PROBE $1:$2 — SIGKILL now (test fault injection)" >&2
+  kill -KILL $$
+  sleep 5
+}
+
+# --- verify memo -------------------------------------------------------------
+
+verify_memo_tier() {
+  # The tier the project's gate is about to run: the doctrine
+  # (docs/QUALITY_GATES.md "Verify budget") makes a gate run FULL when
+  # project-complete.json exists, fast otherwise. The loop cannot see inside
+  # the project's script; presence of the record is the contract.
+  if [[ -f "$ARTIFACTS_DIR/project-complete.json" ]]; then echo full; else echo fast; fi
+}
+
+verify_memo_exact_tree() {
+  # Only a tree the gate ran on EXACTLY may be memoised: no unstaged tracked
+  # changes and no untracked files outside artifacts/. (The catch-up squash
+  # verifies the working tree while landing HEAD's — today's imprecision; a
+  # memo must not make it durable.)
+  git diff --quiet 2>/dev/null || return 1
+  [[ -z "$(git ls-files --others --exclude-standard 2>/dev/null | grep -v '^artifacts/')" ]]
+}
+
+verify_memo_record() {
+  # $1 tree $2 tier $3 label $4 command — after a GREEN gate on an exact tree.
+  _boundary_write '.verify_memo = {tree_sha: $tree, tier: $tier, label: $label, command: $cmd, passed_at: $now} | .verify_red = null' \
+    --arg tree "$1" --arg tier "$2" --arg label "$3" --arg cmd "$4"
+}
+
+_verify_memo_fresh() {
+  # $1 = the memo's passed_at/failed_at. A memo older than
+  # PHASEKIT_VERIFY_MEMO_TTL_SECONDS (default one day) is not honoured: the
+  # gate's inputs a tree cannot see (a container image, ignored files, a
+  # dependency resolved at build time) drift on that scale (review finding 10).
+  local ts="$1" ttl="${PHASEKIT_VERIFY_MEMO_TTL_SECONDS:-86400}" then now
+  [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=86400
+  [[ "$ttl" -gt 0 ]] || return 0
+  then="$(date -u -d "$ts" +%s 2>/dev/null)" || return 1
+  now="$(date +%s)"
+  [[ $((now - then)) -le "$ttl" ]]
+}
+
+verify_memo_hit() {
+  # $1 tree $2 tier $3 label $4 command → 0 iff the recorded green verdict
+  # covers this run: same tree, same command, a tier at least as strong, and
+  # recent enough.
+  local m
+  [[ -f "$BOUNDARY_STATE_FILE" ]] || return 1
+  m="$(boundary_get '.verify_memo.tree_sha // empty')"; [[ -n "$m" && "$m" == "$1" ]] || return 1
+  m="$(boundary_get '.verify_memo.label // empty')";    [[ "$m" == "$3" ]] || return 1
+  m="$(boundary_get '.verify_memo.command // empty')";  [[ "$m" == "$4" ]] || return 1
+  _verify_memo_fresh "$(boundary_get '.verify_memo.passed_at // empty')" || return 1
+  m="$(boundary_get '.verify_memo.tier // empty')"
+  [[ "$m" == "full" || "$m" == "$2" ]]
+}
+
+verify_memo_record_red() {
+  # $1 tree $2 label $3 command $4 exit code $5 log file — after a RED gate on
+  # an exact tree. The next gate on the same tree (a loop-start recovery of
+  # the approval a red wrap-up stranded) is answered from here at zero cost
+  # and without spending a breaker attempt (review finding 6).
+  local tail_output
+  tail_output="$(tail -n 50 "$5" 2>/dev/null | tail -c 4000)" || tail_output=""
+  _boundary_write '.verify_red = {tree_sha: $tree, label: $label, command: $cmd, exit_code: ($code | tonumber), log_tail: $log, failed_at: $now}' \
+    --arg tree "$1" --arg label "$2" --arg cmd "$3" --arg code "$4" --arg log "$tail_output"
+}
+
+verify_memo_hit_red() {
+  # $1 tree $2 label $3 command → 0 iff the recorded RED verdict covers this run.
+  local m
+  [[ -f "$BOUNDARY_STATE_FILE" ]] || return 1
+  m="$(boundary_get '.verify_red.tree_sha // empty')"; [[ -n "$m" && "$m" == "$1" ]] || return 1
+  m="$(boundary_get '.verify_red.label // empty')";    [[ "$m" == "$2" ]] || return 1
+  m="$(boundary_get '.verify_red.command // empty')";  [[ "$m" == "$3" ]] || return 1
+  _verify_memo_fresh "$(boundary_get '.verify_red.failed_at // empty')"
+}
+
+# --- deferral keys (the deferred-scope gate, machine side) -------------------
+
+normalize_deferral_keys() {
+  # $1 = an approval-class artifact about to be committed. Every `deferrals`
+  # entry leaves here with a stable `key`: explicit wins; else the cited AC
+  # number (AC#n); else a slug of the item's first six words. NEVER a hash —
+  # iteration 115 (2026-09-08) minted item-<hash> keys downstream, which
+  # defeat the severity floor's dedupe and the drain ritual. A `deferrals`
+  # that is null counts as absent; one that is not an array of objects, or
+  # an entry with neither key nor item text, is left as it is with a WARN —
+  # the supervisor's reader drops what it cannot name and logs it. The
+  # kickoff asked for a refusal; the review showed a refusal here is BLIND
+  # (nothing on disk tells the model why its commit keeps failing — 50 turns
+  # in standard mode), and a gate that strands a session over a malformed
+  # note violates the gate-recovery principle. Always returns 0.
+  local file="$1" out
+  [[ -f "$file" ]] || return 0
+  jq -e '(.deferrals // null) != null' "$file" >/dev/null 2>&1 || return 0
+  if ! jq -e '.deferrals | type == "array" and all(.[]; type == "object")' "$file" >/dev/null 2>&1; then
+    echo "run-until-done: WARN — $(basename "$file") carries a 'deferrals' field that is not an array of {item, reason, suggested_task, key} objects; left as written — the supervisor's reader will drop what it cannot name (deferred-scope gate)." >&2
+    return 0
+  fi
+  out="$(jq '
+    def trim: gsub("^\\s+|\\s+$"; "");
+    def slug: ascii_downcase | gsub("[^a-z0-9]+"; "-") | gsub("^-+|-+$"; "") | .[0:48] | gsub("-+$"; "");
+    def first_words: gsub("\\s+"; " ") | trim | split(" ") | .[0:6] | join(" ");
+    .deferrals |= map(
+      if ((.key // "") | tostring | trim | length) > 0 then .key = ((.key | tostring) | trim)
+      elif ((.item // "") | tostring | test("AC#[0-9]+"; "i")) then
+        .key = ((.item | tostring | match("AC#[0-9]+"; "i").string) | ascii_upcase) | .key_derived = "ac"
+      elif ((.item // "") | tostring | first_words | slug | length) > 0 then
+        .key = (.item | tostring | first_words | slug) | .key_derived = "slug"
+      else . end)' "$file" 2>/dev/null)" || {
+    echo "run-until-done: WARN — $(basename "$file") could not be read as JSON by the deferred-scope gate; left as written." >&2
+    return 0
+  }
+  local missing
+  missing="$(jq -r '[.deferrals | to_entries[] | select(((.value.key // "") | tostring | length) == 0) | .key] | join(",")' <<<"$out" 2>/dev/null)" || missing=""
+  if [[ -n "$missing" ]]; then
+    echo "run-until-done: WARN — $(basename "$file") deferral entry index $missing has neither 'key' nor 'item' text; nothing can name it, so the supervisor's reader will drop it (deferred-scope gate)." >&2
+  fi
+  if ! cmp -s <(printf '%s\n' "$out") "$file"; then
+    local tmp="$ARTIFACTS_DIR/logs/.deferrals.$BASHPID.tmp"
+    mkdir -p "$ARTIFACTS_DIR/logs" 2>/dev/null || true
+    if printf '%s\n' "$out" > "$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null; then
+      jq -r '.deferrals[] | select(.key_derived != null) | "run-until-done: deferred-scope gate — derived key \(.key) (\(.key_derived)) for deferral: \(.item | tostring | .[0:80])"' "$file" 2>/dev/null || true
+    else
+      rm -f "$tmp" 2>/dev/null || true
+    fi
+  fi
+  return 0
+}
+
+# --- the landing sequence -----------------------------------------------------
+
+_boundary_tree_clean() {
+  # The tree is clean apart from the loop's own transients, logs and batons.
+  local line path sig
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    path="${line:3}"; path="${path#\"}"; path="${path%\"}"
+    case "$path" in
+      artifacts/logs/*|artifacts/session-handoff.json|artifacts/session-interrupted.json|artifacts/wrapup-requested) continue ;;
+    esac
+    for sig in "${TRANSIENT_SIGNALS[@]}"; do [[ "$path" == "artifacts/$sig" ]] && continue 2; done
+    return 1
+  done < <(git status --porcelain 2>/dev/null)
+  return 0
+}
+
+_boundary_synthesize_completion() {
+  # Step 3's action when the approval said final_phase but the session never
+  # wrote project-complete.json (2026-09-08 06:22: approved, squashed, killed;
+  # the next session blocked "no next phase"). Derived from the landed
+  # approval — summary and deferrals carried, provenance named.
+  local ap="$ARTIFACTS_DIR/phase-approval.json"
+  [[ -f "$ap" ]] || return 1
+  # Deterministic on purpose (no wall-clock field): a re-synthesis after a
+  # disarm or a cleanup yields the same bytes, so the verify memo can match
+  # the tree it already judged (round-2 F4).
+  jq '{
+      done: true,
+      summary: ("Project complete — final phase " + ((.phase // "unknown") | tostring) + " approved: " + ((.summary // "") | tostring)),
+      suggested_commit_message: ("chore(workflow): project completion record (final phase " + ((.phase // "unknown") | tostring) + " approved)"),
+      deferrals: (.deferrals // []),
+      final_phase: (.phase // "unknown"),
+      recorded_by: "phasekit run-until-done.sh — boundary-state step 3 (the approval carried final_phase: true and no completion record existed)"
+    }' "$ap" > "$ARTIFACTS_DIR/project-complete.json" 2>/dev/null || return 1
+  echo "boundary-state: the approval carries final_phase: true and no completion record exists — recorded artifacts/project-complete.json from it (step 3)."
+  return 0
+}
+
+_boundary_derive() {
+  # What disk says this boundary is: "<phase> <final>" — the approval's phase
+  # and final_phase flag, a completion record on disk making it final.
+  local ap="$ARTIFACTS_DIR/phase-approval.json" phase="" final=false
+  if [[ -f "$ap" ]]; then
+    phase="$(jq -r '.phase // empty' "$ap" 2>/dev/null)" || phase=""
+    if [[ "$(jq -r '.final_phase // false' "$ap" 2>/dev/null)" == "true" ]]; then
+      # A fresh (never-landed) final approval is final. A LANDED one is final
+      # only while nothing since it has recorded a completion — a resumed
+      # project's approval still says final_phase: true, and a walk that
+      # trusted the flag alone re-recorded "complete" over new work (round-1
+      # BLOCKER 1; round-2 F1 with the record absent).
+      if artifact_never_landed "$ap" || approval_final_unrecorded; then final=true; fi
+    fi
+  fi
+  [[ -f "$ARTIFACTS_DIR/project-complete.json" ]] && final=true
+  if [[ -z "$phase" ]]; then
+    if [[ "$final" == true ]]; then phase=project; else phase=unknown; fi
+  fi
+  # final first: `read -r final phase` keeps a phase name with spaces whole.
+  echo "$final $phase"
+}
+
+boundary_prove() {
+  # $1 = step. 0 iff git/disk prove the step done. Pure: writes nothing.
+  local step="$1"
+  case "$step" in
+    1) # an approval-class artifact is on disk AND the record has read it
+       # (phase + final) — presence alone proved nothing, and a proof that is
+       # always true would skip the derivation (the generated test's first
+       # catch, 2026-09-08).
+       [[ -f "$ARTIFACTS_DIR/phase-approval.json" || -f "$ARTIFACTS_DIR/project-complete.json" ]] || return 1
+       local d_phase d_final
+       read -r d_final d_phase <<<"$(_boundary_derive)"
+       [[ "$(boundary_get '.phase // empty')" == "$d_phase" && "$(boundary_get '.final // false')" == "$d_final" ]] ;;
+    2) # the phase approval landed under its own message — or step 2's action
+       # declined a STALE one (v0.12.3 freshness rule) and the completion
+       # commit of step 3 carries it instead. At the in-loop approval site a
+       # FRESH artifact is a verdict even when byte-identical to HEAD (the
+       # v0.6.0 mtime rule): the action runs once before cleanliness counts
+       # as proof, else new work under an unchanged approval is stranded
+       # (review finding 4).
+       if [[ "${BOUNDARY_WALK_CONTEXT:-}" == "iteration" && "${BOUNDARY_STEP2_ATTEMPTED:-0}" != 1 ]]; then return 1; fi
+       ! artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json" \
+         || { [[ "${BOUNDARY_APPROVAL_RIDES_COMPLETION:-0}" == 1 ]] && boundary_final; } ;;
+    3) if boundary_final; then
+         [[ -f "$ARTIFACTS_DIR/project-complete.json" ]] \
+           && ! artifact_never_landed "$ARTIFACTS_DIR/project-complete.json" \
+           && ! artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json"
+       else return 0; fi ;;
+    4) if squash_mode; then ! squash_pending; else return 0; fi ;;
+    5) if squash_mode; then git merge-base --is-ancestor "refs/heads/$SQUASH_TARGET" HEAD 2>/dev/null; else return 0; fi ;;
+    6) return 0 ;;
+    7) _boundary_tree_clean || return 1
+       [[ -f "$ARTIFACTS_DIR/session-interrupted.json" ]] && return 1
+       if boundary_final; then
+         if squash_mode; then [[ "$(current_branch)" == "$SQUASH_TARGET" ]] || return 1; fi
+         [[ -f "$ARTIFACTS_DIR/session-handoff.json" ]] && ! git ls-files --error-unmatch -- "$ARTIFACTS_DIR/session-handoff.json" >/dev/null 2>&1 && return 1
+       fi
+       return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_boundary_sha_for() {
+  case "$1" in
+    2) # proven by exception (a stale approval rides the completion) names no commit
+       if artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json"; then :; else git rev-parse HEAD 2>/dev/null || true; fi ;;
+    3|5|7) git rev-parse HEAD 2>/dev/null || true ;;
+    4) if squash_mode; then git rev-parse "refs/heads/$SQUASH_TARGET" 2>/dev/null || true; fi ;;
+    *) : ;;
+  esac
+}
+
+boundary_do() {
+  # $1 = step, $2 = context, $3 = any_age (1: an uncommitted approval of any
+  # age commits under its own message — the stranded-at-start pairing; 0: only
+  # a fresh one does, and a stale one rides the completion sweep).
+  # Returns the action's rc: 0 done, 2 nothing to commit, 1 refused/red,
+  # 4 light-mode escalation.
+  local step="$1" context="$2" any_age="$3" rc=0 msg
+  case "$step" in
+    1)
+      local phase final
+      read -r final phase <<<"$(_boundary_derive)"
+      _boundary_write '.phase = $phase | .final = ($final == "true") | .context = $ctx' \
+        --arg phase "$phase" --arg final "$final" --arg ctx "$context"
+      if [[ "$final" == true && ! -f "$ARTIFACTS_DIR/project-complete.json" ]]; then
+        _boundary_synthesize_completion || return 1
+      fi
+      return 0 ;;
+    2)
+      if [[ "$any_age" != 1 ]] \
+         && ! artifact_written_this_iteration "$ARTIFACTS_DIR/phase-approval.json" \
+         && [[ "${PENDING_COMMIT_RETRY:-}" != "phase-approval" ]]; then
+        echo "boundary-state: the uncommitted phase-approval.json predates this iteration — it rides the completion commit (v0.12.3 freshness rule), not its own."
+        BOUNDARY_APPROVAL_RIDES_COMPLETION=1
+        return 0
+      fi
+      BOUNDARY_APPROVAL_RIDES_COMPLETION=0
+      BOUNDARY_STEP2_ATTEMPTED=1
+      # A final boundary's completion record rides THIS commit (one commit,
+      # one squash, one verify) — synthesized here when the record on disk
+      # was disarmed or never written.
+      if boundary_final && [[ ! -f "$ARTIFACTS_DIR/project-complete.json" ]]; then
+        _boundary_synthesize_completion || return 1
+      fi
+      if [[ "$context" == "iteration" ]]; then
+        # The site proved freshness (written this iteration, or the retry
+        # marker): the artifact drives the commit whatever its bytes — the
+        # gate inside returns 2 when nothing substantive is staged.
+        echo "Phase approval artifact drives the commit (fresh this iteration)."
+        commit_from_artifact "$ARTIFACTS_DIR/phase-approval.json" "chore(workflow): approve completed phase" || rc=$?
+        return "$rc"
+      fi
+      commit_pending_approval_first || rc=$?
+      return "$rc" ;;
+    3)
+      if [[ ! -f "$ARTIFACTS_DIR/project-complete.json" ]]; then
+        # The record says final but the completion is gone (an iteration
+        # cleanup after a red verify, or a kill before it was written): the
+        # approval on disk must be the boundary's own phase, else this record
+        # is stale and nothing is synthesized from it.
+        local rp ap_phase
+        rp="$(boundary_get '.phase // empty')"
+        ap_phase="$(jq -r '.phase // empty' "$ARTIFACTS_DIR/phase-approval.json" 2>/dev/null)" || ap_phase=""
+        if [[ -n "$rp" && "$rp" != "$ap_phase" ]]; then
+          echo "boundary-state: record names phase '$rp' as final but the approval on disk is '$ap_phase' — not synthesizing a completion record from a stale record" >&2
+          return 1
+        fi
+        if ! artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json" && ! approval_final_unrecorded; then
+          echo "boundary-state: a commit since this approval landed already touched project-complete.json — a resumed project, not an unrecorded completion; not synthesizing" >&2
+          return 1
+        fi
+        _boundary_synthesize_completion || return 1
+      fi
+      commit_from_artifact \
+        "$ARTIFACTS_DIR/project-complete.json" \
+        "chore(workflow): final session work + project completion record" || rc=$?
+      return "$rc" ;;
+    4)
+      msg="$(git show "HEAD:artifacts/phase-approval.json" 2>/dev/null | jq -r '.suggested_commit_message // empty' 2>/dev/null)" || msg=""
+      if git rev-parse -q --verify "HEAD:artifacts/project-complete.json" >/dev/null 2>&1 \
+         && [[ "$(git rev-parse -q --verify "HEAD:artifacts/project-complete.json" 2>/dev/null)" != "$(git rev-parse -q --verify "refs/heads/$SQUASH_TARGET:artifacts/project-complete.json" 2>/dev/null)" ]]; then
+        msg="$(git show "HEAD:artifacts/project-complete.json" 2>/dev/null | jq -r '.suggested_commit_message // empty' 2>/dev/null)" || msg=""
+        [[ -n "$msg" ]] || msg="chore(workflow): project completion record (squash caught up at a boundary)"
+      fi
+      [[ -n "$msg" ]] || msg="chore(workflow): approved phase (squash caught up at a boundary)"
+      echo "Branch-per-iteration: an approval-class commit on the work branch has not reached '$SQUASH_TARGET' — squashing now."
+      # verified=0: the memo decides whether the gate re-runs for this tree.
+      squash_to_target "$msg" 0 || rc=$?
+      return "$rc" ;;
+    5)
+      repair_half_squash || true
+      if ! git merge-base --is-ancestor "refs/heads/$SQUASH_TARGET" HEAD 2>/dev/null; then
+        write_branch_integrity_block \
+          "'$SQUASH_TARGET' moved out-of-band after the squash (its tip is not an ancestor of the work branch)" \
+          "git merge $SQUASH_TARGET into the work branch by hand (resolve conflicts, re-verify), then re-run"
+        return 1
+      fi
+      return 0 ;;
+    6)
+      local rd="$ARTIFACTS_DIR/ready-to-deploy.json" present=false mtime=""
+      if [[ -f "$rd" ]]; then present=true; mtime="$(date -u -r "$rd" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"; fi
+      _boundary_write '.deploy = {ready_to_deploy_present: ($present == "true"), ready_to_deploy_mtime: (if $mtime == "" then null else $mtime end), observed_at: $now}' \
+        --arg present "$present" --arg mtime "$mtime"
+      return 0 ;;
+    7)
+      # Nothing is in flight once a boundary rests: this iteration's dead-man
+      # baton comes down here (a kill between here and the next iteration
+      # start then leaves NO baton — which is the truth). The EXIT trap's own
+      # clear stays for checkpoint iterations, which never reach this step.
+      rm -f "$ARTIFACTS_DIR/session-interrupted.json" 2>/dev/null || true
+      if boundary_final; then
+        clear_consumed_batons_at_completion
+        rest_on_target
+      fi
+      return 0 ;;
+  esac
+  return 1
+}
+
+land_boundary() {
+  # $1 = the step the caller can prove (1..7), $2 = context (iteration,
+  # completion, stranded, wrapup), $3 = any_age (see boundary_do 2).
+  # Returns 0 = reached `rested` with new work landed; 2 = reached `rested`
+  # with nothing new to commit; 1 = stopped (verify red, a gate refused, or
+  # the squash was refused — the record stays at the last proven step and
+  # the refusing gate has written its own artifact); 4 = light escalation.
+  local from="${1:-1}" context="${2:-iteration}" any_age="${3:-1}"
+  local step rc did=0 recorded name sha
+  # Walk-local state (review finding 3: a sticky flag from an earlier walk
+  # once let a FRESH approval skip its own commit).
+  BOUNDARY_APPROVAL_RIDES_COMPLETION=0
+  BOUNDARY_STEP2_ATTEMPTED=0
+  BOUNDARY_WALK_CONTEXT="$context"
+  # The caller's `from` is a claim the walk verifies, not a shortcut past
+  # step 1: every walk derives phase/final from disk first (the catch-up
+  # entry once started at 2 and never learned the phase — generated test).
+  [[ -f "$BOUNDARY_STATE_FILE" ]] || boundary_begin 0
+  recorded="$(boundary_step)"
+  echo "boundary-state: landing from step $from (${BOUNDARY_STEP_NAMES[$from]}) — context $context; record was at step $recorded (${BOUNDARY_STEP_NAMES[$recorded]})$( [[ "$(boundary_get '.killed_after // empty')" != "" ]] && echo ", killed after step $(boundary_get '.killed_after')")."
+  [[ "$context" == "stranded" ]] && _boundary_write '.recovered_at = $now'
+  # A completion commit never carries the promoted baton (v0.14.4), and
+  # neither does a loop-start recovery commit (v0.14.5): the baton is what
+  # the model is about to orient from, and a phase commit that swept it would
+  # put a "you were killed" note in the phase's history, to be deleted by a
+  # later commit. In-loop phase commits keep today's behavior (the model has
+  # already read and deleted its baton by then).
+  local prior_ccip="${COMPLETION_COMMIT_IN_PROGRESS:-0}"
+  if boundary_final || [[ "$context" == "stranded" ]]; then COMPLETION_COMMIT_IN_PROGRESS=1; fi
+  for (( step=1; step<=BOUNDARY_STEP_RESTED; step++ )); do
+    name="${BOUNDARY_STEP_NAMES[$step]}"
+    if ! boundary_prove "$step"; then
+      rc=0
+      boundary_do "$step" "$context" "$any_age" || rc=$?
+      case "$rc" in
+        0) did=1 ;;
+        2) : ;;
+        *) COMPLETION_COMMIT_IN_PROGRESS="$prior_ccip"; BOUNDARY_WALK_CONTEXT=""
+           echo "boundary-state: stopped at step $step ($name) — rc $rc; record stays at step $(boundary_step) ($(boundary_get '.step_name // "idle"'))." >&2
+           return "$rc" ;;
+      esac
+      # Re-evaluate `final` after step 1's action (it may have synthesized).
+      [[ "$step" -eq 1 ]] && boundary_final && COMPLETION_COMMIT_IN_PROGRESS=1
+      if ! boundary_prove "$step"; then
+        COMPLETION_COMMIT_IN_PROGRESS="$prior_ccip"; BOUNDARY_WALK_CONTEXT=""
+        echo "boundary-state: step $step ($name) could not be proven after its action — stopping; record stays at step $(boundary_step)." >&2
+        return 1
+      fi
+    fi
+    _boundary_kill_probe "$step" pre
+    sha="$(_boundary_sha_for "$step")"
+    boundary_advance "$step" "$sha"
+    _boundary_kill_probe "$step" post
+  done
+  COMPLETION_COMMIT_IN_PROGRESS="$prior_ccip"; BOUNDARY_WALK_CONTEXT=""
+  echo "boundary-state: rested (step $BOUNDARY_STEP_RESTED) — $(boundary_final && echo "final boundary" || echo "phase boundary") for phase $(boundary_get '.phase // "unknown"')$( [[ "$did" -eq 1 ]] || echo " (nothing new to commit)")."
+  if [[ "$did" -eq 1 ]]; then return 0; fi
+  return 2
+}
+
 # --- Deadline watchdog (v0.13.0) --------------------------------------------
 # The 2026-08-26/27 strand run: five heavy first sessions in a row were killed
 # at their bound (exit 124) with a full session of coherent work uncommitted —
@@ -1351,6 +2031,18 @@ deadline_lastresort_commit() {
       note: $note,
       ts: $ts
     }' > "$baton" 2>/dev/null || true
+  fi
+
+  # v0.14.5: name the step the kill (or the fall-through) interrupted, so the
+  # next session's first recovery line says where the sequence stood; and
+  # key the deferrals of any approval-class artifact this wip may sweep, so
+  # a keyless record never reaches a supervisor through the kill path.
+  if command -v boundary_mark_killed >/dev/null 2>&1; then boundary_mark_killed "$mode"; fi
+  if command -v normalize_deferral_keys >/dev/null 2>&1; then
+    local _art
+    for _art in phase-approval.json project-complete.json; do
+      if artifact_never_landed "$ARTIFACTS_DIR/$_art"; then normalize_deferral_keys "$ARTIFACTS_DIR/$_art" || true; fi
+    done
   fi
 
   # The commit. The model may hold index.lock mid-operation — bounded retry,
@@ -1529,6 +2221,13 @@ wrapup_commit() {
   # the session; the loop clears a stale one at startup beside the nudge
   # marker, and the transient vocabulary keeps it uncommittable.
   touch "$ARTIFACTS_DIR/.wrapup-in-progress" 2>/dev/null || true
+  # v0.14.5: an approval-class artifact this sweep may carry (a CLI retry
+  # ended the iteration before the boundary saw it — round-2 F5) leaves
+  # with keyed deferrals like every other commit path.
+  local _wart
+  for _wart in phase-approval.json project-complete.json; do
+    if artifact_never_landed "$ARTIFACTS_DIR/$_wart"; then normalize_deferral_keys "$ARTIFACTS_DIR/$_wart" || true; fi
+  done
   local _wa
   for _wa in 1 2 3 4 5; do
     git add -A 2>/dev/null && break
@@ -2027,67 +2726,106 @@ commit_pending_approval_first() {
   return "$acrc"
 }
 
+# --- Boundary recovery at loop start (v0.14.5) --------------------------------
+# One question, answered before any model turn: is a boundary open? Git and
+# disk answer first (a never-landed verdict artifact; an approval-class commit
+# the target lacks; a landed approval that names the final phase with no
+# completion record), then the record (step < 7 for the last boundary, trusted
+# only where its shas are reachable). Whichever says "open", land_boundary
+# walks the sequence from the lowest step in question — every step proves
+# itself, so starting low costs nothing and never guesses. A record whose shas
+# git cannot find is named and discarded, and only git's evidence counts.
+# Stranded artifacts (v0.6.3) and the catch-up squash (v0.14.0) are the same
+# call now: their witness lines are kept.
+recover_from=0
+recover_why=""
 if artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then
-  # A stranded completion record would be deleted by the first iteration's
-  # cleanup_artifacts and silently re-done. Commit it now (all the usual
-  # gates apply) — on success the run is already complete, zero claude calls.
-  echo "Stranded project-complete.json from a prior session detected — attempting its final commit before starting."
-  print_json_summary "$ARTIFACTS_DIR/project-complete.json"
+  recover_from=1
+  recover_why="Stranded project-complete.json from a prior session detected — attempting its final commit before starting."
+elif artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json"; then
+  recover_from=1
+  recover_why="Stranded phase-approval.json from a prior session detected — landing it before starting (v0.14.5: at loop start, before any orientation; verify-gated as always)."
+elif squash_pending; then
+  recover_from=2
+  recover_why="Branch-per-iteration: an approval-class commit on the work branch has not reached '$SQUASH_TARGET' — catching up before starting."
+elif approval_final_unrecorded; then
+  recover_from=1
+  recover_why="The landed phase-approval.json names the final phase (final_phase: true) and no commit since it has recorded a completion — recording it before starting."
+elif [[ -f "$ARTIFACTS_DIR/phase-approval.json" ]] \
+     && ! artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json" \
+     && [[ ! -f "$ARTIFACTS_DIR/project-complete.json" ]] \
+     && ! boundary_phase_rested "$(jq -r '.phase // "unknown"' "$ARTIFACTS_DIR/phase-approval.json" 2>/dev/null)" \
+     && _boundary_tree_clean; then
+  # An approval that landed outside the sequence — a hand commit, a wip the
+  # watchdog made seconds before a kill — has no rested boundary on record.
+  # The walk proves it (trivially, in plain mode) so the record says what git
+  # says; the first run after the upgrade does this once per project.
+  recover_from=2
+  recover_why="The landed phase-approval.json (phase $(jq -r '.phase // "unknown"' "$ARTIFACTS_DIR/phase-approval.json" 2>/dev/null)) has no rested boundary on record — proving its sequence before starting."
+fi
+boundary_recorded_step="$(boundary_step)"
+if [[ "$boundary_recorded_step" -ge 1 && "$boundary_recorded_step" -lt "$BOUNDARY_STEP_RESTED" ]]; then
+  boundary_shas_ok=1
+  boundary_recorded_branch="$(boundary_get '.branch // empty')"
+  while IFS= read -r _bsha; do
+    [[ -n "$_bsha" ]] || continue
+    if git merge-base --is-ancestor "$_bsha" HEAD 2>/dev/null; then continue; fi
+    if squash_mode && git merge-base --is-ancestor "$_bsha" "refs/heads/$SQUASH_TARGET" 2>/dev/null; then continue; fi
+    # After a final rest HEAD is the target; the branch commits that proved
+    # steps 2/3/5 live on the recorded work branch.
+    if [[ -n "$boundary_recorded_branch" ]] && git rev-parse -q --verify "refs/heads/$boundary_recorded_branch" >/dev/null 2>&1 \
+       && git merge-base --is-ancestor "$_bsha" "refs/heads/$boundary_recorded_branch" 2>/dev/null; then continue; fi
+    boundary_shas_ok=0
+    break
+  done < <(boundary_get '.sha_at_step // {} | to_entries[] | .value')
+  if [[ "$boundary_shas_ok" -eq 1 ]]; then
+    if [[ -z "$recover_why" ]]; then
+      recover_from=1
+      recover_why="boundary-state.json records step $boundary_recorded_step (${BOUNDARY_STEP_NAMES[$boundary_recorded_step]}) for phase $(boundary_get '.phase // "unknown"') — the previous session ended mid-sequence; continuing it before starting."
+    fi
+  else
+    echo "boundary-state: the record's sha_at_step names commits neither HEAD, the target nor the recorded work branch reaches (an operator moved HEAD?) — discarding the record; recovery uses git's own evidence only." >&2
+    _boundary_write '.step = 0 | .step_name = "idle" | .discarded_at = $now | .discarded_reason = "sha_at_step unreachable from HEAD, the target or the recorded work branch"'
+  fi
+fi
+if [[ -n "$recover_why" ]]; then
+  echo "$recover_why"
+  if [[ -f "$ARTIFACTS_DIR/project-complete.json" ]]; then
+    print_json_summary "$ARTIFACTS_DIR/project-complete.json" || true
+  elif [[ -f "$ARTIFACTS_DIR/phase-approval.json" ]]; then
+    print_json_summary "$ARTIFACTS_DIR/phase-approval.json" || true
+  fi
   # ANY-age approval is deliberate at THIS site (v0.12.3 review): both
   # artifacts stranded together came from one dead session, so pairing them
   # is the likeliest truth — the wrong-phase risk the in-loop site guards
-  # against does not apply to a tree no new iteration has touched. rc
-  # ignored: this path's failure already falls into the loop below.
-  COMPLETION_COMMIT_IN_PROGRESS=1   # spans the stranded-approval commit too (re-review)
-  commit_pending_approval_first || true
+  # against does not apply to a tree no new iteration has touched.
   crc=0
-  commit_from_artifact \
-    "$ARTIFACTS_DIR/project-complete.json" \
-    "chore(workflow): final session work + project completion record" || crc=$?
-  COMPLETION_COMMIT_IN_PROGRESS=0
+  land_boundary "$recover_from" stranded 1 || crc=$?
   if [[ "$crc" -eq 0 || "$crc" -eq 2 ]]; then
-    clear_consumed_batons_at_completion
-    if ensure_squashed_or_block "$([[ "$crc" -eq 0 ]] && echo 1 || echo 0)" completion; then
-      echo "Run finished successfully."
-      exit 0
-    fi
-    if [[ "$BRANCH_INTEGRITY_BLOCKED" -eq 1 ]]; then
-      echo "Stranded completion committed on the work branch but its squash was refused:" >&2
-      print_json_summary "$ARTIFACTS_DIR/phase-blocked.json"
-      exit 2
-    fi
-  fi
-  echo "Stranded completion did not pass the commit gates — entering the loop to fix and re-complete." >&2
-elif artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json"; then
-  # Schedule the existing verify-gated retry path so the first iteration
-  # boundary commits the approval under its own message (wrong-phase risk
-  # none: the artifact IS the phase being committed).
-  echo "Stranded phase-approval.json from a prior session detected — its commit will be retried at the first iteration boundary."
-  PENDING_COMMIT_RETRY="phase-approval"
-fi
-
-# Branch-per-iteration (v0.14.0): catch up a squash the target is still owed
-# (refused last session, or an approval that landed via a wrap-up/strand
-# commit). Verify-gated here, since that tree may never have been verified.
-# A refused squash is a blocked verdict at zero token cost; a red verify
-# gate is NOT — the session that follows is exactly what fixes it. When the
-# record caught up is the COMPLETION, the run is finished right here: entering
-# the loop would delete project-complete.json and spend a session on a
-# complete project (v0.14.0 review, MAJOR-2).
-if [[ -z "$PENDING_COMMIT_RETRY" ]] && squash_pending; then
-  completion_owed=0
-  if git rev-parse -q --verify "HEAD:artifacts/project-complete.json" >/dev/null 2>&1; then
-    completion_owed=1
-  fi
-  if ensure_squashed_or_block 0; then
-    if [[ "$completion_owed" -eq 1 ]]; then
-      rest_on_target
+    if boundary_final && [[ -f "$ARTIFACTS_DIR/project-complete.json" ]] \
+       && ! artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then
+      # The recovered boundary was the project's last: entering the loop
+      # would delete project-complete.json and spend a session on a complete
+      # project (v0.14.0 review, MAJOR-2).
       echo "Run finished successfully."
       exit 0
     fi
   elif [[ "$BRANCH_INTEGRITY_BLOCKED" -eq 1 ]]; then
     echo "Stopping: the work branch cannot be squashed onto $SQUASH_TARGET (see artifacts/phase-blocked.json)." >&2
+    print_json_summary "$ARTIFACTS_DIR/phase-blocked.json"
     exit 2
+  else
+    if artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json"; then
+      # Keep the retry marker so the first boundary commits it under its own
+      # message even if the model never re-touches the artifact.
+      PENDING_COMMIT_RETRY="phase-approval"
+      echo "Stranded phase-approval.json did not pass the commit gates — its commit will be retried at the first iteration boundary." >&2
+    fi
+    if artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then
+      echo "Stranded completion did not pass the commit gates — entering the loop to fix and re-complete." >&2
+    elif ! artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json"; then
+      echo "boundary-state: the sequence could not finish (see above) — entering the loop; the next boundary retries it." >&2
+    fi
   fi
 fi
 
@@ -2140,6 +2878,7 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   # One verdict retry per iteration (see the backstop below).
   verdict_retry_used=0
   cleanup_artifacts
+  boundary_begin "$iteration"
   touch "$ITER_START_MARKER"
   # Dead-man baton: overwritten here every iteration, removed by the EXIT
   # trap when the iteration concludes with a verdict, and left behind by a
@@ -2247,40 +2986,27 @@ VERDICT_RETRY_EOF
     # FRESH approvals only at this site (v0.12.3, review MAJOR): a STALE
     # uncommitted approval reaching this gate would sweep THIS iteration's
     # completion work under the old phase's message — the mislabeling class
-    # the stranded-at-start elif's verify-gated retry exists to prevent.
-    # Fresh = written this iteration, or the pending-retry marker names it
-    # (the staged work belongs to that phase, so its message is right —
-    # the same two conditions the phase-commit branch below trusts).
-    apcrc=0
-    COMPLETION_COMMIT_IN_PROGRESS=1   # the whole completion block: stranded-approval commit + completion commit (re-review)
+    # the stranded-at-start site's any-age pairing is exempt from. Fresh =
+    # written this iteration, or the pending-retry marker names it (the
+    # staged work belongs to that phase, so its message is right — the same
+    # two conditions the phase-commit branch below trusts). v0.14.5: the
+    # sequence itself is land_boundary's — the phase commit under its own
+    # message first (commit_pending_approval_first, step 2; a red one stops
+    # the sequence there, so the same red tree is never verified twice), then
+    # the completion commit (step 3), the squash, the merge-back, the rest.
+    approval_fresh=0
     if artifact_written_this_iteration "$ARTIFACTS_DIR/phase-approval.json" \
        || [[ "$PENDING_COMMIT_RETRY" == "phase-approval" ]]; then
-      commit_pending_approval_first || apcrc=$?
+      approval_fresh=1
     fi
     crc=0
-    if [[ "$apcrc" -eq 1 ]]; then
-      # The tree is verify-red from the phase commit attempt; re-running the
-      # completion commit now would re-verify the same red tree (double
-      # spend, double breaker count). Take the same re-loop path a failed
-      # completion commit takes.
-      crc=1
-    else
-      commit_from_artifact \
-        "$ARTIFACTS_DIR/project-complete.json" \
-        "chore(workflow): final session work + project completion record" || crc=$?
-      COMPLETION_COMMIT_IN_PROGRESS=0
-    fi
+    land_boundary 1 completion "$approval_fresh" || crc=$?
     if [[ "$crc" -eq 0 || "$crc" -eq 2 ]]; then
-      clear_consumed_batons_at_completion
       # 0 = final work committed; 2 = nothing substantive left (already
-      # committed) — both are a clean finish, once the target carries it
-      # (branch-per-iteration: rc 0 squashed inside the commit path; rc 2
-      # may still owe the target a squash, verify-gated there).
-      if ensure_squashed_or_block "$([[ "$crc" -eq 0 ]] && echo 1 || echo 0)" completion; then
-        echo "Run finished successfully."
-        exit 0
-      fi
-      crc=1
+      # committed) — both a clean finish, the target carrying it and HEAD at
+      # rest, or the sequence would not have reached step 7.
+      echo "Run finished successfully."
+      exit 0
     fi
     maybe_escalate_light_commit "$crc"
     # Verify gate failed on the final commit: the completion claim is not
@@ -2313,24 +3039,40 @@ VERDICT_RETRY_EOF
      || [[ "$approval_retry_pending" -eq 1 ]]; then
     echo "Phase approval artifact detected:"
     print_json_summary "$ARTIFACTS_DIR/phase-approval.json"
+    # v0.14.5: the whole landing sequence is land_boundary's — the commit
+    # under the approval's own message, the squash, the merge-back, the
+    # record. any_age=1: this site established freshness above.
     crc=0
-    commit_from_artifact \
-      "$ARTIFACTS_DIR/phase-approval.json" \
-      "chore(workflow): approve completed phase" || crc=$?
-    if [[ "$crc" -eq 0 ]]; then
+    land_boundary 1 iteration 1 || crc=$?
+    if [[ "$crc" -eq 0 || "$crc" -eq 2 ]]; then
       PENDING_COMMIT_RETRY=""
+      if boundary_final && [[ -f "$ARTIFACTS_DIR/project-complete.json" ]] \
+         && ! artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then
+        # The approval carried final_phase: true — the completion record was
+        # written, committed and squashed inside this landing (step 3), so
+        # the project is done here with no further model turn
+        # (2026-09-08 06:22: the turn that never came).
+        echo "Run finished successfully."
+        exit 0
+      fi
+      if [[ "$crc" -eq 2 && -f "$ARTIFACTS_DIR/phase-blocked.json" ]]; then
+        # Nothing substantive to commit AND the session declared itself
+        # blocked — stop cleanly rather than spin (unchanged from v0.6.x).
+        echo "Phase blocked; no substantive change to commit:"
+        print_json_summary "$ARTIFACTS_DIR/phase-blocked.json"
+        exit 2
+      fi
       iteration=$((iteration + 1))
       continue
     fi
     maybe_escalate_light_commit "$crc"
     # No commit was made: either the verify gate failed (rc 1 — mark the
     # approval for a commit retry next iteration, even if the model forgets to
-    # re-touch it after fixing), or there was no substantive change to commit
-    # (rc 2, only logs/transient signals). In both cases, if
-    # phase-blocked.json is present the iteration is genuinely blocked — stop
-    # cleanly rather than spinning to MAX_ITERATIONS or committing churn.
-    # Otherwise re-enter so Claude can make progress (or fix a verify failure)
-    # on the next iteration.
+    # re-touch it after fixing), or a gate refused it. If phase-blocked.json
+    # is present the iteration is genuinely blocked — stop cleanly rather
+    # than spinning to MAX_ITERATIONS or committing churn. Otherwise re-enter
+    # so Claude can make progress (or fix a verify failure) on the next
+    # iteration.
     if [[ "$crc" -eq 1 ]]; then
       PENDING_COMMIT_RETRY="phase-approval"
     else
@@ -2377,6 +3119,31 @@ VERDICT_RETRY_EOF
     fi
     echo "Stopping because external input is required."
     exit 2
+  fi
+
+  # v0.14.5: the session wrote nothing because there IS no next phase — the
+  # landed approval names the final one and no completion record exists
+  # (2026-09-08 06:22, in-session shape). Record the completion, on a CLEAN
+  # tree only: unclaimed work is the no-verdict backstop's business above,
+  # never a completion sweep's.
+  if approval_final_unrecorded && [[ -z "$(git status --porcelain 2>/dev/null)" ]]; then
+    echo "boundary-state: the landed approval names the final phase and the session wrote no artifact (no next phase) — recording the completion."
+    crc=0
+    land_boundary 1 completion 1 || crc=$?
+    if [[ "$crc" -eq 0 || "$crc" -eq 2 ]] && [[ -f "$ARTIFACTS_DIR/project-complete.json" ]] \
+       && ! artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then
+      echo "Run finished successfully."
+      exit 0
+    fi
+    maybe_escalate_light_commit "$crc"
+    if [[ -f "$ARTIFACTS_DIR/phase-blocked.json" ]]; then
+      echo "Final commit blocked; completion not committed:"
+      print_json_summary "$ARTIFACTS_DIR/phase-blocked.json"
+      exit 2
+    fi
+    echo "Final commit failed verify — re-entering loop to fix before completing." >&2
+    iteration=$((iteration + 1))
+    continue
   fi
 
   echo "No expected artifact found in $ARTIFACTS_DIR"
