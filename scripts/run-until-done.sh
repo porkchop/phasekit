@@ -1082,6 +1082,21 @@ PY
   return 0
 }
 
+# Stranded-artifact recovery (v0.6.3). v0.6.0's atomicity gate correctly
+# refuses to let a stale phase-approval.json drive a commit — but a session
+# killed AFTER the artifact write and BEFORE its commit leaves the approval
+# stranded: later sessions see approved-artifact + finished work, re-validate
+# it (verify green!), end without rewriting the artifact, and the loop exits 1
+# uncommitted. Five sessions burned that way on 2026-08-11 before the
+# quiet-stall guard fired. Recover mechanically — never depend on the model
+# noticing. The stranded signature is git's, not mtime's (clones and rsync
+# skew mtimes): an artifact with uncommitted changes IS an approval/completion
+# that never got its commit; a landed one is clean in git status.
+artifact_never_landed() {
+  [[ -f "$1" ]] || return 1
+  [[ -n "$(git status --porcelain --ignored=matching -- "$1" 2>/dev/null)" ]]
+}
+
 commit_from_artifact() {
   local file="$1"
   local fallback_msg="$2"
@@ -1170,6 +1185,34 @@ commit_from_artifact() {
     fi
   fi
   auto_push_if_enabled
+}
+
+# v0.12.2: a phase approval that never landed must commit under its OWN
+# message before any completion sweep. Twice now (xmeo iteration 28 phase-74,
+# iteration 9 phase-25) a whole phase's substantive work shipped inside the
+# generic completion chore commit — approval and completion written in the
+# same iteration, and the completion branch runs first, so the approval's
+# suggested_commit_message sat unused while its work rode an unlabeled sweep.
+# rc semantics (v0.12.3): the phase commit sweeps the whole tree (completion
+# record included — the boundary is NAMED, which is the property this buys;
+# the resting predicate reads the committed record, not the message), so the
+# completion commit that follows typically finds nothing (rc 2 = clean
+# finish). The helper RETURNS commit_from_artifact's rc and gates nothing
+# itself — each call site decides: the in-loop gate short-circuits its
+# completion attempt on rc 1 (the tree is verify-red; a second full-tier run
+# on the same red tree would double the spend AND double-count the
+# VERIFY_MAX_ATTEMPTS breaker at exactly the boundary where verify is most
+# expensive), while the stranded-at-start site ignores the rc (`|| true`)
+# because its failure path already falls into the loop.
+commit_pending_approval_first() {
+  artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json" || return 0
+  echo "Unlanded phase approval detected before completion — committing the phase under its own message first."
+  print_json_summary "$ARTIFACTS_DIR/phase-approval.json"
+  local acrc=0
+  commit_from_artifact \
+    "$ARTIFACTS_DIR/phase-approval.json" \
+    "chore(workflow): approve completed phase" || acrc=$?
+  return "$acrc"
 }
 
 artifact_written_this_iteration() {
@@ -2682,49 +2725,6 @@ if ! ensure_work_branch; then
   exit 2
 fi
 heal_tracked_transients || true
-
-# Stranded-artifact recovery (v0.6.3). v0.6.0's atomicity gate correctly
-# refuses to let a stale phase-approval.json drive a commit — but a session
-# killed AFTER the artifact write and BEFORE its commit leaves the approval
-# stranded: later sessions see approved-artifact + finished work, re-validate
-# it (verify green!), end without rewriting the artifact, and the loop exits 1
-# uncommitted. Five sessions burned that way on 2026-08-11 before the
-# quiet-stall guard fired. Recover mechanically — never depend on the model
-# noticing. The stranded signature is git's, not mtime's (clones and rsync
-# skew mtimes): an artifact with uncommitted changes IS an approval/completion
-# that never got its commit; a landed one is clean in git status.
-artifact_never_landed() {
-  [[ -f "$1" ]] || return 1
-  [[ -n "$(git status --porcelain --ignored=matching -- "$1" 2>/dev/null)" ]]
-}
-
-# v0.12.2: a phase approval that never landed must commit under its OWN
-# message before any completion sweep. Twice now (xmeo iteration 28 phase-74,
-# iteration 9 phase-25) a whole phase's substantive work shipped inside the
-# generic completion chore commit — approval and completion written in the
-# same iteration, and the completion branch runs first, so the approval's
-# suggested_commit_message sat unused while its work rode an unlabeled sweep.
-# rc semantics (v0.12.3): the phase commit sweeps the whole tree (completion
-# record included — the boundary is NAMED, which is the property this buys;
-# the resting predicate reads the committed record, not the message), so the
-# completion commit that follows typically finds nothing (rc 2 = clean
-# finish). The helper RETURNS commit_from_artifact's rc and gates nothing
-# itself — each call site decides: the in-loop gate short-circuits its
-# completion attempt on rc 1 (the tree is verify-red; a second full-tier run
-# on the same red tree would double the spend AND double-count the
-# VERIFY_MAX_ATTEMPTS breaker at exactly the boundary where verify is most
-# expensive), while the stranded-at-start site ignores the rc (`|| true`)
-# because its failure path already falls into the loop.
-commit_pending_approval_first() {
-  artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json" || return 0
-  echo "Unlanded phase approval detected before completion — committing the phase under its own message first."
-  print_json_summary "$ARTIFACTS_DIR/phase-approval.json"
-  local acrc=0
-  commit_from_artifact \
-    "$ARTIFACTS_DIR/phase-approval.json" \
-    "chore(workflow): approve completed phase" || acrc=$?
-  return "$acrc"
-}
 
 # --- Boundary recovery at loop start (v0.14.5) --------------------------------
 # One question, answered before any model turn: is a boundary open? Git and

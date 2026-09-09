@@ -377,6 +377,11 @@ def build_case(entry, mode, final_kind, k, probe_phase, red):
             time.sleep(0.2)
         if not (log.exists() and "last-resort commit landed" in log.read_text()):
             raise AssertionError(f"the watchdog never landed its commit:\n{log.read_text() if log.exists() else '(no log)'}")
+        if "command not found" in log.read_text():
+            # v0.14.6 (review MINOR-4): the one dynamic, real-fork guard — a
+            # helper the forked watchdog cannot see (defined after the arm
+            # site; run 682) shows up here, whatever the static pin thinks.
+            raise AssertionError(f"the forked watchdog could not see a helper:\n{log.read_text()}")
         return repo, 3
     if entry in ("wrapup", "pacing"):
         # v0.14.2 shape: the approval's commit is RED at the boundary, the
@@ -627,10 +632,13 @@ class KillPointMatrix(unittest.TestCase):
 STUBS = '''
 squash_mode() { [[ -n "${SQUASH_TARGET:-}" ]]; }
 current_branch() { git symbolic-ref -q --short HEAD 2>/dev/null || echo HEAD; }
-artifact_never_landed() { [[ -f "$1" ]] || return 1; [[ -n "$(git status --porcelain --ignored=matching -- "$1" 2>/dev/null)" ]]; }
 squash_pending() { return 1; }
 artifact_written_this_iteration() { return 1; }
 '''
+# v0.14.6: artifact_never_landed is the SHIPPED definition, never a stub — a
+# stub here (and a `command -v`-skipped block in test_deadline_watchdog.py)
+# masked the fork-visibility defect of run 682 from all 550 tests.
+STUBS += _extract_block(r"^artifact_never_landed\(\) \{", r"^\}") + "\n}\n"
 
 
 class Primitives(unittest.TestCase):

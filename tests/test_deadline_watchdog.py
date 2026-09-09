@@ -134,6 +134,13 @@ class LastResortCommit(unittest.TestCase):
         # set -e matches production (the watchdog subshell inherits the
         # loop's set -euo pipefail) — review finding 8: a harness without -e
         # would pass a future early-exit regression this suite must catch.
+        #
+        # Deliberately narrow (v0.14.6): this prelude carries only the v0.13.x
+        # primitives, so the v0.14.5 deferral-keying block is skipped by its
+        # own `command -v normalize_deferral_keys` guard here — which is why
+        # these tests never saw run 682's `artifact_never_landed: command not
+        # found`. The block runs for real, with exactly the function set the
+        # fork inherits, in LastResortCommitAsTheForkSeesIt below.
         script = "\n".join(
             [
                 "set -euo pipefail",
@@ -351,6 +358,218 @@ class WatchdogWiring(unittest.TestCase):
     def test_the_sentinel_touch_is_idempotent_with_the_supervisors(self):
         arm_fn = _extract(r"^arm_deadline_watchdog\(\) \{", r"^\}")
         self.assertIn('[[ ! -f "$WRAPUP_SENTINEL" ]]', arm_fn)
+
+
+# ---------------------------------------------------------------------------
+# v0.14.6: every function the watchdog fork reaches is defined before the fork
+# ---------------------------------------------------------------------------
+#
+# The incident (foundry-orchestrator run 682, 2026-09-09 01:02 UTC): the
+# watchdog is forked as a background subshell at the TOP-LEVEL
+# arm_deadline_watchdog call, and a bash function is visible inside that fork
+# only if its definition was parsed before the fork. v0.14.5's kill path
+# called artifact_never_landed, defined ~50 lines AFTER the arm site —
+# `line 2044: artifact_never_landed: command not found`, twice, in
+# deadline-watchdog.log — so the clause that keys the deferrals of a swept
+# approval was dead in exactly the path it was written for. The harnesses
+# above never saw it: LastResortCommit's prelude does not define
+# normalize_deferral_keys, so the `command -v` guard skips the whole block,
+# and tests/test_boundary_state.py's STUBS re-defined the helper.
+#
+# The pin is by construction, not by list: parse the shipped script, find the
+# top-level arm line, walk the transitive call graph from the subshell body
+# (function names referenced in each reached body, comments stripped), and
+# assert every reached definition precedes the arm line. It reports the
+# offending names and lines. Red on v0.14.5 — artifact_never_landed at 2696
+# against the arm at 2641 (the ONLY late definition the fork's graph reaches;
+# commit_pending_approval_first, 2718, is reachable solely through boundary_do,
+# which the kill path never calls — it moved with its neighbour all the same)
+# — and green on the fix.
+
+FUNC_DEF_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\(\) *\{")
+
+
+def _strip_comments(text):
+    out = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        out.append(re.sub(r"(^|\s)#.*$", r"\1", line))
+    return "\n".join(out)
+
+
+def function_index(source):
+    """name -> (definition line, 1-based; the text through its closing brace).
+
+    Top-level `name() {` … `}` only, the delimiters _extract uses; a nested
+    helper (the fork's own _sleep_until) belongs to its parent's body.
+    """
+    lines = source.splitlines()
+    funcs, i = {}, 0
+    while i < len(lines):
+        m = FUNC_DEF_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(lines) and lines[j] != "}":
+            j += 1
+        funcs[m.group(1)] = (i + 1, "\n".join(lines[i:j + 1]))
+        i = j + 1
+    return funcs
+
+
+def top_level_call_line(source, funcs, name):
+    """Line of the first call to `name` that sits outside every function body."""
+    spans = [(start, start + body.count("\n")) for start, body in funcs.values()]
+    for n, line in enumerate(source.splitlines(), 1):
+        if re.match(rf"^\s*{re.escape(name)}\b", line) and not any(a <= n <= b for a, b in spans):
+            return n
+    raise AssertionError(f"no top-level call to {name} in the loop")
+
+
+def watchdog_fork_body(funcs):
+    """The `( … ) >>…deadline-watchdog.log 2>&1 </dev/null &` subshell."""
+    assert "arm_deadline_watchdog" in funcs, (
+        "arm_deadline_watchdog is not indexed as a top-level `name() {` … `}` definition")
+    body = funcs["arm_deadline_watchdog"][1].splitlines()
+    open_at = body.index("  (")
+    close_at = next(i for i, line in enumerate(body) if line.startswith("  ) >>"))
+    return "\n".join(body[open_at + 1:close_at])
+
+
+def reached_functions(root_text, funcs):
+    seen, todo = set(), [root_text]
+    while todo:
+        text = _strip_comments(todo.pop())
+        for tok in set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", text)):
+            if tok in funcs and tok not in seen:
+                seen.add(tok)
+                todo.append(funcs[tok][1])
+    return seen
+
+
+def fork_visibility(source):
+    """(arm line, reached function names, [(name, definition line)] defined
+    AFTER the arm line — the ones the fork cannot see)."""
+    funcs = function_index(source)
+    arm = top_level_call_line(source, funcs, "arm_deadline_watchdog")
+    reached = reached_functions(watchdog_fork_body(funcs), funcs)
+    late = sorted((name, funcs[name][0]) for name in reached if funcs[name][0] > arm)
+    return arm, reached, late
+
+
+def definitions_before_arm(source):
+    """Every top-level function definition that precedes the arm line, in
+    file order — exactly the function set the fork inherits, and nothing the
+    main line executes."""
+    funcs = function_index(source)
+    arm = top_level_call_line(source, funcs, "arm_deadline_watchdog")
+    return "\n".join(body for start, body in sorted(funcs.values()) if start < arm)
+
+
+class ForkVisibility(unittest.TestCase):
+    """The call-graph pin (v0.14.6)."""
+
+    def test_every_function_the_watchdog_fork_reaches_is_defined_before_the_fork(self):
+        arm, _reached, late = fork_visibility(SOURCE)
+        self.assertEqual(
+            late, [],
+            "defined AFTER the top-level arm_deadline_watchdog call (line %d), so the "
+            "forked watchdog cannot see them — `command not found` on the kill path: %s"
+            % (arm, ", ".join(f"{n} (line {ln})" for n, ln in late)),
+        )
+
+    def test_the_parser_indexes_every_definition(self):
+        # Review MINOR-2 (v0.14.6): function_index understands exactly the
+        # `name() {` … `}` shape. A definition in any other shape (`function
+        # name {`, `name () {`, a one-line `name() { …; }`) or a heredoc with
+        # a column-0 `}` would be swallowed silently and the walk would go
+        # GREEN past a real late definition — so the counts must agree, and
+        # a future edit in another shape turns into a loud red here.
+        # Column-0 definitions only: an INDENTED definition is a nested helper
+        # (the fork's own _sleep_until, _boundary_write's _boundary_write_locked)
+        # whose text is part of its parent's body and is walked with it.
+        indexed = len(function_index(SOURCE))
+        def_shaped = len(re.findall(r"^(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)\s*\{", SOURCE, re.M))
+        bare_close = len(re.findall(r"^\}$", SOURCE, re.M))
+        self.assertEqual((indexed, def_shaped, bare_close), (indexed, indexed, indexed),
+                         "a function definition the pin's parser cannot index (indexed, "
+                         "definition-shaped lines, bare closing braces)")
+        self.assertGreater(indexed, 50)
+
+    def test_the_walk_reaches_the_kill_path(self):
+        # Not vacuous: the graph from the subshell body must contain the
+        # last-resort commit and everything v0.14.5's clause depends on.
+        _arm, reached, _late = fork_visibility(SOURCE)
+        for name in ("deadline_lastresort_commit", "artifact_never_landed", "normalize_deferral_keys",
+                     "boundary_mark_killed", "_disarm_deploy_artifact", "unstage_transient_adds"):
+            self.assertIn(name, reached)
+
+    def test_the_pin_names_a_late_definition(self):
+        synthetic = "\n".join([
+            "early_helper() {", "  :", "}",
+            "arm_deadline_watchdog() {",
+            "  early_helper",
+            "  (",
+            "    # late_helper mentioned in a comment does not count",
+            "    late_helper   # trailing comment",
+            "  ) >>\"$log\" 2>&1 </dev/null &",
+            "}",
+            'arm_deadline_watchdog "$deadline"',
+            "late_helper() {", "  early_helper", "  :", "}",
+            "",
+        ])
+        arm, reached, late = fork_visibility(synthetic)
+        self.assertEqual(arm, 11)
+        self.assertEqual(late, [("late_helper", 12)])
+        self.assertIn("early_helper", reached, "reached through the late helper's body")
+
+
+class LastResortCommitAsTheForkSeesIt(unittest.TestCase):
+    """The live shape (v0.14.6): the last-resort path run with exactly the
+    function set the fork inherits — every definition that precedes the arm
+    line, no stubs, no `command -v` escape — against an unlanded approval
+    whose deferral has no key. Red on v0.14.5 (`artifact_never_landed:
+    command not found`, the approval commits keyless); green on the fix."""
+
+    def setUp(self):
+        LastResortCommit.setUp(self)
+        self.tearDown = lambda: LastResortCommit.tearDown(self)
+
+    def _run_as_fork(self, source=SOURCE):
+        script = "\n".join([
+            "set -euo pipefail",
+            f'ROOT_DIR="{self.dir}"',
+            f'ARTIFACTS_DIR="{self.artifacts}"',
+            f'WRAPUP_SENTINEL="{self.artifacts}/wrapup-requested"',
+            f'BOUNDARY_STATE_FILE="{self.artifacts}/boundary-state.json"',
+            TRANSIENTS_ARR,
+            definitions_before_arm(source),
+            "deadline_lastresort_commit kill",
+        ])
+        return _bash(script, cwd=self.dir)
+
+    def test_a_keyless_deferral_on_an_unlanded_approval_is_keyed_through_the_kill_path(self):
+        (self.root / "src.txt").write_text("v1\n")
+        LastResortCommit._commit_all(self, "base")
+        (self.root / "src.txt").write_text("v2 in progress\n")
+        (self.artifacts / "phase-approval.json").write_text(json.dumps({
+            "phase": "phase-3", "approved": True,
+            "suggested_commit_message": "feat: phase 3",
+            "deferrals": [{"item": "Polish the lobby animation timing later on",
+                           "reason": "out of this session's bound",
+                           "suggested_task": "a light follow-up"}],
+        }) + "\n")
+        r = self._run_as_fork()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("command not found", r.stderr)
+        self.assertIn("last-resort", LastResortCommit._git(self, "log", "-1", "--format=%s"))
+        committed = json.loads(LastResortCommit._git(self, "show", "HEAD:artifacts/phase-approval.json"))
+        self.assertEqual(committed["deferrals"][0]["key"], "polish-the-lobby-animation-timing-later")
+        self.assertEqual(committed["deferrals"][0]["key_derived"], "slug")
+        on_disk = json.loads((self.artifacts / "phase-approval.json").read_text())
+        self.assertEqual(on_disk["deferrals"][0]["key"], "polish-the-lobby-animation-timing-later")
 
 
 if __name__ == "__main__":

@@ -264,7 +264,11 @@ walk at the last proven step with `phase-verify-failed.json` on disk; a
 refused squash stops it with `phase-blocked.json` (branch-integrity) — never
 dirty-and-silent. The deadline watchdog and the wrap-up fall-through record
 `killed_after` (the step observed at the kill) so the next session's first
-line says where the sequence stood.
+line says where the sequence stood. Every function the watchdog fork reaches
+is defined before the fork — the watchdog is a background subshell armed
+before the first model turn, and a helper defined after the arm site is
+`command not found` on the kill path (run 682, 2026-09-09) — pinned by
+construction in `tests/test_deadline_watchdog.py` (`ForkVisibility`, v0.14.6).
 
 Fields a supervisor reads (pinned in `contracts/interface.json`): `step`,
 `step_name`, `final`, `phase`, `iteration`, `sha_at_step` (`"2"`/`"3"`/`"5"`/`"7"`
