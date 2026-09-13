@@ -820,6 +820,29 @@ PHASEKIT_VERIFY_MEMO_TTL_SECONDS=0 verify_memo_hit T fast l c; echo "never-expir
         self.assertIn("phase-9", rec["suggested_commit_message"])
         self.assertNotIn("ts", rec)
 
+    # v0.14.7 (orchestrator #655, iteration 122): the record step 3 leaves must
+    # claim the iteration the approval names, else a supervisor reads it as
+    # claiming nothing (completed_at null; the consumer's own commit gate red
+    # on the commit this step was landing). Red on v0.14.6: KeyError 'iteration'.
+    def test_synthesized_completion_carries_the_approvals_iteration_verbatim(self):
+        (self.artifacts / "phase-approval.json").write_text(json.dumps({
+            "phase": "phase-275", "summary": "shipped", "final_phase": True,
+            "iteration": "iteration-122"}))
+        r = self.bash('_boundary_synthesize_completion; echo "rc=$?"')
+        self.assertIn("rc=0", r.stdout, r.stderr)
+        rec = json.loads((self.artifacts / "project-complete.json").read_text())
+        self.assertEqual(rec["iteration"], "iteration-122")
+        self.assertIn("boundary-state step 3", rec["recorded_by"])
+
+    def test_synthesized_completion_without_an_iteration_carries_null_never_a_missing_key(self):
+        (self.artifacts / "phase-approval.json").write_text(json.dumps({
+            "phase": "phase-9", "summary": "last one", "final_phase": True}))
+        r = self.bash('_boundary_synthesize_completion; echo "rc=$?"')
+        self.assertIn("rc=0", r.stdout, r.stderr)
+        rec = json.loads((self.artifacts / "project-complete.json").read_text())
+        self.assertIn("iteration", rec)
+        self.assertIsNone(rec["iteration"])
+
 
 VERIFY_BAD = """#!/usr/bin/env bash
 PHASEKIT_VERIFY_CONFIGURED=1

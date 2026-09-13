@@ -269,6 +269,16 @@ is defined before the fork — the watchdog is a background subshell armed
 before the first model turn, and a helper defined after the arm site is
 `command not found` on the kill path (run 682, 2026-09-09) — pinned by
 construction in `tests/test_deadline_watchdog.py` (`ForkVisibility`, v0.14.6).
+v0.14.7: the record step 3 synthesizes carries `iteration` verbatim from the
+approval (`null` when the approval names none — the key is always present), and
+the watchdog's last-resort commit no longer deletes a session-authored
+`project-complete.json` that HEAD does not yet carry — "restore to HEAD" of a
+record HEAD lacks was a deletion; it now stays on disk (when it parses — a torn
+file from an interrupted writer is still deleted), uncommitted, exactly as
+the never-landed verdict the next loop start's recovery looks for first
+(orchestrator iteration 122, three kills, three erased records). An untracked
+`ready-to-deploy.json` is still deleted: it is a deploy claim no landing step
+owns, and an unverified one must not survive into a later commit.
 
 Fields a supervisor reads (pinned in `contracts/interface.json`): `step`,
 `step_name`, `final`, `phase`, `iteration`, `sha_at_step` (`"2"`/`"3"`/`"5"`/`"7"`

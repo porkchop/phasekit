@@ -13,9 +13,11 @@ The mechanism under test, both phases plus the lead math:
   1. compute_wrapup_lead: 15% of span clamped to [300, 900]; explicit env
      override wins; a span too short for its lead gets half the span.
   2. deadline_lastresort_commit: on a dirty tree it restores the
-     deploy-arming artifacts to HEAD (delete where untracked), refreshes the
-     dead-man baton from outside the loop process, and commits --no-verify
-     with transients unstaged; on a clean tree it does nothing.
+     deploy-arming artifacts to HEAD (delete an untracked ready-to-deploy.json;
+     v0.14.7: an untracked project-complete.json is kept on disk, unstaged —
+     never deleted, never committed), refreshes the dead-man baton from
+     outside the loop process, and commits --no-verify with transients
+     unstaged; on a clean tree it does nothing.
 
 The bash is exercised for real: the functions are extracted from
 scripts/run-until-done.sh by their own delimiters and run in a scratch git
@@ -203,17 +205,80 @@ class LastResortCommit(unittest.TestCase):
         self.assertIn("old", rtd.read_text())
         self.assertNotIn("doomed", self._git("show", "HEAD:artifacts/ready-to-deploy.json"))
 
-    def test_an_untracked_project_complete_is_deleted_not_committed(self):
+    # v0.14.7 (orchestrator #658, iteration 122): "restore to HEAD" of a path
+    # HEAD does not carry was `rm -f` — the watchdog deleted the completion
+    # record the ship session had just written, three kills in a row. The
+    # record now stays on disk as written (deferral keys normalized as at any
+    # landing — this record has none, so byte-for-byte), and still never rides the
+    # --no-verify wip (a committed completion reads as "complete" to a
+    # supervisor inferring from git; the next loop start's recovery lands the
+    # never-landed record verify-gated instead). Red on v0.14.6: the file is
+    # gone after the commit.
+    def test_an_untracked_project_complete_is_kept_on_disk_byte_for_byte_and_never_committed(self):
         (self.root / "src.txt").write_text("v1\n")
         self._commit_all("base")
-        (self.artifacts / "project-complete.json").write_text('{"complete": true}\n')
+        record = '{"done": true, "iteration": "iteration-122", "summary": "the session wrote this"}\n'
+        (self.artifacts / "project-complete.json").write_text(record)
         (self.root / "src.txt").write_text("v2\n")
         r = self._run_lastresort()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertFalse((self.artifacts / "project-complete.json").exists())
+        self.assertEqual((self.artifacts / "project-complete.json").read_text(), record)
+        self.assertIn("last-resort", self._git("log", "-1", "--format=%s"))
+        self.assertEqual(self._git("show", "HEAD:src.txt"), "v2\n")
         self.assertNotIn(
             "project-complete", self._git("ls-tree", "-r", "--name-only", "HEAD")
         )
+        # Untracked and unstaged: exactly the never-landed shape the loop
+        # start's boundary recovery looks for first.
+        self.assertIn("?? artifacts/project-complete.json",
+                      self._git("status", "--porcelain", "--untracked-files=all"))
+
+    def test_a_torn_untracked_project_complete_is_still_deleted(self):
+        # v0.14.7 review MAJOR-1: a writer the kill interrupted leaves an
+        # empty or truncated file; kept, it would land at the next start as a
+        # silent false completion. Not a record — deleted as before.
+        for torn in ("", '{"done": tr'):
+            with self.subTest(torn=torn):
+                LastResortCommit.tearDown(self); LastResortCommit.setUp(self)
+                (self.root / "src.txt").write_text("v1\n")
+                self._commit_all("base")
+                (self.artifacts / "project-complete.json").write_text(torn)
+                (self.root / "src.txt").write_text("v2\n")
+                r = self._run_lastresort()
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertFalse((self.artifacts / "project-complete.json").exists())
+                self.assertIn("last-resort", self._git("log", "-1", "--format=%s"))
+                self.assertNotIn("project-complete", self._git("ls-tree", "-r", "--name-only", "HEAD"))
+
+    def test_an_untracked_ready_to_deploy_is_still_deleted_not_committed(self):
+        # The deploy CLAIM keeps the v0.13.0 rule: no landing step owns it, so
+        # an unverified first-ever claim must not survive to a later commit's
+        # `git add -A` (v0.14.2 wrap-up review; pinned end-to-end in
+        # test_run_until_done_v060's fall-through test).
+        (self.root / "src.txt").write_text("v1\n")
+        self._commit_all("base")
+        (self.artifacts / "ready-to-deploy.json").write_text('{"deploy_ready": true, "iteration": "first-ever"}\n')
+        (self.root / "src.txt").write_text("v2\n")
+        r = self._run_lastresort()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse((self.artifacts / "ready-to-deploy.json").exists())
+        self.assertIn("last-resort", self._git("log", "-1", "--format=%s"))
+        self.assertNotIn(
+            "ready-to-deploy", self._git("ls-tree", "-r", "--name-only", "HEAD")
+        )
+
+    def test_a_tracked_dirty_project_complete_is_still_restored_to_head(self):
+        # The v0.13.x behaviour for a path HEAD carries is unchanged.
+        rec = self.artifacts / "project-complete.json"
+        rec.write_text('{"done": true, "iteration": "iteration-121"}\n')
+        (self.root / "src.txt").write_text("v1\n")
+        self._commit_all("base")
+        rec.write_text('{"done": true, "iteration": "iteration-122-unverified"}\n')
+        (self.root / "src.txt").write_text("v2\n")
+        r = self._run_lastresort()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("iteration-121", rec.read_text())
+        self.assertNotIn("unverified", self._git("show", "HEAD:artifacts/project-complete.json"))
 
     def test_transient_signals_are_not_swept_into_the_commit(self):
         (self.root / "src.txt").write_text("v1\n")
@@ -570,6 +635,32 @@ class LastResortCommitAsTheForkSeesIt(unittest.TestCase):
         self.assertEqual(committed["deferrals"][0]["key_derived"], "slug")
         on_disk = json.loads((self.artifacts / "phase-approval.json").read_text())
         self.assertEqual(on_disk["deferrals"][0]["key"], "polish-the-lobby-animation-timing-later")
+
+    def test_a_session_authored_completion_record_survives_the_kill_path(self):
+        # v0.14.7, the live shape of orchestrator #658: the approval landed,
+        # the ship session wrote its own completion record (naming the
+        # iteration), the deadline kill came before the completion commit.
+        # Run with exactly the function set the fork inherits.
+        (self.root / "src.txt").write_text("v1\n")
+        (self.artifacts / "phase-approval.json").write_text(json.dumps({
+            "phase": "phase-275", "approved": True, "final_phase": True,
+            "iteration": "iteration-122",
+            "suggested_commit_message": "Phase 275 (APPROVED): closes the iteration"}) + "\n")
+        LastResortCommit._commit_all(self, "Phase 275 (APPROVED): closes the iteration")
+        record = json.dumps({"done": True, "iteration": "iteration-122",
+                             "summary": "the ship phase wrote this",
+                             "suggested_commit_message": "Iteration 122 complete"}) + "\n"
+        (self.artifacts / "project-complete.json").write_text(record)
+        (self.root / "docs.md").write_text("close-out prose in flight\n")
+        r = self._run_as_fork()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("command not found", r.stderr)
+        self.assertIn("last-resort", LastResortCommit._git(self, "log", "-1", "--format=%s"))
+        self.assertEqual((self.artifacts / "project-complete.json").read_text(), record)
+        self.assertNotIn(
+            "project-complete", LastResortCommit._git(self, "ls-tree", "-r", "--name-only", "HEAD"))
+        self.assertIn("?? artifacts/project-complete.json",
+                      LastResortCommit._git(self, "status", "--porcelain", "--untracked-files=all"))
 
 
 if __name__ == "__main__":

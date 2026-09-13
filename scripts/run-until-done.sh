@@ -1703,13 +1703,18 @@ _boundary_synthesize_completion() {
   [[ -f "$ap" ]] || return 1
   # Deterministic on purpose (no wall-clock field): a re-synthesis after a
   # disarm or a cleanup yields the same bytes, so the verify memo can match
-  # the tree it already judged (round-2 F4).
+  # the tree it already judged (round-2 F4). The approval's `iteration` rides
+  # verbatim (v0.14.7, orchestrator #655): a record that names no iteration
+  # claims nothing to a supervisor — completed_at stayed null for every
+  # loop-synthesized completion and the consumer's own commit gate refused
+  # the commit this step was landing. `null` only when the approval has none.
   jq '{
       done: true,
       summary: ("Project complete — final phase " + ((.phase // "unknown") | tostring) + " approved: " + ((.summary // "") | tostring)),
       suggested_commit_message: ("chore(workflow): project completion record (final phase " + ((.phase // "unknown") | tostring) + " approved)"),
       deferrals: (.deferrals // []),
       final_phase: (.phase // "unknown"),
+      iteration: (.iteration // null),
       recorded_by: "phasekit run-until-done.sh — boundary-state step 3 (the approval carried final_phase: true and no completion record existed)"
     }' "$ap" > "$ARTIFACTS_DIR/project-complete.json" 2>/dev/null || return 1
   echo "boundary-state: the approval carries final_phase: true and no completion record exists — recorded artifacts/project-complete.json from it (step 3)."
@@ -1988,7 +1993,11 @@ land_boundary() {
 #     04:09 incident's lesson — the deploy-arming artifacts restored to HEAD
 #     first, so an unverified mid-build ready-to-deploy.json/
 #     project-complete.json can never make the post-kill tree look like a
-#     verified release to a deploy seam. The dead-man baton is refreshed by
+#     verified release to a deploy seam (v0.14.7: a project-complete.json
+#     HEAD does not carry is left on disk, uncommitted, for the next loop
+#     start's verify-gated landing — the watchdog never deletes a record the
+#     session authored; an untracked ready-to-deploy.json is still deleted).
+#     The dead-man baton is refreshed by
 #     this independent process, so a kill path that eats the loop's own EXIT
 #     trap can no longer lose it.
 #
@@ -2046,6 +2055,9 @@ deadline_lastresort_commit() {
   # carries it re-creates the 2026-08-27 04:09 incident (unverified code
   # self-deployed off a strand commit). Re-applied inside every commit attempt
   # below — the session is still alive and can re-arm between restore and add.
+  # Disarm means: restore where HEAD carries the path; where it does not,
+  # delete the deploy claim but keep the completion record on disk, unstaged
+  # (v0.14.7 — the watchdog never deletes a record the session wrote).
   _disarm_deploy_artifact ready-to-deploy.json
   _disarm_deploy_artifact project-complete.json
 
@@ -2060,7 +2072,7 @@ deadline_lastresort_commit() {
        '.note += $tail | .ts = $ts' \
        "$baton" > "$baton.tmp" 2>/dev/null && mv "$baton.tmp" "$baton" 2>/dev/null || rm -f "$baton.tmp" 2>/dev/null || true
   else
-    local next_step="audit the last wip commit as IN-PROGRESS IMPLEMENTATION from a killed session: re-derive what is verified, keep it, finish or revert the rest"
+    local next_step="audit the last wip commit as IN-PROGRESS IMPLEMENTATION from a killed session: re-derive what is verified, keep it, finish or revert the rest; an untracked artifacts/project-complete.json on disk is the session's own completion record — the loop lands it verify-gated at start, do not delete it"
     local note="dead-man baton written by the deadline watchdog (v0.13.0): the loop was killed before it could conclude. Ephemeral: delete after orienting."
     if [[ "$mode" == "wrapup" ]]; then
       next_step="audit the last wip commit as UNVERIFIED work from a session whose verify gate was red at wrap-up; the approval artifact (if any) was left on disk uncommitted for the stranded-artifact recovery to re-verify"
@@ -2142,7 +2154,7 @@ deadline_lastresort_commit() {
       return 0
     fi
     if git commit -q --no-verify \
-      -m "wip: last-resort deadline commit (phasekit deadline watchdog) — ${why}; unverified in-progress work preserved, deploy artifacts restored to HEAD" 2>/dev/null; then
+      -m "wip: last-resort deadline commit (phasekit deadline watchdog) — ${why}; unverified in-progress work preserved, deploy artifacts disarmed (restored to HEAD where tracked; a session-authored project-complete.json HEAD lacks is kept on disk, uncommitted)" 2>/dev/null; then
       if [[ "$mode" == "wrapup" ]]; then
         echo "wrap-up fall-through: last-resort commit landed $(git rev-parse --short HEAD 2>/dev/null) — unverified work preserved on the branch instead of a dirty tree" >&2
       else
@@ -2158,11 +2170,32 @@ deadline_lastresort_commit() {
 
 _disarm_deploy_artifact() {
   # One deploy-arming artifact: restore to HEAD where tracked-and-dirty
-  # (index or worktree), delete where untracked. Aging to the HEAD commit
-  # time happens ONLY on an actual restore (v0.13.1, review finding 7): a
-  # clean, legitimately-armed artifact from a verified commit earlier in the
-  # session keeps its fresh mtime, so a pending deploy the session honestly
-  # earned is not silently swallowed.
+  # (index or worktree); where HEAD does not carry the path, unstage it —
+  # and delete it if it is the deploy CLAIM (ready-to-deploy.json), keep it
+  # as written if it is the completion RECORD (project-complete.json) and it
+  # parses (deferral keys are normalized below, as at any landing).
+  # Aging to the HEAD commit time happens ONLY on an actual restore (v0.13.1,
+  # review finding 7): a clean, legitimately-armed artifact from a verified
+  # commit earlier in the session keeps its fresh mtime, so a pending deploy
+  # the session honestly earned is not silently swallowed.
+  #
+  # Restoring a record HEAD lacks is a deletion, not a restore (v0.14.7,
+  # orchestrator #658): until v0.14.6 the untracked branch was `rm -f` for
+  # both files, and a session-authored project-complete.json — written by
+  # the ship phase, not yet landed when the kill came — was erased by its
+  # own watchdog three times in one iteration (foundry-orchestrator iteration
+  # 122, 2026-09-12/13); boundary step 3 then synthesized the thin record
+  # over the top. Kept on disk and OUT of the wip, the record is a
+  # never-landed verdict artifact, which is the first thing the next loop
+  # start's boundary recovery looks for — landed under the session's own
+  # message, verify-gated (step 3's commit_from_artifact). It must not ride
+  # the wip: a --no-verify commit carrying a completion record reads as
+  # "complete" to a supervisor that infers from git (clean tree, no squash
+  # target). The deploy claim keeps the v0.13.0 rule — no landing step owns
+  # ready-to-deploy.json (the loop never writes it; step 6 only observes),
+  # so an unverified first-ever claim left on disk would ride the next
+  # `git add -A` as a claim nobody re-verified (v0.14.2 wrap-up review:
+  # "an unverified deploy claim must never survive into a later commit").
   local f="$1" ts
   if git cat-file -e "HEAD:artifacts/$f" 2>/dev/null; then
     if ! git diff --quiet HEAD -- "artifacts/$f" 2>/dev/null; then
@@ -2171,7 +2204,16 @@ _disarm_deploy_artifact() {
       [[ -n "$ts" ]] && touch -d "$ts" "$ARTIFACTS_DIR/$f" 2>/dev/null || true
     fi
   else
-    rm -f "$ARTIFACTS_DIR/$f" 2>/dev/null || true
+    # The record is kept only when it parses as a JSON object (v0.14.7
+    # review MAJOR-1): a torn or zero-byte file from a writer the kill
+    # interrupted is not a record, and kept it would land at the next start
+    # under the fallback message as a silent false completion.
+    if [[ "$f" == "project-complete.json" ]] \
+       && jq -e 'type == "object"' "$ARTIFACTS_DIR/$f" >/dev/null 2>&1; then
+      :
+    else
+      rm -f "$ARTIFACTS_DIR/$f" 2>/dev/null || true
+    fi
     git reset -q -- "$ARTIFACTS_DIR/$f" 2>/dev/null || true
   fi
   return 0

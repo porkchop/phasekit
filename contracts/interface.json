@@ -78,7 +78,7 @@
       "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh"],
       "default": "60",
       "container_forwarded": true,
-      "semantics": "Seconds before PHASEKIT_SESSION_DEADLINE at which the deadline watchdog makes the last-resort strand commit (v0.13.0): if the tree is dirty it restores ready-to-deploy.json and project-complete.json to HEAD (an unverified mid-build artifact must never arm a deploy seam off a strand), refreshes the dead-man baton, and commits --no-verify with transients unstaged. 0 disables. Ignored when no deadline is set."
+      "semantics": "Seconds before PHASEKIT_SESSION_DEADLINE at which the deadline watchdog makes the last-resort strand commit (v0.13.0): if the tree is dirty it restores ready-to-deploy.json and project-complete.json to HEAD where HEAD carries them (an unverified mid-build artifact must never arm a deploy seam off a strand; an untracked ready-to-deploy.json is deleted; v0.14.7: an untracked project-complete.json is left on disk unstaged — never deleted, never committed by the strand — for the next loop start's verify-gated landing), refreshes the dead-man baton, and commits --no-verify with transients unstaged. 0 disables. Ignored when no deadline is set."
     },
     {
       "name": "PHASEKIT_SQUASH_TARGET",
@@ -442,8 +442,8 @@
       "verdict": true,
       "transient_signal": false,
       "hidden": false,
-      "when": "Written by the Claude session at the end of a phase to approve it; the loop commits it (freshness-gated against the iteration-start marker). v0.14.5: an optional 'final_phase': true names it the project's last approval — the loop then records artifacts/project-complete.json itself (derived: summary + deferrals carried, provenance named) when the session has not written one, so 'approved but unrecorded' cannot survive a kill. Every 'deferrals' entry is committed with a stable 'key' (explicit, else the cited AC#n, else a slug of the item's first words — never a hash); a keyless entry with no item text stays keyless with a WARN and is dropped by the supervisor's reader.",
-      "keys": ["phase", "approved", "summary", "suggested_commit_message", "deferrals", "final_phase"]
+      "when": "Written by the Claude session at the end of a phase to approve it; the loop commits it (freshness-gated against the iteration-start marker). v0.14.5: an optional 'final_phase': true names it the project's last approval — the loop then records artifacts/project-complete.json itself (derived: summary + deferrals carried, provenance named) when the session has not written one, so 'approved but unrecorded' cannot survive a kill. Every 'deferrals' entry is committed with a stable 'key' (explicit, else the cited AC#n, else a slug of the item's first words — never a hash); a keyless entry with no item text stays keyless with a WARN and is dropped by the supervisor's reader. v0.14.7: an optional 'iteration' (the fleet convention: the string 'iteration-<N>' the supervisor's change request names) is carried verbatim into the project-complete.json the loop synthesizes from a final approval; the loop never invents one.",
+      "keys": ["phase", "approved", "summary", "suggested_commit_message", "deferrals", "final_phase", "iteration"]
     },
     {
       "name": "phase-update.json",
@@ -462,12 +462,12 @@
       "path": "artifacts/project-complete.json",
       "writers": ["session", "scripts/run-until-done.sh"],
       "consumers": ["scripts/run-until-done.sh", "scripts/enrich-project.py", "supervisor"],
-      "lifecycle": "durable — committed as the project's completion record; deleted at each iteration start until real. v0.14.5: the loop itself writes it (recorded_by names the step) when the landed approval carries final_phase: true and the session left none",
+      "lifecycle": "durable — committed as the project's completion record; deleted at each iteration start until real. v0.14.5: the loop itself writes it (recorded_by names the step) when the landed approval carries final_phase: true and the session left none. v0.14.7: that synthesized record carries 'iteration' verbatim from the approval (null when the approval names none — the key is always present), so a supervisor can resolve which iteration it closes; and the deadline watchdog's last-resort commit never deletes a session-authored copy HEAD does not carry — it stays on disk, uncommitted, for the next loop start's verify-gated landing — kept only when it parses as a JSON object (a torn file from an interrupted writer is deleted as before); an untracked ready-to-deploy.json is still deleted: a deploy claim no landing step owns",
       "verdict": true,
       "transient_signal": false,
       "hidden": false,
       "when": "Written by the session when every phase is approved and acceptance criteria are met; in light mode it must survive an adversarial final review to count. Its presence after the final commit is the loop's exit-0 signal.",
-      "keys": ["summary", "suggested_commit_message", "deferrals", "done", "final_phase", "recorded_by", "ts"]
+      "keys": ["summary", "suggested_commit_message", "deferrals", "done", "final_phase", "iteration", "recorded_by", "ts"]
     },
     {
       "name": "phase-blocked.json",
