@@ -636,6 +636,31 @@ class LastResortCommitAsTheForkSeesIt(unittest.TestCase):
         on_disk = json.loads((self.artifacts / "phase-approval.json").read_text())
         self.assertEqual(on_disk["deferrals"][0]["key"], "polish-the-lobby-animation-timing-later")
 
+    def test_the_kill_path_stands_down_on_a_complete_iteration(self):
+        # v0.14.9: the completion landed (record final, step 6 — the rest
+        # unproven because the gate re-measured after the commit); a dirty
+        # tree here is the gate's noise, not in-flight work. No wip commit,
+        # no baton, the dirt left as it is. Run with the fork's function set.
+        (self.root / "src.txt").write_text("v1\n")
+        (self.root / "measure.txt").write_text("baseline\n")
+        (self.artifacts / "phase-approval.json").write_text(json.dumps({
+            "phase": "phase-9", "approved": True, "final_phase": True,
+            "suggested_commit_message": "Phase 9 (APPROVED): last"}) + "\n")
+        (self.artifacts / "project-complete.json").write_text(json.dumps({"done": True}) + "\n")
+        LastResortCommit._commit_all(self, "Phase 9 (APPROVED): last + completion")
+        (self.artifacts / "boundary-state.json").write_text(json.dumps({
+            "schema": 2, "pass": 1, "iteration": 129, "branch": "master", "step": 6,
+            "step_name": "armed", "phase": "phase-9", "final": True, "sha_at_step": {}}) + "\n")
+        (self.root / "measure.txt").write_text("re-measured after the commit\n")
+        before = LastResortCommit._git(self, "rev-parse", "HEAD")
+        r = self._run_as_fork()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("command not found", r.stderr)
+        self.assertIn("standing down", r.stdout)
+        self.assertEqual(LastResortCommit._git(self, "rev-parse", "HEAD"), before)
+        self.assertEqual((self.root / "measure.txt").read_text(), "re-measured after the commit\n")
+        self.assertFalse((self.artifacts / "session-interrupted.json").exists())
+
     def test_a_session_authored_completion_record_survives_the_kill_path(self):
         # v0.14.7, the live shape of orchestrator #658: the approval landed,
         # the ship session wrote its own completion record (naming the

@@ -1568,6 +1568,74 @@ boundary_final() {
   [[ -f "$ARTIFACTS_DIR/project-complete.json" ]]
 }
 
+boundary_complete() {
+  # v0.14.9: the iteration's TERMINAL state — a final boundary whose
+  # completion has LANDED: the record says final and its step is at least 6
+  # (3 recorded, 4 squashed, 5 merged-back proven from git; 6 is trivial).
+  # Step 7 (rested) is hygiene, not completion: a verify gate that rewrites
+  # tracked files after the completion commit staged them (xmeo's acceptance
+  # re-measurements — iteration 50 run 714, 2026-09-12; iteration 56 run 756,
+  # 2026-09-13) leaves step 7 unprovable, and the loop read "could not be
+  # proven" as "failed verify" and re-entered: a next pass that found no
+  # next phase and wrote phase-blocked.json, a pacing wrap-up that committed
+  # the noise straight onto the target. Read, never inferred from files.
+  # Three reads, and the third is git's, not the record's (review m1: a
+  # stale record left when boundary_begin's write failed must not stand the
+  # watchdog down on an unrelated pass): final; step >= 6; the completion
+  # record still on disk and landed at HEAD.
+  [[ -f "$BOUNDARY_STATE_FILE" ]] || return 1
+  [[ "$(boundary_get '.final // false')" == "true" ]] || return 1
+  [[ "$(boundary_step)" -ge 6 ]] || return 1
+  [[ -f "$ARTIFACTS_DIR/project-complete.json" ]] || return 1
+  ! artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"
+}
+
+boundary_complete_here() {
+  # v0.14.9: is the record's complete boundary THIS session's iteration? The
+  # record is transient and survives on disk across sessions, so a session
+  # dispatched into a finished iteration (a landing session) must exit at
+  # once — while the next iteration, which begins by deleting the completion
+  # record "until real" and committing that deletion, must not be mistaken
+  # for it. Two reads: complete (which includes the completion record still
+  # landed at HEAD); and the same iteration — by the supervisor's label when the record
+  # (schema 2) and the marker both carry one, else by the work branch (a
+  # schema-1 record; a standalone run).
+  boundary_complete || return 1
+  local schema rec cur
+  schema="$(boundary_get '.schema // 1')"; [[ "$schema" =~ ^[0-9]+$ ]] || schema=1
+  if [[ "$schema" -ge 2 ]]; then
+    rec="$(boundary_get '.iteration | tojson')"
+    cur="$(supervising_iteration_json)"
+    if [[ -n "$rec" && "$rec" != "null" && "$cur" != "null" ]]; then
+      [[ "$rec" == "$cur" ]]; return
+    fi
+  fi
+  [[ -n "$(boundary_get '.branch // empty')" && "$(boundary_get '.branch // empty')" == "$(current_branch)" ]]
+}
+
+finish_complete() {
+  # v0.14.9: the ONE exit for a complete iteration — every site that lands a
+  # final boundary ends here, and so does a loop top that finds the
+  # iteration already complete. Rest hygiene the walk could not prove is
+  # NAMED (the dirty paths, HEAD off the target) and left exactly as it is:
+  # changes made after the completion commit's staging are the verify
+  # gate's, not a model's, and neither a next pass nor a wrap-up commit is
+  # the iteration's work. Nothing else runs.
+  local why="${1:-}"
+  if [[ -n "$why" ]]; then echo "$why"; fi
+  # A zero-turn session re-entered the work branch only to look
+  # (ensure_work_branch): put HEAD back on the target — step 7's own action,
+  # a checkout of identical trees, no commit — so the project is left
+  # exactly as it was found. Best-effort, like every rest.
+  if squash_mode && [[ "$(current_branch)" != "$SQUASH_TARGET" ]]; then rest_on_target || true; fi
+  if ! boundary_prove "$BOUNDARY_STEP_RESTED"; then
+    echo "boundary-state: the completion landed (record final, step $(boundary_step)) but the tree did not rest (step 7 unproven: HEAD on '$(current_branch)'; changes after the completion commit — the verify gate re-measuring?) — left as is, nothing else runs (v0.14.9):" >&2
+    git status --porcelain 2>/dev/null | sed 's/^/  /' >&2 || true
+  fi
+  echo "Run finished successfully."
+  exit 0
+}
+
 _boundary_kill_probe() {
   # Fault injection for the generated kill-point test ONLY
   # (tests/test_boundary_state.py): PHASEKIT_BOUNDARY_KILL_PROBE="<step>:<pre|post>"
@@ -2079,6 +2147,13 @@ deadline_lastresort_commit() {
   esac
   cd "$ROOT_DIR" 2>/dev/null || return 0
   [[ -n "$(git status --porcelain 2>/dev/null)" ]] || return 0
+  # v0.14.9: a complete iteration has nothing to preserve — the dirt is the
+  # gate's re-measurement after the completion commit, not in-flight work,
+  # and a wip commit of it would be a second commit on a landed completion.
+  if boundary_complete; then
+    echo "deadline watchdog: the iteration is complete (record final, step $(boundary_step)) — standing down; nothing to preserve (v0.14.9)"
+    return 0
+  fi
 
   # Disarm the deploy seam BEFORE the tree can go clean: an artifact the dead
   # session wrote mid-build is unverified by definition, and a wip commit that
@@ -2335,6 +2410,13 @@ wrapup_commit() {
   # mid-wrap-up. Never removed on the happy path — every wrap-up exit ends
   # the session; the loop clears a stale one at startup beside the nudge
   # marker, and the transient vocabulary keeps it uncommittable.
+  # v0.14.9: nothing to wrap up once the iteration is complete — a wrap-up
+  # here re-ran the verify gate over a landed completion and committed its
+  # re-measurement noise straight onto the target (iteration 50, 1591dd4).
+  if boundary_complete; then
+    echo "Wrap-up: the iteration is complete (record final, step $(boundary_step)) — nothing to wrap up; nothing else runs (v0.14.9)."
+    return 0
+  fi
   touch "$ARTIFACTS_DIR/.wrapup-in-progress" 2>/dev/null || true
   # v0.14.5: an approval-class artifact this sweep may carry (a CLI retry
   # ended the iteration before the boundary saw it — round-2 F5) leaves
@@ -2873,12 +2955,16 @@ if [[ -n "$recover_why" ]]; then
   # against does not apply to a tree no new iteration has touched.
   crc=0
   land_boundary "$recover_from" stranded 1 || crc=$?
+  # v0.14.9: complete is terminal — whatever the walk's rc (a step-7 rest it
+  # could not prove included), a landed completion ends the session here:
+  # entering the loop would delete project-complete.json and spend a session
+  # on a complete project (v0.14.0 review, MAJOR-2; run 756).
+  if boundary_complete; then
+    finish_complete "boundary-state: the recovered boundary was the project's last — complete; no model turn (v0.14.9)."
+  fi
   if [[ "$crc" -eq 0 || "$crc" -eq 2 ]]; then
     if boundary_final && [[ -f "$ARTIFACTS_DIR/project-complete.json" ]] \
        && ! artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then
-      # The recovered boundary was the project's last: entering the loop
-      # would delete project-complete.json and spend a session on a complete
-      # project (v0.14.0 review, MAJOR-2).
       echo "Run finished successfully."
       exit 0
     fi
@@ -2902,6 +2988,15 @@ if [[ -n "$recover_why" ]]; then
 fi
 
 while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
+  # v0.14.9: complete is terminal. Checked FIRST — before pacing, before the
+  # wrap-up sentinel, before a pass: a session that starts (or continues)
+  # on an iteration whose completion already landed does nothing else. No
+  # next pass looking for a phase that does not exist (run 756's
+  # phase-blocked.json), no wrap-up re-running the gate over a landed
+  # completion (iteration 50's commit on the target), no baton.
+  if boundary_complete_here; then
+    finish_complete "boundary-state: this iteration is already complete (record final, step $(boundary_step), iteration $(boundary_get '.iteration // "unlabelled"'), branch $(boundary_get '.branch // "?"')) — no pass, no wrap-up (v0.14.9). To resume work on a complete project, remove artifacts/project-complete.json (the completion record) and re-run — a supervisor's next-iteration intake does exactly that."
+  fi
   # Pass-duration bookkeeping (v0.6.1): each trip through the loop top closes
   # the previous pass. Retried attempts count as passes too — that keeps the
   # average conservative, which is the right direction for pacing.
@@ -3073,6 +3168,8 @@ VERDICT_RETRY_EOF
     fi
     crc=0
     land_boundary 1 completion "$approval_fresh" || crc=$?
+    # v0.14.9: complete is terminal, whatever the walk's rc (see finish_complete).
+    if boundary_complete; then finish_complete; fi
     if [[ "$crc" -eq 0 || "$crc" -eq 2 ]]; then
       # 0 = final work committed; 2 = nothing substantive left (already
       # committed) — both a clean finish, the target carrying it and HEAD at
@@ -3116,6 +3213,9 @@ VERDICT_RETRY_EOF
     # record. any_age=1: this site established freshness above.
     crc=0
     land_boundary 1 iteration 1 || crc=$?
+    # v0.14.9: an approval that carried final_phase: true and whose
+    # completion landed is terminal, whatever the walk's rc.
+    if boundary_complete; then PENDING_COMMIT_RETRY=""; finish_complete; fi
     if [[ "$crc" -eq 0 || "$crc" -eq 2 ]]; then
       PENDING_COMMIT_RETRY=""
       if boundary_final && [[ -f "$ARTIFACTS_DIR/project-complete.json" ]] \
@@ -3202,6 +3302,7 @@ VERDICT_RETRY_EOF
     echo "boundary-state: the landed approval names the final phase and the session wrote no artifact (no next phase) — recording the completion."
     crc=0
     land_boundary 1 completion 1 || crc=$?
+    if boundary_complete; then finish_complete; fi
     if [[ "$crc" -eq 0 || "$crc" -eq 2 ]] && [[ -f "$ARTIFACTS_DIR/project-complete.json" ]] \
        && ! artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then
       echo "Run finished successfully."

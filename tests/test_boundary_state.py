@@ -46,6 +46,7 @@ report per case via subTest. The bash is the shipped script, copied whole.
 Run from the repo root: python3 -m unittest tests.test_boundary_state
 """
 
+import concurrent.futures
 import itertools
 import json
 import os
@@ -971,7 +972,14 @@ class Regressions(unittest.TestCase):
                 r1 = repo.run(env={"MAX_ITERATIONS": "1"})
                 self.assertEqual(r1.returncode, 0, r1.stdout + r1.stderr)
                 self.assertIn("Run finished successfully.", r1.stdout)
-                # task 2: a session deletes the record, works, checkpoints (phase-update), ends
+                # task 2: the next intake deletes the completion record "until
+                # real" and commits that deletion (v0.14.9: a session that
+                # begins on an iteration whose completion still stands is
+                # complete and exits before any turn — the intake's deletion
+                # is what makes the project resumable); the session then
+                # works and checkpoints (phase-update)
+                repo.git("rm", "-q", "artifacts/project-complete.json")
+                repo.git("commit", "-qm", "intake: completion record deleted until real")
                 repo.reset_stub()
                 repo.scenario("rm -f artifacts/project-complete.json\necho task2-half >> src.txt\n"
                               "jq -n '{suggested_commit_message: \"wip: task 2 half done\"}' > artifacts/phase-update.json\n")
@@ -1141,6 +1149,273 @@ class SupervisingIterationLabel(unittest.TestCase):
         self.assertEqual((rec["schema"], landed["pass"], landed["iteration"]), (2, 1, None))
 
 
+# ---------------------------------------------------------------------------
+# v0.14.9 — completion is a terminal state: the no-kill case class
+# ---------------------------------------------------------------------------
+# The 216-case matrix enumerates kills. The row it cannot contain is the one
+# with NO kill: a session lands a final boundary and then keeps going. Two
+# live occurrences (xmeo iteration 50 run 714, 2026-09-12; iteration 56 run
+# 756, 2026-09-13) shared one shape — the completion commit, the squash and
+# the rest all happened, then the verify gate's own re-measurement had left
+# tracked files dirty, step 7 could not be proven, and the loop read that as
+# "failed verify" and re-entered: a next pass that found no next phase and
+# wrote phase-blocked.json; a pacing wrap-up that committed the noise
+# straight onto the target. Generated like the 216: every entry point that
+# can land a final boundary x both modes x a clean and a noisy gate x every
+# path that could run afterwards. Red on v0.14.8 for the noisy gate.
+
+# The live gate: green, but every run rewrites a tracked measurement file.
+VERIFY_NOISY = VERIFY_LOGGING.replace(
+    "exit 0\n", 'echo "measured $(date +%s%N)" >> "$ROOT/measure.txt"\nexit 0\n')
+assert VERIFY_NOISY != VERIFY_LOGGING
+
+# The run-756 shape of the pass that must never happen: the model finds no
+# next phase and declares itself blocked.
+BLOCKED_NEXT_PASS = ("jq -n '{blocked: true, reason: \"genuine external input is required: "
+                     "a new change request must be filed\"}' > artifacts/phase-blocked.json\n")
+
+
+def terminal_cases():
+    # entry, mode, gate, after, final_kind. "iteration+flag" is the
+    # approval-only final (final_phase: true, completion synthesized at
+    # step 2/3 — the `land_boundary 1 iteration 1` site); "both" is the
+    # project-complete.json site. The recovery entries land at loop start.
+    # `wrapup`/`pacing` name the path that would have run afterwards: under
+    # the rule the in-pass and recovery exits happen before the loop top,
+    # so those cases prove the exit precedes the wrap-up rather than
+    # exercising wrapup_commit's own guard (pinned structurally, and by the
+    # watchdog's fork-shape test for the last-resort commit).
+    cases = []
+    for mode in ("squash", "plain"):
+        for gate in ("clean", "noisy"):
+            for after, fk in (("next-pass", "both"), ("next-pass", "flag"), ("wrapup", "both"), ("pacing", "both")):
+                cases.append(("iteration", mode, gate, after, fk))
+            for after in ("next-pass", "pacing"):
+                cases.append(("stranded-fresh", mode, gate, after, "both"))
+                if mode == "squash":
+                    # a completion committed by hand in plain mode IS a
+                    # resting complete project (same reason the 216 skip it)
+                    cases.append(("catchup", mode, gate, after, "both"))
+    return cases
+
+
+def terminal_case_name(case):
+    return "/".join(case)
+
+
+def build_terminal_repo(mode, gate):
+    """A Repo whose base commit tracks measure.txt and carries the gate."""
+    repo = Repo(squash=(mode == "squash"))
+    if repo.squash:
+        repo.git("checkout", "-q", "main")
+    repo.write("measure.txt", "baseline\n")
+    if gate == "noisy":
+        repo.write("scripts/phasekit-verify.sh", VERIFY_NOISY, executable=True)
+    repo.git("add", "-A")
+    repo.git("commit", "-qm", "base: measurement file + gate")
+    repo.base = repo.git("rev-parse", "HEAD")
+    if repo.squash:
+        repo.git("branch", "-f", "iter/1-test", "main")
+        repo.git("checkout", "-q", "iter/1-test")
+    return repo
+
+
+def run_terminal_case(case):
+    entry, mode, gate, after, fk = case
+    repo = build_terminal_repo(mode, gate)
+    try:
+        env = {"FINAL_KIND": fk, "MAX_ITERATIONS": "3"}
+        if entry == "iteration":
+            first = ("touch artifacts/wrapup-requested\n" if after == "wrapup" else "")
+            first += APPROVE_SCENARIO
+            if after == "pacing":
+                # the turn spends 8s of a 12s deadline: a loop top reached
+                # afterwards sees ~3s against a 1.2x-average threshold of
+                # ~10s and wraps up (review m3: margin for a loaded host)
+                first += "sleep 8\n"
+            repo.scenario('if [ "$CALL_N" = 1 ]; then\n' + first + "else\n" + BLOCKED_NEXT_PASS + "fi\n")
+            if after == "pacing":
+                env.update({"PHASEKIT_SESSION_DEADLINE": str(int(time.time()) + 12),
+                            "PHASEKIT_PACING_FLOOR_SECONDS": "1",
+                            "PHASEKIT_WRAPUP_LEAD_SECONDS": "0",
+                            "PHASEKIT_LASTRESORT_LEAD_SECONDS": "0"})
+        else:
+            subprocess.run(["bash", "-c", APPROVE_SCENARIO], cwd=repo.repo, check=True,
+                           env={**os.environ, "CALL_N": "1", "FINAL_KIND": "both"})
+            if entry == "catchup":
+                repo.git("add", "-A")
+                repo.git("commit", "-qm", "wip: landed by hand, never squashed")
+            repo.scenario(BLOCKED_NEXT_PASS)
+            if after == "pacing":
+                # remaining (~50s) is under the floor at the very first loop
+                # top: a loop that is entered wraps up before any turn
+                env.update({"PHASEKIT_SESSION_DEADLINE": str(int(time.time()) + 50),
+                            "PHASEKIT_PACING_FLOOR_SECONDS": "100",
+                            "PHASEKIT_WRAPUP_LEAD_SECONDS": "0",
+                            "PHASEKIT_LASTRESORT_LEAD_SECONDS": "0"})
+        r = repo.run(env=env)
+        subjects = repo.git("log", "--all", "--format=%s")
+        return dict(rc=r.returncode, out=r.stdout + r.stderr, calls=repo.calls(),
+                    rec=repo.record(), state=snapshot(repo), subjects=subjects,
+                    completion_on_main=repo.commits_touching("artifacts/project-complete.json", "main"))
+    finally:
+        repo.cleanup()
+
+
+class CompletionIsTerminal(unittest.TestCase):
+    results = None
+
+    @classmethod
+    def setUpClass(cls):
+        cases = terminal_cases()
+        workers = max(2, min(8, (os.cpu_count() or 4)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            cls.results = dict(zip(cases, pool.map(run_terminal_case, cases)))
+
+    def _assert_case(self, case, res):
+        entry, mode, gate, after, fk = case
+        out = res["out"]
+        # (1) the session exits 0 and says so
+        self.assertEqual(res["rc"], 0, out)
+        self.assertIn("Run finished successfully.", out)
+        # (2) no next pass: the model turned once (the approving turn) or never
+        self.assertEqual(res["calls"], 1 if entry == "iteration" else 0, out)
+        self.assertNotIn("=== Iteration 2 ===", out)
+        self.assertFalse(res["state"]["blocked"], f"phase-blocked.json after a landed completion\n{out}")
+        # (3) no commit after the landing: no wrap-up, no last-resort, one completion on the target
+        self.assertNotIn("session wrap-up", res["subjects"], out)
+        self.assertNotIn("last-resort", res["subjects"], out)
+        self.assertEqual(len(res["completion_on_main"]), 1, f"completion commits on main: {res['completion_on_main']}\n{out}")
+        if mode == "squash":
+            self.assertEqual(len(res["state"]["trailers"]), 1, f"squashes: {res['state']['trailers']}\n{out}")
+        # (4) at rest: HEAD on the target, the record complete, no batons
+        self.assertEqual(res["state"]["head_branch"], "main")
+        rec = res["rec"]
+        self.assertTrue(rec["final"], rec)
+        self.assertFalse(res["state"]["handoff_on_disk"])
+        self.assertFalse(res["state"]["interrupted_on_disk"])
+        self.assertTrue(res["state"]["completion_on_disk"])
+        if gate == "clean":
+            self.assertEqual(rec["step"], RESTED, rec)
+            self.assertEqual(res["state"]["porcelain"], [], out)
+        else:
+            # the gate's noise is NAMED and left exactly as it is — never
+            # committed, never re-entered over, never deleted
+            self.assertEqual(rec["step"], 6, rec)
+            self.assertEqual([ln.strip() for ln in res["state"]["porcelain"]], ["M measure.txt"], out)
+            self.assertIn("did not rest", out)
+        self.assertNotIn("re-entering loop", out)
+
+    def test_every_landing_entry_and_afterwards_path(self):
+        self.assertTrue(self.results, "no cases ran")
+        for case in terminal_cases():
+            with self.subTest(case=terminal_case_name(case)):
+                self._assert_case(case, self.results[case])
+
+    def test_the_class_is_the_full_product(self):
+        cases = terminal_cases()
+        self.assertEqual(len(cases), 28)
+        self.assertEqual({c[0] for c in cases}, {"iteration", "stranded-fresh", "catchup"})
+        self.assertEqual({c[1] for c in cases}, {"squash", "plain"})
+        self.assertEqual({c[2] for c in cases}, {"clean", "noisy"})
+        self.assertEqual({c[3] for c in cases}, {"next-pass", "wrapup", "pacing"})
+        self.assertEqual({c[4] for c in cases}, {"both", "flag"})
+        self.assertEqual(len([c for c in cases if c[4] == "flag"]), 4)
+
+
+class TerminalRuleBounds(unittest.TestCase):
+    """The rule cannot over-fire, and it reads the record's own identity."""
+
+    def _repo(self, mode, gate):
+        repo = build_terminal_repo(mode, gate)
+        self.addCleanup(repo.cleanup)
+        return repo
+
+    def test_a_phase_boundary_with_a_noisy_gate_still_continues(self):
+        # negative pin: step 7 unproven on a NON-final boundary is exactly
+        # what it was — the loop continues and the model gets its next turn
+        for mode in ("squash", "plain"):
+            with self.subTest(mode=mode):
+                repo = self._repo(mode, "noisy")
+                repo.scenario(APPROVE_SCENARIO)
+                r = repo.run(env={"FINAL_KIND": "no", "MAX_ITERATIONS": "2"})
+                out = r.stdout + r.stderr
+                self.assertEqual(repo.calls(), 2, out)
+                self.assertIn("=== Iteration 2 ===", out)
+                self.assertNotIn("Run finished successfully.", out)
+                self.assertFalse(repo.record()["final"])
+
+    def _seed_complete(self, repo, record, marker=None):
+        # a completion-only boundary (approval final_phase: false + a
+        # completion record), landed on the target and the branch alike, so
+        # no loop-start recovery fires: the loop top's own read decides
+        repo.git("checkout", "-q", "main")
+        subprocess.run(["bash", "-c", APPROVE_SCENARIO], cwd=repo.repo, check=True,
+                       env={**os.environ, "CALL_N": "1", "FINAL_KIND": "no"})
+        repo.write("artifacts/project-complete.json",
+                   json.dumps({"done": True, "suggested_commit_message": "Iteration complete"}) + "\n")
+        if marker is not None:
+            repo.write("artifacts/iteration-mode.json", json.dumps(marker) + "\n")
+        repo.git("add", "-A"); repo.git("commit", "-qm", "Phase 1 + completion, landed by hand")
+        if repo.squash:
+            repo.git("branch", "-f", "iter/1-test", "main")
+            repo.git("checkout", "-q", "iter/1-test")
+        repo.write("artifacts/boundary-state.json", json.dumps(record) + "\n")
+        repo.scenario(BLOCKED_NEXT_PASS)
+
+    def test_a_recorded_complete_iteration_exits_before_any_turn_on_both_schemas(self):
+        base = {"step": 7, "step_name": "rested", "phase": "phase-1", "final": True,
+                "sha_at_step": {}, "mode": "squash", "target": "main"}
+        for name, record, marker, mode in (
+                ("schema-1 by branch", {**base, "schema": 1, "iteration": 1, "branch": "iter/1-test"}, None, "squash"),
+                ("schema-1 plain", {**base, "schema": 1, "iteration": 1, "branch": "main", "mode": "plain"}, None, "plain"),
+                ("schema-2 by label", {**base, "schema": 2, "pass": 1, "iteration": 129, "branch": "iter/1-test"},
+                 {"mode": "standard", "iteration": 129}, "squash"),
+                ("schema-2 label as string", {**base, "schema": 2, "pass": 1, "iteration": "129", "branch": "iter/1-test"},
+                 {"mode": "standard", "iteration": "129"}, "squash"),
+                ("schema-2 unlabelled, by branch", {**base, "schema": 2, "pass": 1, "iteration": None, "branch": "iter/1-test"},
+                 None, "squash")):
+            with self.subTest(name=name):
+                repo = self._repo(mode, "clean")
+                self._seed_complete(repo, record, marker)
+                r = repo.run(env={"MAX_ITERATIONS": "3"})
+                out = r.stdout + r.stderr
+                self.assertEqual(r.returncode, 0, out)
+                self.assertEqual(repo.calls(), 0, out)
+                self.assertIn("already complete", out)
+                self.assertIn("Run finished successfully.", out)
+                self.assertFalse(repo.artifact("phase-blocked.json").exists())
+
+    def test_another_iterations_record_does_not_terminate_this_one(self):
+        # the same completion on disk, but the supervisor's marker names the
+        # NEXT iteration: the record is not this session's — the pass runs
+        base = {"step": 7, "step_name": "rested", "phase": "phase-1", "final": True,
+                "sha_at_step": {}, "mode": "squash", "target": "main", "schema": 2, "pass": 1}
+        repo = self._repo("squash", "clean")
+        self._seed_complete(repo, {**base, "iteration": 129, "branch": "iter/1-test"},
+                            {"mode": "standard", "iteration": 130})
+        r = repo.run(env={"MAX_ITERATIONS": "1"})
+        out = r.stdout + r.stderr
+        self.assertEqual(repo.calls(), 1, out)
+        self.assertNotIn("already complete", out)
+
+    def test_a_deleted_completion_record_is_a_resumed_project_not_a_complete_one(self):
+        # the orchestrator's next-iteration intake: the record deleted "until
+        # real" and the deletion committed — the stale complete record on
+        # disk must not stop the new iteration
+        base = {"step": 7, "step_name": "rested", "phase": "phase-1", "final": True,
+                "sha_at_step": {}, "mode": "squash", "target": "main", "schema": 2, "pass": 1}
+        repo = self._repo("squash", "clean")
+        self._seed_complete(repo, {**base, "iteration": 129, "branch": "iter/1-test"},
+                            {"mode": "standard", "iteration": 129})
+        repo.git("rm", "-q", "artifacts/project-complete.json")
+        repo.git("commit", "-qm", "intake: completion record deleted until real")
+        r = repo.run(env={"MAX_ITERATIONS": "1"})
+        out = r.stdout + r.stderr
+        self.assertEqual(repo.calls(), 1, out)
+        self.assertNotIn("already complete", out)
+
+
 class StructuralPins(unittest.TestCase):
     def test_the_wrapup_commit_keys_the_deferrals_it_sweeps(self):
         fn = _extract_block(r"^wrapup_commit\(\) \{", r"^\}")
@@ -1269,6 +1544,36 @@ class StructuralPins(unittest.TestCase):
         wd = _extract_block(r"^deadline_lastresort_commit\(\) \{", r"^\}")
         self.assertIn("_disarm_deploy_artifact ready-to-deploy.json", wd)
 
+    def test_completion_is_terminal_at_every_landing_site_and_the_loop_top(self):
+        """v0.14.9: every site that lands a final boundary tests
+        boundary_complete right after land_boundary and ends in
+        finish_complete; the loop top tests boundary_complete_here before
+        the wrap-up sentinel and the pacing check; the wrap-up and the
+        watchdog's last-resort commit stand down on a complete record."""
+        sites = [m.start() for m in re.finditer(r"^\s+land_boundary ", SOURCE, re.M)]
+        self.assertEqual(len(sites), 4)
+        for pos in sites:
+            after = SOURCE[pos:pos + 700]
+            self.assertIn("if boundary_complete; then", after, SOURCE[pos:pos + 120])
+            self.assertIn("finish_complete", after)
+        loop = SOURCE[SOURCE.index('while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do'):]
+        top = loop[:loop.index('echo "=== Iteration $iteration ==="')]
+        self.assertLess(top.index("boundary_complete_here"), top.index('-f "$WRAPUP_SENTINEL"'))
+        self.assertLess(top.index("boundary_complete_here"), top.index("deadline pacing"))
+        wrap = _extract_block(r"^wrapup_commit\(\) \{", r"^\}")
+        self.assertLess(wrap.index("if boundary_complete; then"), wrap.index(".wrapup-in-progress"))
+        wd = _extract_block(r"^deadline_lastresort_commit\(\) \{", r"^\}")
+        self.assertLess(wd.index("if boundary_complete; then"), wd.index("_disarm_deploy_artifact"))
+        # the predicate is defined in the boundary block, before the watchdog fork
+        self.assertIn("boundary_complete()", BOUNDARY_BLOCK)
+        fin = _extract_block(r"^finish_complete\(\) \{", r"^\}")
+        self.assertIn('echo "Run finished successfully."', fin)
+        self.assertIn("exit 0", fin)
+        self.assertNotIn("git add", fin); self.assertNotIn("git commit", fin); self.assertNotIn("git checkout", fin)
+        # the rule never reads the orchestrator's landing-only flag
+        self.assertNotIn("LANDING_ONLY", SOURCE)
+        self.assertNotIn("LANDING_ONLY", (REPO_ROOT / "scripts" / "container-setup.sh").read_text())
+
     def test_docs_name_the_record_and_the_field(self):
         exec_modes = (REPO_ROOT / "docs" / "EXECUTION_MODES.md").read_text()
         gates = (REPO_ROOT / "docs" / "QUALITY_GATES.md").read_text()
@@ -1276,6 +1581,10 @@ class StructuralPins(unittest.TestCase):
         self.assertIn("land_boundary", exec_modes)
         self.assertIn("`pass`", exec_modes)
         self.assertIn("`artifacts/iteration-mode.json`'s `iteration`", exec_modes)
+        self.assertIn("terminal", exec_modes)
+        m = json.loads(MANIFEST.read_text())
+        entry = [a for a in m["artifacts"] if a["name"] == "boundary-state.json"][0]
+        self.assertIn("TERMINAL", entry["lifecycle"])
         self.assertIn("final_phase", gates)
         self.assertIn("boundary-state.json", gates)
 

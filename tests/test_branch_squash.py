@@ -564,8 +564,19 @@ class StructuralPins(unittest.TestCase):
         completion, the final-phase approval, and the no-artifact fall-through
         that records a final-phase completion."""
         finishes = [m.start() for m in re.finditer(r'echo "Run finished successfully\."', SOURCE)]
-        self.assertEqual(len(finishes), 4)
+        # v0.14.9: the fifth finish is finish_complete — the one exit for a
+        # complete iteration, reached only right after a land_boundary call
+        # (boundary_complete: final at step >= 6) or from the loop top when
+        # the record already shows this iteration complete
+        # (tests/test_boundary_state.py pins its call sites).
+        fin_start = SOURCE.index("finish_complete() {")
+        fin_end = SOURCE.index("\n}\n", fin_start)
+        inside = [pos for pos in finishes if fin_start < pos < fin_end]
+        self.assertEqual(len(inside), 1)
+        self.assertEqual(len(finishes), 5)
         for pos in finishes:
+            if pos in inside:
+                continue
             window = SOURCE[max(0, pos - 1400):pos]
             self.assertIn("land_boundary", window)
             self.assertIn('"$crc" -eq 0 || "$crc" -eq 2', window)

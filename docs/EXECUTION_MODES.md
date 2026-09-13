@@ -300,6 +300,30 @@ step < 7 is a boundary the previous session did not finish.* A record whose
 shas neither HEAD, the target nor the recorded work branch reach (an operator
 moved HEAD) is named, discarded, and only git's own evidence counts.
 
+**Completion is terminal (v0.14.9).** A final boundary whose completion has
+landed on the target — the record says `final: true` at step 6 or 7 — is the
+iteration's terminal state: the session exits 0 at rest and nothing else runs.
+No next pass (a pass that begins with the record already complete for this
+iteration — same supervisor label on a schema-2 record and the marker, else the
+same work branch — exits at once, with zero model turns), no wrap-up or pacing
+commit, no watchdog last-resort commit, no `phase-blocked.json`, no baton. Step
+7 (`rested`) is hygiene, not completion: a verify gate that rewrites tracked
+files after the completion commit staged them leaves the tree dirty, and the
+loop names that dirt and leaves it exactly as it is — it never re-enters the
+loop over it (the two live shapes: xmeo iteration 50's pacing wrap-up committed
+the gate's re-measurement straight onto the target; iteration 56's next pass
+found no next phase and wrote `phase-blocked.json`). The consequence is
+deliberate and visible: such a project rests with the gate's re-measurement
+uncommitted (one `M` path per completion), and a supervisor's deploy gate that
+requires a clean tree defers until the noise is committed by hand — the durable
+fix is the project's: a verify gate must not rewrite tracked files. To resume
+work on a complete project, remove `artifacts/project-complete.json` (the
+completion record) and re-run; a supervisor's next-iteration intake does exactly
+that, and a standalone squash-mode run without `PHASEKIT_WORK_BRANCH` gets a
+fresh work branch and is never "this iteration" anyway. Step 7 with
+`final: false` is a phase boundary and the loop continues to the next phase
+exactly as before.
+
 The generated test `tests/test_boundary_state.py` SIGKILLs a real session of
 the shipped loop at every step boundary (before and after the record
 advances), for every entry point, in both modes, for final and non-final
