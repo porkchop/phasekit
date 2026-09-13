@@ -5,7 +5,7 @@
   "standalone_note": "Every input here is honoured WHEN SUPPLIED. No supervisor is required: defaults make every script work standalone, and this manifest is equally the contract a stranger's cron job codes against.",
   "scope": {
     "covered": "scripts/*.sh, scripts/phasekit-contracts.py, and .claude/hooks/*.sh — the shipped runtime surface a supervisor interacts with.",
-    "not_covered": "Ambient POSIX environment (HOME, PWD, PATH) and the Claude Code harness's own hook payload (HOOK_PAYLOAD via stdin) are not interface knobs and are not declared. install.sh's PHASEKIT_HOME/PHASEKIT_BIN/PHASEKIT_URL/PHASEKIT_REF are the installer's interface, documented in docs/adr/ADR-0002-self-update-channels.md. The orchestrator's own artifacts (e.g. iteration-mode.json, written and read entirely supervisor-side) are the supervisor's interface, not phasekit's; their phasekit-side reflection is the env family below (e.g. PHASEKIT_ITERATION_MODE)."
+    "not_covered": "Ambient POSIX environment (HOME, PWD, PATH) and the Claude Code harness's own hook payload (HOOK_PAYLOAD via stdin) are not interface knobs and are not declared. install.sh's PHASEKIT_HOME/PHASEKIT_BIN/PHASEKIT_URL/PHASEKIT_REF are the installer's interface, documented in docs/adr/ADR-0002-self-update-channels.md. A supervisor's own artifacts are the supervisor's interface, not phasekit's; their phasekit-side reflection is the env family below (e.g. PHASEKIT_ITERATION_MODE). The one declared exception (v0.14.8) is the `iteration` key of artifacts/iteration-mode.json, which the loop reads into boundary-state.json — everything else in that file stays supervisor-side."
   },
   "env": [
     {
@@ -688,17 +688,30 @@
       "keys": []
     },
     {
+      "name": "iteration-mode.json",
+      "path": "artifacts/iteration-mode.json",
+      "writers": ["supervisor"],
+      "consumers": ["scripts/run-until-done.sh", "supervisor"],
+      "lifecycle": "supervisor-owned and COMMITTED by the supervisor (the orchestrator writes it inside the iteration commit); optional — absent in a standalone run. phasekit never writes or deletes it; the loop reads ONE key at each pass start (v0.14.8)",
+      "verdict": false,
+      "transient_signal": false,
+      "hidden": false,
+      "internal": false,
+      "when": "The supervising iteration's label. boundary_begin copies `iteration` verbatim into boundary-state.json's `iteration` when it is a number or a string (never normalised, never derived from the work-branch name); a missing file, an unparseable file, a record without the key, or any other value type (object, array, boolean, null) reads as null. A consumer that requires an int MUST treat any other carried value as 'no label' (null), never as a corrupt record. The file's other keys (mode, grade, rationale, task_id, …) are the supervisor's own and are not read by phasekit — the execution mode still arrives as PHASEKIT_ITERATION_MODE.",
+      "keys": ["iteration"]
+    },
+    {
       "name": "boundary-state.json",
       "path": "artifacts/boundary-state.json",
       "writers": ["scripts/run-until-done.sh"],
       "consumers": ["scripts/run-until-done.sh", "supervisor"],
-      "lifecycle": "the ONE record of the landing sequence (v0.14.5): reset to step 0 at every iteration start, advanced only by the loop's land_boundary as each step is PROVEN from git/disk (0 idle, 1 approved, 2 committed, 3 recorded, 4 squashed, 5 merged-back, 6 armed, 7 rested); survives across sessions so the next loop start continues an unfinished boundary before any model turn. Never committed; hidden from git status",
+      "lifecycle": "the ONE record of the landing sequence (v0.14.5; schema 2 since v0.14.8): reset to step 0 at every pass start, advanced only by the loop's land_boundary as each step is PROVEN from git/disk (0 idle, 1 approved, 2 committed, 3 recorded, 4 squashed, 5 merged-back, 6 armed, 7 rested); survives across sessions so the next loop start continues an unfinished boundary before any model turn. Never committed; hidden from git status",
       "verdict": false,
       "transient_signal": true,
       "hidden": true,
       "internal": false,
-      "when": "A supervisor READS it instead of inferring 'done' from file presence and mtimes: step 7 with final true = the project's completion landed and HEAD rests; step 7 with final false = a phase boundary landed; step < 7 = the previous session ended mid-sequence (killed_after names the step the deadline watchdog observed at the kill, killed_mode 'kill' or 'wrapup'). sha_at_step maps '2','3','5','7' to the work-branch commit and '4' to the target tip that proved the step; verify_memo is the last GREEN gate {tree_sha (git write-tree), tier fast|full, label, command, passed_at} the loop reuses for the same tree; deploy records whether ready-to-deploy.json was present (and its mtime) when the boundary armed — the mtime rule stays the supervisor's; previous is the boundary that ended before the current idle record began (its final step, phase, final flag and shas), so 'what last landed' survives the next iteration's reset. Steps 4-5 are proven trivially without PHASEKIT_SQUASH_TARGET.",
-      "keys": ["schema", "iteration", "branch", "target", "mode", "phase", "final", "step", "step_name", "step_at", "began_at", "sha_at_step", "verify_memo", "deploy", "killed_after", "killed_mode", "killed_at", "context", "recovered_at", "discarded_at", "discarded_reason", "previous", "verify_red"]
+      "when": "A supervisor READS it instead of inferring 'done' from file presence and mtimes: step 7 with final true = the project's completion landed and HEAD rests; step 7 with final false = a phase boundary landed; step < 7 = the previous session ended mid-sequence (killed_after names the step the deadline watchdog observed at the kill, killed_mode 'kill' or 'wrapup'). sha_at_step maps '2','3','5','7' to the work-branch commit and '4' to the target tip that proved the step; verify_memo is the last GREEN gate {tree_sha (git write-tree), tier fast|full, label, command, passed_at} the loop reuses for the same tree; deploy records whether ready-to-deploy.json was present (and its mtime) when the boundary armed — the mtime rule stays the supervisor's; previous is the boundary that ended before the current idle record began (its final step, phase, final flag and shas), so 'what last landed' survives the next pass's reset. Steps 4-5 are proven trivially without PHASEKIT_SQUASH_TARGET. v0.14.8 (schema 2): `pass` is this session's index inside the MAX_ITERATIONS loop (1, 2, …; 0 when loop-start recovery opened the record before the first pass); `iteration` is the SUPERVISING iteration's label (number or string) copied verbatim from artifacts/iteration-mode.json's `iteration` when the supervisor declared one, else null — phasekit never derives it from the branch name. A schema-1 record (v0.14.5–v0.14.7) has no `pass`, and its `iteration` IS the pass counter (every live record read 1): a consumer distinguishes the two by `schema` and, for schema 1, derives the iteration from `branch` instead. `previous` carries the archived boundary's own keys INCLUDING its `schema` — a schema-1 boundary a v0.14.7 session left is archived as it was, and stays there (a new pass replaces `previous` only when the boundary it ends advanced past step 0), so a schema-1 `previous` can sit under a schema-2 record until the next boundary lands. A consumer branches on the `schema` of the block it reads (top-level or `previous`), never on the top-level value alone.",
+      "keys": ["schema", "pass", "iteration", "branch", "target", "mode", "phase", "final", "step", "step_name", "step_at", "began_at", "sha_at_step", "verify_memo", "deploy", "killed_after", "killed_mode", "killed_at", "context", "recovered_at", "discarded_at", "discarded_reason", "previous", "verify_red"]
     }
   ],
   "conventions": [

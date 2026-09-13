@@ -117,7 +117,8 @@ check_for_scaffold_update() {
 # #100: spec-change.json; the phase-blocked.json stranding before it).
 # Deliberate absences — committed on purpose, not transient: phase-approval,
 # phase-update, project-complete, session-handoff, ready-to-deploy, and the
-# orchestrator's iteration-mode.json (written INSIDE the iteration commit).
+# orchestrator's iteration-mode.json (written INSIDE the iteration commit;
+# the loop reads its `iteration` into boundary-state.json — v0.14.8).
 TRANSIENT_SIGNALS=(
   "phase-blocked.json"
   "phase-verify-failed.json"
@@ -1441,26 +1442,55 @@ _boundary_write() {
   return 0
 }
 
+supervising_iteration_json() {
+  # v0.14.8: the supervising iteration's label, as JSON, for the record's
+  # `iteration`. phasekit does not define iterations — the iter/<N>-<slug>
+  # work branch is the supervisor's naming (PHASEKIT_WORK_BRANCH), not a
+  # fact of phasekit's — so the only honest source is what the supervisor
+  # declared: the `iteration` key of artifacts/iteration-mode.json (the
+  # orchestrator writes that file inside the iteration commit; the MODE still
+  # arrives as PHASEKIT_ITERATION_MODE, this reads nothing else from it).
+  # Carried verbatim when it is a number or a string (a label is one of
+  # those; an object, array or boolean is not a label and reads as null —
+  # a consumer that requires an int treats any other value as "no label",
+  # never as a corrupt record), never derived from the branch name; `null`
+  # when the file is absent, unparseable, or names no iteration (a
+  # standalone run).
+  local f="$ARTIFACTS_DIR/iteration-mode.json" v=null
+  [[ -f "$f" ]] || { echo null; return 0; }
+  v="$(jq -cs 'if (.[0] | type) == "object" and ((.[0].iteration | type) == "number" or (.[0].iteration | type) == "string") then .[0].iteration else null end' "$f" 2>/dev/null)" || v=null
+  [[ -n "$v" ]] && jq . <<<"$v" >/dev/null 2>&1 || v=null
+  echo "$v"
+}
+
 boundary_begin() {
-  # $1 = iteration number. A NEW boundary: step 0, nothing approved yet. The
-  # verify memo is carried forward (it is keyed by tree, so a stale entry is
-  # inert); everything else belongs to the boundary that just ended.
-  local iter="$1" mode=plain
+  # $1 = pass number: this session's index inside the MAX_ITERATIONS loop
+  # (1, 2, …; 0 when loop-start recovery opened the record before the first
+  # pass). Recorded as `pass` since v0.14.8 — until v0.14.7 it was
+  # written as `iteration`, which every consumer read as the SUPERVISING
+  # iteration, and every live record said 1. A NEW boundary: step 0, nothing
+  # approved yet. The verify memo is carried forward (it is keyed by tree, so
+  # a stale entry is inert); everything else belongs to the boundary that
+  # just ended.
+  local pass="$1" mode=plain
   squash_mode && mode=squash
   # `previous` keeps the boundary that just ended (its final step, phase,
-  # shas) so a reader arriving between sessions can see what last landed
-  # even after a later iteration began a new, idle record.
+  # shas, pass and iteration — and its own `schema`: a schema-1 record a
+  # v0.14.7 session left is archived as it was, so a reader branches on the
+  # schema of the block it reads) so a reader arriving between sessions can
+  # see what last landed even after a later pass began a new, idle record.
   _boundary_write '{
-      schema: 1,
-      iteration: ($iter | tonumber),
+      schema: 2,
+      pass: ($pass | tonumber),
+      iteration: $iteration,
       branch: $branch, target: $target, mode: $mode,
       phase: null, final: false,
       step: 0, step_name: "idle", step_at: $now, began_at: $now,
       sha_at_step: {}, deploy: null, killed_after: null, killed_mode: null, killed_at: null,
       verify_memo: (.verify_memo // null), verify_red: (.verify_red // null),
       previous: (if (.step // 0) > 0 then (del(.verify_memo) | del(.previous)) else (.previous // null) end)
-    }' --arg iter "$iter" --arg branch "$(current_branch)" \
-       --arg target "$SQUASH_TARGET" --arg mode "$mode"
+    }' --arg pass "$pass" --argjson iteration "$(supervising_iteration_json)" \
+       --arg branch "$(current_branch)" --arg target "$SQUASH_TARGET" --arg mode "$mode"
 }
 
 boundary_advance() {

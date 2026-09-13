@@ -674,9 +674,95 @@ class Primitives(unittest.TestCase):
         r = self.bash('boundary_begin 3; verify_memo_record t1 fast lbl cmd; boundary_begin 4')
         self.assertEqual(r.returncode, 0, r.stderr)
         rec = self.record()
-        self.assertEqual((rec["step"], rec["step_name"], rec["iteration"]), (0, "idle", 4))
+        self.assertEqual((rec["step"], rec["step_name"], rec["pass"]), (0, "idle", 4))
         self.assertEqual(rec["verify_memo"]["tree_sha"], "t1")
         self.assertEqual(rec["sha_at_step"], {})
+
+    # v0.14.8 (orchestrator #690, found by the landing_state() audit): the
+    # record's top-level `iteration` was the MAX_ITERATIONS pass counter, so
+    # every live record in the fleet read `iteration: 1` and a consumer that
+    # read it as the supervising iteration was right only by accident. The
+    # pass counter is now `pass`; `iteration` is the supervisor's label from
+    # artifacts/iteration-mode.json, verbatim, else null; schema 1 -> 2.
+    # Red on v0.14.7: KeyError 'pass', schema 1, iteration == the pass.
+    def _marker(self, payload):
+        (self.artifacts / "iteration-mode.json").write_text(payload)
+
+    def test_a_supervised_record_names_the_supervising_iteration_not_the_pass(self):
+        self._marker(json.dumps({"mode": "standard", "iteration": 129, "grade": "standard"}) + "\n")
+        r = self.bash('boundary_begin 1')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = self.record()
+        self.assertEqual((rec["schema"], rec["pass"], rec["iteration"]), (2, 1, 129))
+        r = self.bash('boundary_begin 2')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = self.record()
+        self.assertEqual((rec["schema"], rec["pass"], rec["iteration"]), (2, 2, 129))
+
+    def test_a_standalone_record_carries_iteration_null(self):
+        self.assertFalse((self.artifacts / "iteration-mode.json").exists())
+        r = self.bash('boundary_begin 1')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = self.record()
+        self.assertIn("iteration", rec)
+        self.assertEqual((rec["schema"], rec["pass"], rec["iteration"]), (2, 1, None))
+
+    def test_the_label_is_carried_verbatim_never_normalised_or_derived(self):
+        # a string label rides as the string; a marker without the key, an
+        # unparseable marker, a torn (empty) marker, a non-object marker and
+        # a non-label value (object, array, boolean — review MAJOR 2: a
+        # consumer that requires an int must never see a corrupt record) all
+        # read as null — and none of them derails the write, under the
+        # loop's own `set -e` (review MINOR 5): the record still begins.
+        for payload, want in ((json.dumps({"iteration": "iteration-130"}), "iteration-130"),
+                              (json.dumps({"iteration": 0}), 0),
+                              (json.dumps({"mode": "light"}), None),
+                              (json.dumps({"iteration": {"n": 1}}), None),
+                              (json.dumps({"iteration": [1]}), None),
+                              (json.dumps({"iteration": True}), None),
+                              (json.dumps({"iteration": None}), None),
+                              ("{not json", None),
+                              ("", None),
+                              ("[1, 2]", None)):
+            with self.subTest(payload=payload):
+                self._marker(payload)
+                r = self.bash('set -e; boundary_begin 3; echo "rc-after=$?"')
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn("rc-after=0", r.stdout)
+                rec = self.record()
+                self.assertEqual((rec["schema"], rec["pass"], rec["step_name"]), (2, 3, "idle"))
+                self.assertEqual(rec["iteration"], want)
+                # the branch name is never the source: the scratch repo's branch
+                # carries no iter/<N> and the label still came from the marker
+                self.assertNotIn("iter/", rec["branch"])
+
+    def test_a_schema_1_record_is_archived_as_it_was_under_a_schema_2_record(self):
+        # Review MAJOR 1 (the rollout shape): a v0.14.7 session rested with a
+        # schema-1 record; the first v0.14.8 pass archives it verbatim — its
+        # own `schema: 1`, its `iteration` still the old pass counter, no
+        # `pass` — and it stays there across idle passes. A consumer branches
+        # on the schema of the block it reads.
+        (self.artifacts / "boundary-state.json").write_text(json.dumps({
+            "schema": 1, "iteration": 1, "branch": "iter/57-x", "step": 7, "step_name": "rested",
+            "phase": "phase-9", "final": False, "sha_at_step": {"7": "abc"}}))
+        self._marker(json.dumps({"iteration": 129}))
+        r = self.bash('boundary_begin 1; boundary_begin 2')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = self.record()
+        self.assertEqual((rec["schema"], rec["pass"], rec["iteration"]), (2, 2, 129))
+        prev = rec["previous"]
+        self.assertEqual((prev["schema"], prev["iteration"], prev["step"], prev["branch"]), (1, 1, 7, "iter/57-x"))
+        self.assertNotIn("pass", prev)
+
+    def test_previous_carries_both_pass_and_iteration(self):
+        self._marker(json.dumps({"iteration": 129}) + "\n")
+        r = self.bash('boundary_begin 1; boundary_advance 2 abc; boundary_begin 2')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = self.record()
+        self.assertEqual((rec["pass"], rec["iteration"], rec["step"]), (2, 129, 0))
+        self.assertEqual((rec["previous"]["pass"], rec["previous"]["iteration"], rec["previous"]["step"]),
+                         (1, 129, 2))
+        self.assertNotIn("previous", rec["previous"])
 
     def test_advance_is_monotonic_within_a_boundary(self):
         r = self.bash('boundary_begin 1; boundary_advance 3 abc; boundary_advance 2 def; boundary_step')
@@ -1019,6 +1105,42 @@ class Regressions(unittest.TestCase):
         self.assertTrue(repo.tracked("artifacts/project-complete.json", "main"))
 
 
+class SupervisingIterationLabel(unittest.TestCase):
+    """v0.14.8 end to end: the shipped loop, a committed supervisor marker,
+    two passes in one session — the record and its `previous` both name the
+    supervising iteration, and the pass counter is `pass`. Red on v0.14.7."""
+
+    def _repo(self, marker):
+        repo = Repo(squash=True)
+        self.addCleanup(repo.cleanup)
+        if marker is not None:
+            repo.write("artifacts/iteration-mode.json", json.dumps(marker, indent=2) + "\n")
+            repo.git("add", "-A"); repo.git("commit", "-qm", "iteration-mode marker (supervisor)")
+        return repo
+
+    def test_two_passes_under_one_supervising_iteration(self):
+        repo = self._repo({"mode": "standard", "iteration": 129, "grade": "standard"})
+        repo.scenario('if [ "$CALL_N" = 1 ]; then echo w >> src.txt\n'
+                      + _approval("phase-1", "Phase 1 (APPROVED): first") + 'fi\n')
+        r = repo.run(env={"MAX_ITERATIONS": "2"})
+        rec = repo.record()
+        self.assertIsNotNone(rec, r.stdout + r.stderr)
+        self.assertEqual((rec["schema"], rec["pass"], rec["iteration"]), (2, 2, 129), r.stdout + r.stderr)
+        self.assertEqual((rec["previous"]["pass"], rec["previous"]["iteration"],
+                          rec["previous"]["step"], rec["previous"]["phase"]), (1, 129, RESTED, "phase-1"))
+        # the work branch is the supervisor's naming; the label did not come from it
+        self.assertEqual(rec["branch"], "iter/1-test")
+
+    def test_a_standalone_run_records_iteration_null(self):
+        repo = self._repo(None)
+        repo.scenario("echo w >> src.txt\n" + _approval("phase-1", "Phase 1 (APPROVED): only"))
+        r = repo.run(env={"MAX_ITERATIONS": "1"})
+        self.assertIn("boundary-state: rested (step 7)", r.stdout, r.stdout + r.stderr)
+        rec = repo.record()
+        landed = rec["previous"] if rec["step"] == 0 and rec.get("previous") else rec
+        self.assertEqual((rec["schema"], landed["pass"], landed["iteration"]), (2, 1, None))
+
+
 class StructuralPins(unittest.TestCase):
     def test_the_wrapup_commit_keys_the_deferrals_it_sweeps(self):
         fn = _extract_block(r"^wrapup_commit\(\) \{", r"^\}")
@@ -1065,8 +1187,14 @@ class StructuralPins(unittest.TestCase):
         entry = [a for a in m["artifacts"] if a["name"] == "boundary-state.json"][0]
         self.assertTrue(entry["transient_signal"] and entry["hidden"])
         self.assertIn("supervisor", entry["consumers"])
-        for key in ("step", "final", "sha_at_step", "verify_memo", "killed_after"):
+        for key in ("step", "final", "sha_at_step", "verify_memo", "killed_after", "pass", "iteration"):
             self.assertIn(key, entry["keys"])
+        # v0.14.8: the marker is declared as the source of `iteration`, read by the loop
+        marker = [a for a in m["artifacts"] if a["name"] == "iteration-mode.json"][0]
+        self.assertIn("scripts/run-until-done.sh", marker["consumers"])
+        self.assertEqual(marker["writers"], ["supervisor"])
+        self.assertEqual(marker["keys"], ["iteration"])
+        self.assertIn("schema 2", entry["when"])
         probe = [e for e in m["env"] if e["name"] == "PHASEKIT_BOUNDARY_KILL_PROBE"][0]
         self.assertFalse(probe["container_forwarded"])
         approval = [a for a in m["artifacts"] if a["name"] == "phase-approval.json"][0]
@@ -1116,6 +1244,21 @@ class StructuralPins(unittest.TestCase):
         i = SOURCE.index("  cleanup_artifacts\n  boundary_begin \"$iteration\"\n  touch \"$ITER_START_MARKER\"")
         self.assertGreater(i, 0)
 
+    def test_the_label_is_read_from_the_marker_only_inside_boundary_begin(self):
+        """v0.14.8: one reader, one key, no branch-name parsing anywhere."""
+        fn = _extract_block(r"^boundary_begin\(\) \{", r"^\}")
+        self.assertIn("schema: 2,", fn)
+        self.assertIn("pass: ($pass | tonumber),", fn)
+        self.assertIn("iteration: $iteration,", fn)
+        self.assertIn('--argjson iteration "$(supervising_iteration_json)"', fn)
+        reader = _extract_block(r"^supervising_iteration_json\(\) \{", r"^\}")
+        self.assertIn('"$ARTIFACTS_DIR/iteration-mode.json"', reader)
+        self.assertEqual(SOURCE.count("iteration-mode.json\""), 1, "exactly one code read of the marker")
+        # (no branch-name regex here — review MINOR 4: the load-bearing guard
+        # against deriving the label from the branch is the end-to-end pin
+        # asserting iteration == 129 while branch == "iter/1-test")
+        self.assertIn("supervising_iteration_json", BOUNDARY_BLOCK)
+
     def test_the_sequence_keeps_every_gate(self):
         """Nothing loosens: the gates the kickoff names are still called from
         the commit path the sequence uses."""
@@ -1131,6 +1274,8 @@ class StructuralPins(unittest.TestCase):
         gates = (REPO_ROOT / "docs" / "QUALITY_GATES.md").read_text()
         self.assertIn("boundary-state.json", exec_modes)
         self.assertIn("land_boundary", exec_modes)
+        self.assertIn("`pass`", exec_modes)
+        self.assertIn("`artifacts/iteration-mode.json`'s `iteration`", exec_modes)
         self.assertIn("final_phase", gates)
         self.assertIn("boundary-state.json", gates)
 

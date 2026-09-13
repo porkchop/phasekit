@@ -281,10 +281,20 @@ the never-landed verdict the next loop start's recovery looks for first
 owns, and an unverified one must not survive into a later commit.
 
 Fields a supervisor reads (pinned in `contracts/interface.json`): `step`,
-`step_name`, `final`, `phase`, `iteration`, `sha_at_step` (`"2"`/`"3"`/`"5"`/`"7"`
+`step_name`, `final`, `phase`, `pass`, `iteration`, `sha_at_step` (`"2"`/`"3"`/`"5"`/`"7"`
 → the work-branch commit, `"4"` → the target tip), `verify_memo` / `verify_red`,
 `deploy`, `killed_after`/`killed_mode`, and `previous` (the boundary that
-ended before the current idle record began — what last landed). *Step 7 with `final: true` is "the completion
+ended before the current idle record began — what last landed). `pass` is this
+session's index inside the `MAX_ITERATIONS` loop (1, 2, …) — it was written as
+`iteration` until v0.14.7, so every live record read `iteration: 1`. `iteration`
+(v0.14.8, `schema: 2`) is the supervising iteration's label copied verbatim from
+`artifacts/iteration-mode.json`'s `iteration` when the supervisor declared one,
+else `null` — never derived from the branch name, because phasekit does not
+define iterations; `pass` is 0 only when loop-start recovery opened the record
+before the first pass. A schema-1 record has no `pass` and its `iteration` is
+the pass counter; `previous` keeps the archived boundary's own `schema`, so a
+schema-1 `previous` can sit under a schema-2 record until the next boundary
+lands — a consumer branches on the schema of the block it reads. *Step 7 with `final: true` is "the completion
 landed and HEAD rests"; step 7 with `final: false` is a phase boundary landed;
 step < 7 is a boundary the previous session did not finish.* A record whose
 shas neither HEAD, the target nor the recorded work branch reach (an operator
