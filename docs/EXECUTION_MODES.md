@@ -312,11 +312,13 @@ files after the completion commit staged them leaves the tree dirty, and the
 loop names that dirt and leaves it exactly as it is — it never re-enters the
 loop over it (the two live shapes: xmeo iteration 50's pacing wrap-up committed
 the gate's re-measurement straight onto the target; iteration 56's next pass
-found no next phase and wrote `phase-blocked.json`). The consequence is
-deliberate and visible: such a project rests with the gate's re-measurement
-uncommitted (one `M` path per completion), and a supervisor's deploy gate that
-requires a clean tree defers until the noise is committed by hand — the durable
-fix is the project's: a verify gate must not rewrite tracked files. To resume
+found no next phase and wrote `phase-blocked.json`). **v0.14.10 closes that
+cause at the source:** the verify gate is read-only over the tree — a rewrite
+is the gate's *footprint*, restored and red at the commit, never at rest (see
+`docs/QUALITY_GATES.md` "Pre-commit verification gate"), so the completion
+never lands over gate noise and the project never rests with it. Step 7
+unproven now means dirt of another origin — still named, still left exactly
+as it is, never re-entered over. To resume
 work on a complete project, remove `artifacts/project-complete.json` (the
 completion record) and re-run; a supervisor's next-iteration intake does exactly
 that, and a standalone squash-mode run without `PHASEKIT_WORK_BRANCH` gets a

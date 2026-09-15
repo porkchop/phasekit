@@ -68,6 +68,20 @@ def _bash(script, cwd=None, env=None):
     e = dict(os.environ)
     if env:
         e.update(env)
+    # A script that embeds the loop's definitions is larger than one argv
+    # entry may be (MAX_ARG_STRLEN, 128 KiB — first hit at v0.14.10): run it
+    # from a file, as bash would a real script.
+    if len(script.encode()) > 100_000:
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+            f.write(script)
+            path = f.name
+        try:
+            return subprocess.run(
+                ["bash", path], cwd=cwd, env=e,
+                capture_output=True, text=True, timeout=60,
+            )
+        finally:
+            os.unlink(path)
     return subprocess.run(
         ["bash", "-c", script], cwd=cwd, env=e,
         capture_output=True, text=True, timeout=60,

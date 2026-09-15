@@ -327,7 +327,12 @@ record_verify_failure() {
   # $5 = "memo" (v0.14.5): the verdict came from the red verify memo for an
   # exact tree that already failed — re-surface the capture for the model
   # but spend NO breaker attempt and never trip the breaker from here.
-  local cmd="$1" label="$2" exit_code="$3" log="$4" mode="${5:-}"
+  # $6 (v0.14.10) = the gate footprint as a JSON array of paths, or empty:
+  # when present the run is red BY FOOTPRINT (exit_code may be 0 — the
+  # command's own verdict is kept honest) and the artifact carries the paths,
+  # the rule and the recipe.
+  local cmd="$1" label="$2" exit_code="$3" log="$4" mode="${5:-}" footprint="${6:-}"
+  [[ -n "$footprint" && "$footprint" != "null" ]] || footprint="null"
 
   local prior_attempts=0
   # A zero-byte artifact (crashed earlier writer) makes `jq -r` emit nothing
@@ -343,34 +348,59 @@ record_verify_failure() {
   fi
   [[ "$prior_attempts" =~ ^[0-9]+$ ]] || prior_attempts=0
   local attempts=$((prior_attempts + 1))
-  [[ "$mode" == "memo" ]] && attempts="$prior_attempts"
-  local tail_output
+  # "memo": the red memo's replay; "settle" (v0.14.10): the footprint of a
+  # gate the previous session died inside, restored at loop start. Neither
+  # is a fresh run of the gate, so neither spends a breaker attempt — the
+  # live re-run that follows does (in light mode the breaker is 2: a
+  # settlement that counted would trip it before the model's first turn).
+  [[ "$mode" == "memo" || "$mode" == "settle" ]] && attempts="$prior_attempts"
+  local tail_output try_log wrote=0
   tail_output="$(tail -n 200 "$log")"
-  if ! jq -n \
-    --arg cmd "$cmd" \
-    --arg label "$label" \
-    --argjson exit_code "$exit_code" \
-    --argjson attempts "$attempts" \
-    --arg log "$tail_output" \
-    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{
-      verify_failed: true,
-      command: $cmd,
-      label: $label,
-      exit_code: $exit_code,
-      attempts: $attempts,
-      log_tail: $log,
-      ts: $ts
-    }' > "$ARTIFACTS_DIR/phase-verify-failed.json" 2>/dev/null; then
-    # jq can choke on pathological log bytes; never leave a zero-byte
-    # artifact behind — write a minimal valid capture instead.
+  # jq can choke on pathological log bytes: the second try drops the log
+  # tail and keeps everything else (v0.14.10 review MINOR-3: a red by
+  # footprint must never lose its paths to a bad log); only if that fails
+  # too is a minimal valid capture written — never a zero-byte artifact.
+  for try_log in "$tail_output" "(unavailable: capture failed)"; do
+    if jq -n \
+      --arg cmd "$cmd" \
+      --arg label "$label" \
+      --argjson exit_code "$exit_code" \
+      --argjson attempts "$attempts" \
+      --arg log "$try_log" \
+      --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --argjson footprint "$footprint" \
+      --arg rule "$GATE_FOOTPRINT_RULE" \
+      --arg recipe "$GATE_FOOTPRINT_RECIPE" \
+      '{
+        verify_failed: true,
+        command: $cmd,
+        label: $label,
+        exit_code: $exit_code,
+        attempts: $attempts,
+        log_tail: $log,
+        ts: $ts
+      } + (if $footprint != null then
+             {gate_footprint: $footprint, gate_footprint_rule: $rule, gate_footprint_recipe: $recipe}
+           else {} end)' > "$ARTIFACTS_DIR/phase-verify-failed.json" 2>/dev/null; then
+      wrote=1; break
+    fi
+  done
+  if [[ "$wrote" -eq 0 ]]; then
     printf '{"verify_failed": true, "label": "%s", "exit_code": %s, "attempts": %s, "log_tail": "(unavailable: capture failed)", "ts": "%s"}\n' \
       "$label" "$exit_code" "$attempts" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       > "$ARTIFACTS_DIR/phase-verify-failed.json"
   fi
 
+  if [[ "$footprint" != "null" ]]; then
+    echo "  Verify FAILED — the gate WROTE TO THE TREE (gate footprint, restored; command exit $exit_code): $(jq -r 'join(", ")' <<<"$footprint" 2>/dev/null || echo "$footprint")" >&2
+    echo "  Rule: $GATE_FOOTPRINT_RULE. Fix: $GATE_FOOTPRINT_RECIPE." >&2
+  fi
   if [[ "$mode" == "memo" ]]; then
     echo "  Verify FAILED — known RED for this exact tree (verify memo); attempts unchanged at $attempts/$VERIFY_MAX_ATTEMPTS; see artifacts/phase-verify-failed.json" >&2
+    return 0
+  fi
+  if [[ "$mode" == "settle" ]]; then
+    echo "  Verify FAILED — settled from the previous session's kill inside the gate; no attempt spent (attempts $attempts/$VERIFY_MAX_ATTEMPTS); see artifacts/phase-verify-failed.json" >&2
     return 0
   fi
   echo "  Verify FAILED (attempt $attempts/$VERIFY_MAX_ATTEMPTS); see artifacts/phase-verify-failed.json" >&2
@@ -391,6 +421,289 @@ record_verify_failure() {
         next_step: "fix the failing verify or set VERIFY_SKIP=1 for this iteration"
       }' > "$ARTIFACTS_DIR/phase-blocked.json"
   fi
+}
+
+# --- verify-gate footprint (v0.14.10) ---------------------------------------
+# THE RULE: a verify gate is read-only over tracked files and writes nothing
+# untracked; gate output belongs under an ignored path. The loop proves it by
+# observation, not by declaration: `git status` before and after the gate
+# command, and the footprint is what appeared. Every xmeo landing from
+# iteration 50 to 58 (runs 714, 756, 771) rested dirty because its gate
+# re-measured three tracked evidence files AFTER the completion commit had
+# staged them — the commit carried one content, the worktree another, and an
+# operator committed the noise by hand at every landing; drill round 10
+# scored that shape the landing seam's one FAIL. A formatter run with a write
+# flag leaves the same shape. No opt-in and no declaration surface: a
+# footprint is restored (tracked paths back to HEAD, untracked ones deleted)
+# and the gate is RED even when the command returned 0, with the paths, the
+# rule and the recipe in artifacts/phase-verify-failed.json — the existing
+# red-gate machinery (CONTINUE_PROMPT step 2, the attempts breaker, the red
+# memo) carries the fix to the next pass.
+#
+# Dirt present BEFORE the gate is the session's staged work and its staged
+# bytes are never touched: the footprint is path-keyed (after minus before),
+# so a session that edits ten files while the gate rewrites an eleventh
+# yields a footprint of one. A gate that rewrites a file the session itself
+# edited (a formatter with a write flag; a tracked evidence file the session
+# re-measured in its turn and the gate re-measures again — the xmeo shape
+# when the model runs the gate itself) is caught too: the commit sites stage
+# everything before the gate, so an unstaged change that appears on a session
+# path across the gate is the gate's, restored to the staged bytes and red
+# (review MAJOR-2). A kill inside the gate — during the command
+# or between its return and the restore — is settled at the next loop start,
+# before any turn: the before-snapshot is kept in the transient boundary
+# record (`gate_pending`) until the restore has run, so whatever appeared is
+# restored and recorded red then (gate_settle_pending); the gate's dirt is
+# never staged as the session's work (review MAJOR-1, 2026-09-15).
+GATE_FOOTPRINT_RULE="a verify gate is read-only over tracked files and writes nothing untracked; gate output belongs under an ignored path"
+GATE_FOOTPRINT_RECIPE="write the gate's output under artifacts/logs/ (ignored in every scaffolded project) or another ignored path; a measurement the project wants committed is produced in the phase's own work, not by the gate; a formatter runs in check mode here, never with a write flag"
+
+gate_status_snapshot() {
+  # $1 = output file: one NUL-terminated "XY<TAB>path" record per entry of
+  # `git status --porcelain -z`, untracked files listed one by one (never a
+  # collapsed directory — except a nested repository, which stays `dir/`),
+  # paths relative to the repo root whatever the cwd (porcelain ignores
+  # status.relativePaths). A rename/copy entry carries its source as a
+  # second NUL-terminated token (`R  new\0old\0`); the source is emitted as
+  # its own record under the same letters so a restore puts BOTH ends back.
+  # Returns non-zero (file empty) when git cannot report; the caller then
+  # measures nothing this run rather than guessing.
+  local rec xy path src
+  git -C "$ROOT_DIR" status --porcelain -z --untracked-files=all 2>/dev/null \
+    | {
+        while IFS= read -r -d '' rec; do
+          xy="${rec:0:2}"; path="${rec:3}"
+          printf '%s\t%s\0' "$xy" "$path"
+          case "$xy" in
+            R?|C?|?R|?C)
+              if IFS= read -r -d '' src; then printf '%s\t%s\0' "$xy" "$src"; fi ;;
+          esac
+        done
+      } > "$1"
+}
+
+gate_footprint_diff() {
+  # $1 = before, $2 = after, $3 = output. The footprint is (a) every
+  # after-record whose PATH is absent from before — tracked paths newly
+  # changed in any way, untracked paths newly present — and (b) a before-path
+  # whose worktree column flipped from clean to changed across the gate
+  # (review MAJOR-2): every commit site runs `git add -A` before the gate, so
+  # a session path enters the gate with index == worktree (Y blank), and a Y
+  # that is now `M`/`D` is unambiguously the gate's rewrite of the SESSION'S
+  # file — restorable from the index byte-for-byte (recorded with X = "S";
+  # the restore reads it). A path the session left untracked (`??`: a
+  # transient signal, an unstaged add) cannot be judged and is left alone.
+  # The loop's own transient signals (artifacts/<TRANSIENT_SIGNALS>) and the
+  # baton slot (artifacts/session-handoff.json, promoted at loop start — the
+  # moment a pending footprint is settled) are never a footprint. One record
+  # per path, first wins (`git rm --cached` yields `D ` and `??` for one).
+  local -A before=() seen=() skip=()
+  local rec key xy sig
+  for sig in "${TRANSIENT_SIGNALS[@]:-}"; do
+    if [[ -n "$sig" ]]; then skip["artifacts/$sig"]=1; fi
+  done
+  skip["artifacts/session-handoff.json"]=1
+  while IFS= read -r -d '' rec; do
+    key="${rec#*$'\t'}"
+    if [[ -z "${before[$key]:-}" ]]; then before["$key"]="${rec%%$'\t'*}"; fi
+  done < "$1"
+  : > "$3"
+  while IFS= read -r -d '' rec; do
+    key="${rec#*$'\t'}"; xy="${rec%%$'\t'*}"
+    # The loop's own paths first, before any judgement (a healed tracked
+    # transient is exactly `D ` + `??` on one path — heal_tracked_transients).
+    if [[ -n "${skip[$key]:-}" ]]; then continue; fi
+    if [[ "$xy" == "??" && "${before[$key]:-}" == *D* ]]; then
+      # A file the session deleted (staged or not) that the gate recreated:
+      # the `??` is the gate's, whatever the first record for the path said
+      # (review NEW-1: left alone, the next `git add -A` would silently undo
+      # the session's deletion).
+      printf '%s\0' "$rec" >> "$3"
+      continue
+    fi
+    if [[ -n "${seen[$key]:-}" ]]; then continue; fi
+    seen["$key"]=1
+    if [[ -z "${before[$key]:-}" ]]; then
+      printf '%s\0' "$rec" >> "$3"
+    elif [[ "${before[$key]:1:1}" == " " && "${xy:1:1}" != " " && "${xy:1:1}" != "?" ]]; then
+      case "$key" in
+        artifacts/project-complete.json|artifacts/ready-to-deploy.json)
+          # The deadline watchdog's own disarm rewrites these two in the
+          # last minute (review NEW-3): never the gate's, never judged.
+          continue ;;
+      esac
+      printf 'S%s\t%s\0' "${xy:1:1}" "$key" >> "$3"
+    fi
+  done < "$2"
+}
+
+gate_footprint_json() {
+  # $1 = footprint file → a JSON array of its paths, in order (jq --args
+  # carries any bytes a path can hold; `--` so a leading `-` is a path, not
+  # an option — review MINOR-1).
+  local rec paths=()
+  while IFS= read -r -d '' rec; do paths+=("${rec#*$'\t'}"); done < "$1"
+  jq -cn '$ARGS.positional' --args -- "${paths[@]}"
+}
+
+_gate_git() {
+  # Every restore names paths LITERALLY (review MAJOR-3): as a pathspec, a
+  # name with `*`, `?`, `[` or a leading `:` would match OTHER files —
+  # including the session's — and revert them without a word.
+  git --literal-pathspecs -C "$ROOT_DIR" "$@"
+}
+
+gate_footprint_restore() {
+  # $1 = footprint file. Records:
+  #   "S?"  a session path the gate rewrote in the worktree → worktree back
+  #         to the INDEX (the session's staged bytes); nothing else touched;
+  #   "??"  untracked → deleted (a collapsed nested repository `dir/` whole);
+  #   else  tracked → index back to HEAD, then worktree from the index — a
+  #         path absent from the before-snapshot had index == HEAD ==
+  #         worktree when the gate started, so HEAD is exactly what the
+  #         index held; a path HEAD lacks (a file the gate created and
+  #         staged, or added with intent) is unstaged and removed.
+  # Untracked deletions run LAST, after the tracked restores and a
+  # check-ignore pass: a gate that rewrote .gitignore exposed previously
+  # ignored files as `??`; once .gitignore is back they are ignored again
+  # and are kept (review MINOR-5). Best-effort per path: a path that cannot
+  # be restored is named and left for git status to show.
+  local rec xy path untracked=()
+  while IFS= read -r -d '' rec; do
+    xy="${rec%%$'\t'*}"; path="${rec#*$'\t'}"
+    case "$xy" in
+      "??")
+        untracked+=("$path"); continue ;;
+      S?)
+        _gate_git checkout -q -- "$path" 2>/dev/null \
+          || echo "  gate footprint: could not restore '$path' from the index — left as is (git status shows it)" >&2
+        continue ;;
+    esac
+    if [[ "$(_gate_git ls-files -s -- "$path" 2>/dev/null | cut -c1-6)" == "160000" ]]; then
+      # A submodule (gitlink): its worktree is another repository's; named,
+      # never restored from here (review NEW-2).
+      echo "  gate footprint: '$path' is a submodule — not restored (git status shows it)" >&2
+      continue
+    fi
+    _gate_git reset -q -- "$path" >/dev/null 2>&1 || true
+    if _gate_git cat-file -e "HEAD:$path" 2>/dev/null; then
+      _gate_git checkout -q -- "$path" 2>/dev/null \
+        || echo "  gate footprint: could not restore '$path' from HEAD — left as is (git status shows it)" >&2
+    else
+      rm -f -- "$ROOT_DIR/$path"
+    fi
+  done < "$1"
+  for path in "${untracked[@]}"; do
+    # check-ignore takes pathnames, not pathspecs (and refuses the literal
+    # mode): a plain call is exact here.
+    if git -C "$ROOT_DIR" check-ignore -q -- "$path" 2>/dev/null; then
+      echo "  gate footprint: '$path' is ignored again now that the tree is restored — kept" >&2
+      continue
+    fi
+    if [[ "$path" == */ ]]; then rm -rf -- "$ROOT_DIR/$path"; else rm -f -- "$ROOT_DIR/$path"; fi
+  done
+}
+
+gate_pending_record() {
+  # $1 = the before-snapshot file, $2 = command, $3 = label. Kept in the
+  # (transient, hidden) boundary record until the restore has run, so a kill
+  # anywhere between here and the restore is settled at the next loop start
+  # (gate_settle_pending) instead of the gate's dirt being staged as the
+  # session's work — and the deadline watchdog's last-resort commit, seeing
+  # it, commits the index as it stands rather than `git add -A`. The whole
+  # "XY<TAB>path" records are stored (letters included — the index survives
+  # a kill, so a session path the gate rewrote is judged and restored from
+  # the index at the settle exactly as on the live path; review re-check),
+  # each as base64 of its raw bytes (review MINOR-2: jq would mangle a
+  # non-UTF-8 name and the settle would then mistake the session's own file
+  # for footprint). A record that cannot be written is said out loud (review
+  # MINOR-6: ARG_MAX on a huge untracked set) — the kill window is unguarded
+  # for that run.
+  command -v _boundary_write >/dev/null 2>&1 || return 0
+  local rec paths=() json
+  while IFS= read -r -d '' rec; do
+    paths+=("$(printf '%s' "$rec" | base64 -w0)")
+  done < "$1"
+  if ! json="$(jq -cn '$ARGS.positional' --args -- "${paths[@]}" 2>/dev/null)" \
+     || ! _boundary_write '.gate_pending = {before: $before, command: $cmd, label: $label, at: $now}' \
+          --argjson before "$json" --arg cmd "$2" --arg label "$3"; then
+    echo "  (gate footprint: the pending record could not be written — a kill inside this gate run would not be settled at the next start)" >&2
+  fi
+}
+
+gate_pending_clear() {
+  command -v _boundary_write >/dev/null 2>&1 || return 0
+  [[ -f "${BOUNDARY_STATE_FILE:-}" ]] || return 0
+  _boundary_write 'del(.gate_pending)'
+}
+
+gate_pending_before_file() {
+  # $1 = output file: the pending record's before-snapshot, the very
+  # "XY<TAB>path" records the live path took (base64-decoded), so the
+  # settle's diff judges exactly what the live diff would have.
+  local line
+  : > "$1"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    { base64 -d <<<"$line" 2>/dev/null || true; printf '\0'; } >> "$1"
+  done < <(boundary_get '.gate_pending.before[]? | strings')
+}
+
+gate_pending_restore_now() {
+  # The pending gate's footprint, measured and restored NOW: everything
+  # that appeared since its before-snapshot — a new path, or a session path
+  # whose worktree column flipped (the index survived the kill, so the
+  # restore from it is exact). Prints the footprint as a JSON array of
+  # paths, or nothing when nothing appeared or nothing could be measured.
+  local before after paths json=""
+  before="$(mktemp)"; after="$(mktemp)"; paths="$(mktemp)"
+  gate_pending_before_file "$before"
+  if gate_status_snapshot "$after"; then
+    gate_footprint_diff "$before" "$after" "$paths"
+    if [[ -s "$paths" ]]; then
+      json="$(gate_footprint_json "$paths")" || json='["(unavailable)"]'
+      gate_footprint_restore "$paths"
+    fi
+  else
+    echo "  (git status unavailable — the pending gate footprint could not be measured; left as is)" >&2
+  fi
+  rm -f "$before" "$after" "$paths"
+  printf '%s' "$json"
+}
+
+gate_settle_pending() {
+  # Loop start, before any turn (and before the loop-start recovery stages
+  # anything): the previous session died inside its verify gate — during
+  # the command, or after it returned and before the restore — and the
+  # record still carries that gate's before-snapshot. Everything dirty now
+  # that was not dirty then is that gate's footprint: restore it and record
+  # the red as the live path would (paths, rule, recipe) without spending a
+  # breaker attempt (the live re-run does), then clear the record. No
+  # command output survived the kill and the command never returned, so the
+  # capture carries exit_code null and says so. Nothing but the loop may
+  # touch a tree the loop left mid-gate: a hand edit made between the kill
+  # and this start is dirt that was not there before the gate, and is
+  # restored with the rest. Inert when no gate is pending.
+  command -v boundary_get >/dev/null 2>&1 || return 0
+  [[ -f "${BOUNDARY_STATE_FILE:-}" ]] || return 0
+  local n
+  n="$(boundary_get '.gate_pending.before | if type == "array" then length else -1 end')"
+  [[ "$n" =~ ^[0-9]+$ ]] || return 0
+  local at cmd label json log
+  at="$(boundary_get '.gate_pending.at // "?"')"
+  cmd="$(boundary_get '.gate_pending.command // "scripts/phasekit-verify.sh"')"
+  label="$(boundary_get '.gate_pending.label // "scripts/phasekit-verify.sh"')"
+  echo "Verify gate: the previous session was killed inside its gate ($label, at $at) — settling that gate's footprint before anything else runs (v0.14.10)." >&2
+  json="$(gate_pending_restore_now)"
+  if [[ -n "$json" ]]; then
+    log="$(mktemp)"
+    echo "(no command output: the previous session was killed inside this gate at $at; the footprint below is what that run left on disk)" > "$log"
+    record_verify_failure "$cmd" "$label" null "$log" settle "$json"
+    rm -f "$log"
+  else
+    echo "  (nothing appeared beyond that gate's before-snapshot — no footprint to settle)" >&2
+  fi
+  gate_pending_clear
 }
 
 run_contracts_gate() {
@@ -550,9 +863,13 @@ run_verify_gate() {
       memo_log="$(mktemp)"
       boundary_get '.verify_red.log_tail // ""' > "$memo_log" 2>/dev/null || true
       memo_code="$(boundary_get '.verify_red.exit_code // 1')"; [[ "$memo_code" =~ ^[0-9]+$ ]] || memo_code=1
+      # v0.14.10: a red BY FOOTPRINT (command rc may be 0) replays with its
+      # paths, so the memo can never pass it off as a plain red or a green.
+      local memo_fp
+      memo_fp="$(boundary_get '.verify_red.gate_footprint // null')"
       # ONE capture path for every verify failure (the v0.6.6 lesson): the
       # shared writer, in its no-attempt mode.
-      record_verify_failure "$cmd" "$label" "$memo_code" "$memo_log" memo
+      record_verify_failure "$cmd" "$label" "$memo_code" "$memo_log" memo "$memo_fp"
       rm -f "$memo_log"
       return 1
     fi
@@ -563,6 +880,21 @@ run_verify_gate() {
   log="$(mktemp)"
   local verify_status=0
   local verify_start verify_elapsed
+  # v0.14.10 gate footprint: what git status sees before the command, and
+  # after. Measured, never inferred (see the rule block above). When git
+  # cannot report, nothing is measured this run — said out loud, never
+  # guessed.
+  local fp_before fp_after fp_paths fp_measured=1 footprint_json=""
+  fp_before="$(mktemp)"; fp_after="$(mktemp)"; fp_paths="$(mktemp)"
+  if gate_status_snapshot "$fp_before"; then
+    # The before-snapshot outlives this process until the restore has run
+    # (gate_pending): a kill inside the gate is settled at the next loop
+    # start, never staged as the session's work.
+    gate_pending_record "$fp_before" "$cmd" "$label"
+  else
+    fp_measured=0
+    echo "  (gate footprint: git status unavailable before the gate — not measured this run)" >&2
+  fi
   verify_start="$(date +%s)"
   if [[ "$invoke" == "bash" ]]; then
     # Project's script provides its own set -e/pipefail.
@@ -574,6 +906,22 @@ run_verify_gate() {
     bash -eo pipefail -c "$cmd" >"$log" 2>&1 || verify_status=$?
   fi
   verify_elapsed=$(( $(date +%s) - verify_start ))
+  if [[ "$fp_measured" -eq 1 ]]; then
+    if gate_status_snapshot "$fp_after"; then
+      gate_footprint_diff "$fp_before" "$fp_after" "$fp_paths"
+      # Fault injection (tests only): the seam between the command's return
+      # and the restore — PHASEKIT_BOUNDARY_KILL_PROBE="gate:footprint".
+      _boundary_kill_probe gate footprint
+      if [[ -s "$fp_paths" ]]; then
+        footprint_json="$(gate_footprint_json "$fp_paths")" || footprint_json='["(unavailable)"]'
+        gate_footprint_restore "$fp_paths"
+      fi
+    else
+      echo "  (gate footprint: git status unavailable after the gate — not measured this run)" >&2
+    fi
+    gate_pending_clear
+  fi
+  rm -f "$fp_before" "$fp_after" "$fp_paths"
 
   # Verify-budget advisory (v0.6.4). Counts pass and fail alike — the drift
   # being measured is suite growth, not correctness. Once per session.
@@ -585,7 +933,7 @@ run_verify_gate() {
     fi
   fi
 
-  if [[ "$verify_status" -eq 0 ]]; then
+  if [[ "$verify_status" -eq 0 && -z "$footprint_json" ]]; then
     echo "  Verify passed."
     rm -f "$log" "$ARTIFACTS_DIR/phase-verify-failed.json"
     if [[ -n "$memo_tree" ]] && verify_memo_exact_tree; then
@@ -594,10 +942,12 @@ run_verify_gate() {
     return 0
   fi
 
-  # Failure path. Capture context so the next iteration can diagnose.
-  record_verify_failure "$cmd" "$label" "$verify_status" "$log"
+  # Failure path — a red command, or a green command that wrote to the tree
+  # (v0.14.10: the footprint alone makes the run red; exit_code stays the
+  # command's own). Capture context so the next iteration can diagnose.
+  record_verify_failure "$cmd" "$label" "$verify_status" "$log" "" "$footprint_json"
   if [[ -n "$memo_tree" ]] && command -v verify_memo_record_red >/dev/null 2>&1 && verify_memo_exact_tree; then
-    verify_memo_record_red "$memo_tree" "$label" "$cmd" "$verify_status" "$log"
+    verify_memo_record_red "$memo_tree" "$label" "$cmd" "$verify_status" "$log" "$footprint_json"
   fi
   rm -f "$log"
   return 1
@@ -1629,7 +1979,7 @@ finish_complete() {
   # exactly as it was found. Best-effort, like every rest.
   if squash_mode && [[ "$(current_branch)" != "$SQUASH_TARGET" ]]; then rest_on_target || true; fi
   if ! boundary_prove "$BOUNDARY_STEP_RESTED"; then
-    echo "boundary-state: the completion landed (record final, step $(boundary_step)) but the tree did not rest (step 7 unproven: HEAD on '$(current_branch)'; changes after the completion commit — the verify gate re-measuring?) — left as is, nothing else runs (v0.14.9):" >&2
+    echo "boundary-state: the completion landed (record final, step $(boundary_step)) but the tree did not rest (step 7 unproven: HEAD on '$(current_branch)'; changes after the completion commit — not the verify gate's, whose footprint is caught at the gate since v0.14.10) — left as is, nothing else runs (v0.14.9):" >&2
     git status --porcelain 2>/dev/null | sed 's/^/  /' >&2 || true
   fi
   echo "Run finished successfully."
@@ -1705,11 +2055,15 @@ verify_memo_record_red() {
   # $1 tree $2 label $3 command $4 exit code $5 log file — after a RED gate on
   # an exact tree. The next gate on the same tree (a loop-start recovery of
   # the approval a red wrap-up stranded) is answered from here at zero cost
-  # and without spending a breaker attempt (review finding 6).
-  local tail_output
+  # and without spending a breaker attempt (review finding 6). $6 (v0.14.10)
+  # = the gate footprint (JSON array of paths) or empty — a red by footprint
+  # is memoised WITH its paths, so its replay is the same red, never a green
+  # (the command's exit code may be 0) and never a plain red without them.
+  local tail_output footprint="${6:-}"
+  [[ -n "$footprint" && "$footprint" != "null" ]] || footprint="null"
   tail_output="$(tail -n 50 "$5" 2>/dev/null | tail -c 4000)" || tail_output=""
-  _boundary_write '.verify_red = {tree_sha: $tree, label: $label, command: $cmd, exit_code: ($code | tonumber), log_tail: $log, failed_at: $now}' \
-    --arg tree "$1" --arg label "$2" --arg cmd "$3" --arg code "$4" --arg log "$tail_output"
+  _boundary_write '.verify_red = {tree_sha: $tree, label: $label, command: $cmd, exit_code: ($code | tonumber), log_tail: $log, gate_footprint: $footprint, failed_at: $now}' \
+    --arg tree "$1" --arg label "$2" --arg cmd "$3" --arg code "$4" --arg log "$tail_output" --argjson footprint "$footprint"
 }
 
 verify_memo_hit_red() {
@@ -2216,9 +2570,30 @@ deadline_lastresort_commit() {
   # which the mtime aging alone cannot protect against. The staged-clean
   # check on exactly those two paths is what makes the disarm a gate rather
   # than a hope.
-  local attempt
+  # v0.14.10 (review MAJOR-1, re-check): a verify gate may be running right
+  # now — its before-snapshot is in the record. Every gate site ran
+  # `git add -A` before its gate and no model holds the tree during one, so
+  # the INDEX is the session's complete work and is immune to the gate's
+  # worktree writes: commit it as it stands, no `git add -A` — a restore
+  # here would race the still-running gate (verified: a second write after
+  # a single restore rode the wip). The gate's worktree residue is the next
+  # start's settle (gate_settle_pending), which restores it from this same
+  # index.
+  local attempt _gp_pending _gp_said=0
   for attempt in 1 2 3 4 5; do
-    git add -A 2>/dev/null || { sleep 2; continue; }
+    # Re-read per attempt: a gate that starts between attempts must not be
+    # swept by the next one (review, final pass).
+    _gp_pending=0
+    if [[ -n "$(boundary_get '.gate_pending.before // empty' 2>/dev/null)" ]]; then
+      _gp_pending=1
+      if [[ "$_gp_said" -eq 0 ]]; then
+        _gp_said=1
+        echo "deadline watchdog: a verify gate is running — committing the index as it stands (its worktree writes are the next start's settle)"
+      fi
+    fi
+    if [[ "$_gp_pending" -eq 0 ]]; then
+      git add -A 2>/dev/null || { sleep 2; continue; }
+    fi
     _disarm_deploy_artifact ready-to-deploy.json
     _disarm_deploy_artifact project-complete.json
     if [[ "$mode" == "wrapup" ]]; then
@@ -2879,6 +3254,10 @@ if ! ensure_work_branch; then
   exit 2
 fi
 heal_tracked_transients || true
+# v0.14.10: a verify gate the previous session died inside is settled here —
+# its footprint restored and recorded red — before the recovery below stages
+# anything and before any turn. Inert when no gate is pending.
+gate_settle_pending || true
 
 # --- Boundary recovery at loop start (v0.14.5) --------------------------------
 # One question, answered before any model turn: is a boundary open? Git and

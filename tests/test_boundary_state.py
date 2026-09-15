@@ -46,6 +46,7 @@ report per case via subTest. The bash is the shipped script, copied whole.
 Run from the repo root: python3 -m unittest tests.test_boundary_state
 """
 
+import base64
 import concurrent.futures
 import itertools
 import json
@@ -1164,10 +1165,31 @@ class SupervisingIterationLabel(unittest.TestCase):
 # can land a final boundary x both modes x a clean and a noisy gate x every
 # path that could run afterwards. Red on v0.14.8 for the noisy gate.
 
-# The live gate: green, but every run rewrites a tracked measurement file.
+# The live gate (v0.14.9's incident): green, but every run rewrites a tracked
+# measurement file. Under v0.14.10 that rewrite is the gate's FOOTPRINT: the
+# noisy half of the class below now proves the rule at the final boundary —
+# the completion never lands over it, the path is restored and named, and
+# the fix rides the existing red-gate path (GateFootprint has the cells).
 VERIFY_NOISY = VERIFY_LOGGING.replace(
     "exit 0\n", 'echo "measured $(date +%s%N)" >> "$ROOT/measure.txt"\nexit 0\n')
 assert VERIFY_NOISY != VERIFY_LOGGING
+
+# v0.14.10 fixture gates (GateFootprint). The gate script lives IN the tree,
+# so a fix is a tree change the memo cannot replay a stale verdict over —
+# the production shape (scripts/phasekit-verify.sh is project-owned and
+# committed).
+VERIFY_WRITES_UNTRACKED = VERIFY_LOGGING.replace(
+    "exit 0\n", 'echo "{\\"measured\\": true}" > "$ROOT/evidence.json"\nexit 0\n')
+VERIFY_WRITES_IGNORED = VERIFY_LOGGING.replace(
+    "exit 0\n", 'mkdir -p "$ROOT/artifacts/logs" && echo "measured $(date +%s%N)" >> "$ROOT/artifacts/logs/measure.txt"\nexit 0\n')
+VERIFY_RED_READONLY = VERIFY_LOGGING.replace("exit 0\n", "exit 1\n")
+assert VERIFY_WRITES_UNTRACKED != VERIFY_LOGGING and VERIFY_WRITES_IGNORED != VERIFY_LOGGING
+assert VERIFY_RED_READONLY != VERIFY_LOGGING
+# The convention marker (contracts/interface.json verify-gate-read-only): the
+# rule's first clause, verbatim in both human-facing homes and the loop.
+GATE_RULE_MARKER = "a verify gate is read-only over tracked files and writes nothing untracked"
+# The model's fix, made in its turn: the gate's output moves to the ignored path.
+FIX_GATE_SCENARIO = "cat > scripts/phasekit-verify.sh <<'GATE'\n" + VERIFY_WRITES_IGNORED + "GATE\n"
 
 # The run-756 shape of the pass that must never happen: the model finds no
 # next phase and declares itself blocked.
@@ -1204,13 +1226,17 @@ def terminal_case_name(case):
 
 
 def build_terminal_repo(mode, gate):
-    """A Repo whose base commit tracks measure.txt and carries the gate."""
+    """A Repo whose base commit tracks measure.txt and carries the gate:
+    "clean" (the logging gate), "noisy" (VERIFY_NOISY), or a gate script's
+    own text."""
     repo = Repo(squash=(mode == "squash"))
     if repo.squash:
         repo.git("checkout", "-q", "main")
     repo.write("measure.txt", "baseline\n")
     if gate == "noisy":
         repo.write("scripts/phasekit-verify.sh", VERIFY_NOISY, executable=True)
+    elif gate != "clean":
+        repo.write("scripts/phasekit-verify.sh", gate, executable=True)
     repo.git("add", "-A")
     repo.git("commit", "-qm", "base: measurement file + gate")
     repo.base = repo.git("rev-parse", "HEAD")
@@ -1255,9 +1281,16 @@ def run_terminal_case(case):
                             "PHASEKIT_LASTRESORT_LEAD_SECONDS": "0"})
         r = repo.run(env=env)
         subjects = repo.git("log", "--all", "--format=%s")
+        vf = repo.artifact("phase-verify-failed.json")
         return dict(rc=r.returncode, out=r.stdout + r.stderr, calls=repo.calls(),
                     rec=repo.record(), state=snapshot(repo), subjects=subjects,
-                    completion_on_main=repo.commits_touching("artifacts/project-complete.json", "main"))
+                    completion_on_main=repo.commits_touching("artifacts/project-complete.json", "main"),
+                    # v0.14.10: the measurement file on disk, every commit on ANY
+                    # ref that touched it past the base, and the red capture
+                    measure_worktree=(repo.repo / "measure.txt").read_text(),
+                    noise_commits=[ln for ln in repo.git("log", "--all", "--not", repo.base, "--format=%H",
+                                                         "--", "measure.txt").splitlines() if ln],
+                    verify_failed_json=json.loads(vf.read_text()) if vf.exists() else None)
     finally:
         repo.cleanup()
 
@@ -1272,9 +1305,49 @@ class CompletionIsTerminal(unittest.TestCase):
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             cls.results = dict(zip(cases, pool.map(run_terminal_case, cases)))
 
+    def _assert_footprint_case(self, case, res):
+        # v0.14.10: the noisy gate's rewrite is its footprint, and the
+        # completion NEVER lands over it — the path is restored byte-for-byte,
+        # the gate is red with the path named (its command exited 0), and the
+        # existing red-gate paths take it from there: a next pass is the
+        # model's turn (the blocked stub → exit 2); a wrap-up or pacing exit
+        # preserves the standing work as an UNVERIFIED wip that carries no
+        # noise; the catch-up squash is deferred. Never a rest over dirt,
+        # never "Run finished", never a commit on any ref with the gate's
+        # write in it.
+        entry, mode, gate, after, fk = case
+        out, st = res["out"], res["state"]
+        self.assertIn("the gate WROTE TO THE TREE", out)
+        self.assertNotIn("Run finished successfully.", out)
+        self.assertNotIn("did not rest", out)
+        self.assertEqual(res["measure_worktree"], "baseline\n", out)
+        self.assertEqual(res["noise_commits"], [], f"a commit carried the gate's write\n{out}")
+        self.assertEqual(res["completion_on_main"], [], out)
+        if mode == "squash":
+            self.assertEqual(st["trailers"], [], out)
+        self.assertFalse(any(ln.endswith("measure.txt") for ln in st["porcelain"]), st["porcelain"])
+        vf = res["verify_failed_json"]
+        self.assertIsNotNone(vf, out)
+        self.assertEqual(vf["gate_footprint"], ["measure.txt"], vf)
+        self.assertEqual(vf["exit_code"], 0, vf)
+        self.assertIn(GATE_RULE_MARKER, vf["gate_footprint_rule"])
+        self.assertIn("artifacts/logs/", vf["gate_footprint_recipe"])
+        rec = res["rec"]
+        self.assertFalse(rec.get("final") and rec.get("step", 0) >= 6, f"recorded complete over a red gate: {rec}")
+        if entry == "catchup":
+            self.assertIn("squash deferred", out)
+        if after == "next-pass":
+            self.assertEqual(res["rc"], 2, out)
+            self.assertTrue(st["blocked"], "the blocked stub's pass ran after the red gate")
+        elif entry != "catchup":
+            self.assertIn("UNVERIFIED work committed", out)
+
     def _assert_case(self, case, res):
         entry, mode, gate, after, fk = case
         out = res["out"]
+        if gate == "noisy":
+            self._assert_footprint_case(case, res)
+            return
         # (1) the session exits 0 and says so
         self.assertEqual(res["rc"], 0, out)
         self.assertIn("Run finished successfully.", out)
@@ -1295,15 +1368,8 @@ class CompletionIsTerminal(unittest.TestCase):
         self.assertFalse(res["state"]["handoff_on_disk"])
         self.assertFalse(res["state"]["interrupted_on_disk"])
         self.assertTrue(res["state"]["completion_on_disk"])
-        if gate == "clean":
-            self.assertEqual(rec["step"], RESTED, rec)
-            self.assertEqual(res["state"]["porcelain"], [], out)
-        else:
-            # the gate's noise is NAMED and left exactly as it is — never
-            # committed, never re-entered over, never deleted
-            self.assertEqual(rec["step"], 6, rec)
-            self.assertEqual([ln.strip() for ln in res["state"]["porcelain"]], ["M measure.txt"], out)
-            self.assertIn("did not rest", out)
+        self.assertEqual(rec["step"], RESTED, rec)
+        self.assertEqual(res["state"]["porcelain"], [], out)
         self.assertNotIn("re-entering loop", out)
 
     def test_every_landing_entry_and_afterwards_path(self):
@@ -1331,9 +1397,11 @@ class TerminalRuleBounds(unittest.TestCase):
         self.addCleanup(repo.cleanup)
         return repo
 
-    def test_a_phase_boundary_with_a_noisy_gate_still_continues(self):
-        # negative pin: step 7 unproven on a NON-final boundary is exactly
-        # what it was — the loop continues and the model gets its next turn
+    def test_a_phase_boundary_with_a_noisy_gate_is_red_at_the_gate_and_the_loop_continues(self):
+        # negative pin for the terminal rule, and v0.14.10's disposition on a
+        # NON-final boundary: the footprint makes the phase commit red, the
+        # path is restored, and the loop continues to the next turn exactly
+        # as any red gate does — never "Run finished", never a rest over dirt
         for mode in ("squash", "plain"):
             with self.subTest(mode=mode):
                 repo = self._repo(mode, "noisy")
@@ -1344,6 +1412,12 @@ class TerminalRuleBounds(unittest.TestCase):
                 self.assertIn("=== Iteration 2 ===", out)
                 self.assertNotIn("Run finished successfully.", out)
                 self.assertFalse(repo.record()["final"])
+                self.assertEqual((repo.repo / "measure.txt").read_text(), "baseline\n")
+                vf = json.loads(repo.artifact("phase-verify-failed.json").read_text())
+                self.assertEqual(vf["gate_footprint"], ["measure.txt"], vf)
+                self.assertEqual(vf["attempts"], 2, "each pass's red spends one attempt")
+                self.assertTrue(any(ln.endswith("artifacts/phase-approval.json") for ln in repo.porcelain()),
+                                "the approval stays on disk, uncommitted")
 
     def _seed_complete(self, repo, record, marker=None):
         # a completion-only boundary (approval final_phase: false + a
@@ -1416,7 +1490,599 @@ class TerminalRuleBounds(unittest.TestCase):
         self.assertNotIn("already complete", out)
 
 
+# ---------------------------------------------------------------------------
+# v0.14.10: the verify gate is read-only over the tree. The seven cells of
+# the kickoff (§3), in-container = the acceptance: real sessions of the
+# shipped loop against fixture gates that write where a gate must not.
+# ---------------------------------------------------------------------------
+
+class GateFootprint(unittest.TestCase):
+    def _repo(self, mode, gate):
+        repo = build_terminal_repo(mode, gate)
+        self.addCleanup(repo.cleanup)
+        return repo
+
+    @staticmethod
+    def _vf(repo):
+        p = repo.artifact("phase-verify-failed.json")
+        return json.loads(p.read_text()) if p.exists() else None
+
+    @staticmethod
+    def _fix_gate(repo):
+        # The session's fix, IN the tree: gate output under an ignored path.
+        repo.write("scripts/phasekit-verify.sh", VERIFY_WRITES_IGNORED, executable=True)
+
+    @staticmethod
+    def _dirt(repo):
+        # the tree's dirt minus the phase boundary's own provisional baton
+        return [ln for ln in repo.porcelain() if "session-handoff.json" not in ln]
+
+    def test_cell1_a_tracked_rewrite_is_restored_red_and_named_then_the_fixed_gate_lands(self):
+        for mode in ("squash", "plain"):
+            with self.subTest(mode=mode):
+                repo = self._repo(mode, "noisy")
+                repo.scenario(APPROVE_SCENARIO)
+                r1 = repo.run(env={"FINAL_KIND": "both", "MAX_ITERATIONS": "1"})
+                out1 = r1.stdout + r1.stderr
+                # restored byte-for-byte and out of git status; the gate red
+                # although its command exited 0; the paths, rule and recipe
+                # in the artifact; one attempt spent
+                self.assertEqual((repo.repo / "measure.txt").read_text(), "baseline\n", out1)
+                self.assertFalse(any(ln.endswith("measure.txt") for ln in repo.porcelain()), repo.porcelain())
+                vf = self._vf(repo)
+                self.assertIsNotNone(vf, out1)
+                self.assertEqual(vf["gate_footprint"], ["measure.txt"], vf)
+                self.assertEqual(vf["exit_code"], 0, vf)
+                self.assertEqual(vf["attempts"], 1, vf)
+                self.assertTrue(vf["verify_failed"])
+                self.assertIn(GATE_RULE_MARKER, vf["gate_footprint_rule"])
+                self.assertIn("artifacts/logs/", vf["gate_footprint_recipe"])
+                self.assertIn("the gate WROTE TO THE TREE", out1)
+                self.assertIn("measure.txt", out1)
+                self.assertTrue(any(ln.endswith("artifacts/phase-approval.json") for ln in repo.porcelain()),
+                                "the approval stays on disk, uncommitted")
+                self.assertEqual(repo.commits_touching("artifacts/project-complete.json", "main"), [])
+                self.assertEqual(repo.verify_calls(), 1, out1)
+                # the red memo carries the footprint: a replay is the same red
+                self.assertEqual(((repo.record() or {}).get("verify_red") or {}).get("gate_footprint"),
+                                 ["measure.txt"], repo.record())
+                # the next session: the gate fixed in the tree (its output
+                # under artifacts/logs/, ignored) → green, the completion
+                # lands with zero turns, the tree rests clean
+                self._fix_gate(repo)
+                repo.reset_stub()
+                repo.scenario(ORIENT_SCENARIO)
+                r2 = repo.run(env={"MAX_ITERATIONS": "1"})
+                out2 = r2.stdout + r2.stderr
+                self.assertEqual(r2.returncode, 0, out2)
+                self.assertIn("Run finished successfully.", out2)
+                self.assertEqual(repo.calls(), 0, "the recovery lands the completion before any turn")
+                self.assertEqual(repo.porcelain(), [], out2)
+                self.assertEqual(repo.head_branch(), "main")
+                self.assertIsNone(self._vf(repo), out2)
+                self.assertEqual(len(repo.commits_touching("artifacts/project-complete.json", "main")), 1, out2)
+                self.assertEqual(repo.git("show", "main:measure.txt"), "baseline")
+                self.assertIn("artifacts/logs", repo.git("show", "main:scripts/phasekit-verify.sh"))
+                self.assertTrue(repo.artifact("logs/measure.txt").exists(), "the gate's output went to the ignored path")
+                self.assertNotIn("WROTE TO THE TREE", out2)
+
+    def test_cell2_an_untracked_file_is_deleted_red_and_named(self):
+        repo = self._repo("squash", VERIFY_WRITES_UNTRACKED)
+        repo.scenario(APPROVE_SCENARIO)
+        r = repo.run(env={"FINAL_KIND": "no", "MAX_ITERATIONS": "1"})
+        out = r.stdout + r.stderr
+        self.assertFalse((repo.repo / "evidence.json").exists(), out)
+        vf = self._vf(repo)
+        self.assertIsNotNone(vf, out)
+        self.assertEqual(vf["gate_footprint"], ["evidence.json"], vf)
+        self.assertEqual(vf["exit_code"], 0, vf)
+        self.assertIn("evidence.json", out)
+        self.assertTrue(any(ln.endswith("artifacts/phase-approval.json") for ln in repo.porcelain()))
+        self.assertEqual(repo.trailer_commits("main"), [], "nothing reached the target")
+
+    def test_cell3_a_read_only_gate_has_no_footprint_key_green_or_red(self):
+        # green — the matrix's own gate (VERIFY_LOGGING), which the 216 cases
+        # above run unchanged; here the direct pin
+        repo = self._repo("plain", "clean")
+        repo.scenario(APPROVE_SCENARIO)
+        r = repo.run(env={"FINAL_KIND": "no", "MAX_ITERATIONS": "1"})
+        out = r.stdout + r.stderr
+        self.assertIn("Verify passed.", out)
+        self.assertNotIn("WROTE TO THE TREE", out)
+        self.assertIsNone(self._vf(repo), out)
+        self.assertEqual(len(repo.commits_touching("artifacts/phase-approval.json")), 1, out)
+        # red by the command, read-only: an ordinary red, no footprint keys
+        repo2 = self._repo("plain", VERIFY_RED_READONLY)
+        repo2.scenario(APPROVE_SCENARIO)
+        r2 = repo2.run(env={"FINAL_KIND": "no", "MAX_ITERATIONS": "1"})
+        out2 = r2.stdout + r2.stderr
+        vf = self._vf(repo2)
+        self.assertIsNotNone(vf, out2)
+        self.assertEqual(vf["exit_code"], 1, vf)
+        for key in ("gate_footprint", "gate_footprint_rule", "gate_footprint_recipe"):
+            self.assertNotIn(key, vf)
+        self.assertNotIn("WROTE TO THE TREE", out2)
+        # and the matrix gate never writes under the tree (structural)
+        self.assertNotIn('> "$ROOT', VERIFY_LOGGING)
+        self.assertNotIn('>> "$ROOT', VERIFY_LOGGING)
+
+    def test_cell4_session_dirt_is_never_in_the_footprint(self):
+        # the session edits src.txt (APPROVE_SCENARIO) and creates notes.txt;
+        # the gate rewrites measure.txt: a footprint of exactly one path, the
+        # session's work untouched, staged, and committed once the gate is fixed
+        repo = self._repo("squash", "noisy")
+        repo.scenario("echo notes > notes.txt\n" + APPROVE_SCENARIO)
+        r1 = repo.run(env={"FINAL_KIND": "no", "MAX_ITERATIONS": "1"})
+        out1 = r1.stdout + r1.stderr
+        vf = self._vf(repo)
+        self.assertIsNotNone(vf, out1)
+        self.assertEqual(vf["gate_footprint"], ["measure.txt"], vf)
+        self.assertEqual((repo.repo / "src.txt").read_text(), "base\nwork by call 1\n")
+        self.assertEqual((repo.repo / "notes.txt").read_text(), "notes\n")
+        staged = repo.git("diff", "--cached", "--name-only").splitlines()
+        self.assertIn("src.txt", staged)
+        self.assertIn("notes.txt", staged)
+        self.assertNotIn("measure.txt", staged)
+        self._fix_gate(repo)
+        repo.reset_stub()
+        repo.scenario(ORIENT_SCENARIO)
+        r2 = repo.run(env={"MAX_ITERATIONS": "1"})
+        out2 = r2.stdout + r2.stderr
+        self.assertEqual(repo.git("show", "main:src.txt"), "base\nwork by call 1", out2)
+        self.assertEqual(repo.git("show", "main:notes.txt"), "notes", out2)
+        self.assertEqual(repo.git("show", "main:measure.txt"), "baseline", out2)
+        self.assertIsNone(self._vf(repo), out2)
+        self.assertEqual(len(repo.trailer_commits("main")), 1, out2)
+
+    def test_cell5_a_path_the_session_dirtied_keeps_its_staged_bytes_and_the_gates_rewrite_is_red(self):
+        # Review MAJOR-2 (supersedes the kickoff's "formatter caveat"): the
+        # xmeo shape whenever the model ran the gate in its own turn — the
+        # re-measured evidence file is the session's (in S0), the gate
+        # re-measures it after staging, and v0.14.9 rested dirty. The commit
+        # sites stage everything before the gate, so the unstaged change that
+        # appears on a session path across the gate is the gate's: restored
+        # to the staged bytes (never HEAD — the session's edit stays), red,
+        # named; once the gate is fixed the staged bytes are what lands.
+        repo = self._repo("plain", "noisy")
+        repo.scenario("echo session >> measure.txt\n" + APPROVE_SCENARIO)
+        r = repo.run(env={"FINAL_KIND": "no", "MAX_ITERATIONS": "1"})
+        out = r.stdout + r.stderr
+        self.assertIn("the gate WROTE TO THE TREE", out)
+        vf = self._vf(repo)
+        self.assertIsNotNone(vf, out)
+        self.assertEqual(vf["gate_footprint"], ["measure.txt"], vf)
+        self.assertEqual((repo.repo / "measure.txt").read_text(), "baseline\nsession\n", "the session's staged bytes, not HEAD's")
+        self.assertEqual(repo.git("diff", "--cached", "--name-only").splitlines().count("measure.txt"), 1)
+        self.assertEqual([ln.strip() for ln in self._dirt(repo) if ln.endswith("measure.txt")], ["M  measure.txt"], repo.porcelain())
+        self.assertEqual(repo.commits_touching("artifacts/phase-approval.json"), [], out)
+        # the fix lands the session's line and nothing of the gate's
+        self._fix_gate(repo)
+        repo.reset_stub()
+        repo.scenario(ORIENT_SCENARIO)
+        r2 = repo.run(env={"MAX_ITERATIONS": "1"})
+        out2 = r2.stdout + r2.stderr
+        self.assertEqual(repo.git("show", "HEAD:measure.txt"), "baseline\nsession", out2)
+        self.assertEqual(len(repo.commits_touching("artifacts/phase-approval.json")), 1, out2)
+        self.assertEqual(self._dirt(repo), [], out2)
+
+    def test_cell6_a_kill_between_the_commands_return_and_the_restore(self):
+        # The gate has written, the loop has not yet restored, SIGKILL. The
+        # before-snapshot outlives the process in the transient record
+        # (gate_pending — review MAJOR-1: without it the next loop start
+        # staged the gate's dirt as the iteration's work and, with the gate
+        # still noisy, the project rested dirty — the very shape this
+        # release removes). ONE outcome, whatever the gate's state at the
+        # next start: the footprint is restored and recorded red before any
+        # turn; a fixed gate then lands clean, an unfixed one is red again
+        # at the live gate. No stale measurement rides any commit.
+        for mode in ("squash", "plain"):
+            for fixed in (True, False):
+                with self.subTest(mode=mode, fixed=fixed):
+                    repo = self._repo(mode, "noisy")
+                    repo.scenario(APPROVE_SCENARIO)
+                    r1 = repo.run(env={"FINAL_KIND": "both", "MAX_ITERATIONS": "1",
+                                       "PHASEKIT_BOUNDARY_KILL_PROBE": "gate:footprint"})
+                    out1 = r1.stdout + r1.stderr
+                    self.assertEqual(r1.returncode, -9, out1)
+                    self.assertIn("KILL PROBE gate:footprint", out1)
+                    self.assertIn("measured", (repo.repo / "measure.txt").read_text(), "the gate's write is on disk")
+                    self.assertIsNone(self._vf(repo))
+                    self.assertTrue(any(ln.endswith("artifacts/project-complete.json") for ln in repo.porcelain()))
+                    pending = (repo.record() or {}).get("gate_pending") or {}
+                    self.assertEqual(pending.get("label"), "scripts/phasekit-verify.sh", repo.record())
+                    before = [base64.b64decode(p).decode().split("\t", 1) for p in pending.get("before", [])]
+                    self.assertNotIn("measure.txt", [p for _, p in before], "clean before the gate")
+                    self.assertIn(["A ", "artifacts/project-complete.json"], before, "the records carry their letters")
+                    repo.reset_stub()
+                    # the fix arrives the only way it can in production: through
+                    # the model's turn (CONTINUE_PROMPT step 2 — fix the gate,
+                    # re-write the signal artifacts); the stub that writes
+                    # nothing is the unfixed case
+                    repo.scenario(FIX_GATE_SCENARIO + APPROVE_SCENARIO if fixed else ORIENT_SCENARIO)
+                    r2 = repo.run(env={"FINAL_KIND": "both", "MAX_ITERATIONS": "1"})
+                    out2 = r2.stdout + r2.stderr
+                    # settled first — before the recovery, before any turn — and
+                    # without spending an attempt; the recovery's live re-run of
+                    # the still-noisy gate is red again (attempt 1)
+                    # (the order — settle before the recovery — is pinned in the
+                    # source by StructuralPins; stdout and stderr interleave here)
+                    self.assertIn("settling that gate's footprint before anything else runs", r2.stderr)
+                    self.assertIn("no attempt spent (attempts 0/", out2)
+                    self.assertIn("Verify FAILED (attempt 1/", out2)
+                    # unfixed: the landing retried after the empty turn is red a third time (attempt 2)
+                    self.assertEqual(out2.count("the gate WROTE TO THE TREE"), 2 if fixed else 3, out2)
+                    self.assertNotIn("gate_pending", json.dumps(repo.record() or {}), "cleared once settled")
+                    self.assertEqual(repo.git("log", "--all", "--not", repo.base, "--format=%H", "--", "measure.txt"),
+                                     "", "no commit on any ref carries the gate's write")
+                    self.assertNotIn("did not rest", out2)
+                    self.assertNotIn("re-entering loop", out2)
+                    self.assertEqual(repo.calls(), 1, out2)
+                    if fixed:
+                        # the turn fixed the gate: the landing after it is green and clean
+                        self.assertEqual(r2.returncode, 0, out2)
+                        self.assertIn("Run finished successfully.", out2)
+                        self.assertEqual(repo.porcelain(), [], out2)
+                        self.assertEqual(repo.head_branch(), "main")
+                        self.assertIsNone(self._vf(repo), out2)
+                        self.assertEqual(len(repo.commits_touching("artifacts/project-complete.json", "main")), 1, out2)
+                        self.assertEqual(repo.git("show", "main:measure.txt"), "baseline")
+                        self.assertIn("artifacts/logs", repo.git("show", "main:scripts/phasekit-verify.sh"))
+                    else:
+                        # restored, red, named; the completion never landed — never a rest over dirt
+                        self.assertEqual((repo.repo / "measure.txt").read_text(), "baseline\n")
+                        self.assertFalse(any(ln.endswith("measure.txt") for ln in repo.porcelain()), repo.porcelain())
+                        vf = self._vf(repo)
+                        self.assertIsNotNone(vf, out2)
+                        self.assertEqual(vf["gate_footprint"], ["measure.txt"], vf)
+                        self.assertEqual(vf["attempts"], 2, vf)
+                        self.assertNotIn("Run finished successfully.", out2)
+                        self.assertEqual(repo.commits_touching("artifacts/project-complete.json", "main"), [])
+
+    def test_the_pending_snapshot_is_recorded_before_the_command_and_cleared_after_the_restore(self):
+        # a clean run leaves no gate_pending behind, and a kill DURING the
+        # command (not only after its return) is settled the same way
+        repo = self._repo("plain", "clean")
+        repo.scenario(APPROVE_SCENARIO)
+        r = repo.run(env={"FINAL_KIND": "no", "MAX_ITERATIONS": "1"})
+        self.assertNotIn("gate_pending", json.dumps(repo.record() or {}), r.stdout + r.stderr)
+        # a gate that kills the loop from inside the command, once (the next
+        # session's re-run of the same gate is noisy but survives)
+        killer = VERIFY_NOISY.replace(
+            "exit 0\n", 'if [ -f "$STUB_DIR/kill-once" ]; then rm -f "$STUB_DIR/kill-once"; kill -KILL "$PPID"; sleep 5; fi\nexit 0\n')
+        repo2 = self._repo("plain", killer)
+        (repo2.stub / "kill-once").write_text("")
+        repo2.scenario(APPROVE_SCENARIO)
+        r1 = repo2.run(env={"FINAL_KIND": "no", "MAX_ITERATIONS": "1"})
+        self.assertEqual(r1.returncode, -9, r1.stdout + r1.stderr)
+        self.assertIn("measured", (repo2.repo / "measure.txt").read_text())
+        self.assertIn("gate_pending", json.dumps(repo2.record() or {}))
+        repo2.reset_stub()
+        repo2.scenario(ORIENT_SCENARIO)
+        r2 = repo2.run(env={"MAX_ITERATIONS": "1"})
+        out2 = r2.stdout + r2.stderr
+        self.assertIn("settling that gate's footprint", out2)
+        self.assertEqual((repo2.repo / "measure.txt").read_text(), "baseline\n", out2)
+        self.assertEqual(self._vf(repo2)["gate_footprint"], ["measure.txt"], out2)
+        # and a session path the killed gate rewrote is restored to the
+        # session's STAGED bytes at the settle (the index survived the kill;
+        # the record kept the letters) — the incident via the kill path
+        repo3 = self._repo("plain", killer)
+        (repo3.stub / "kill-once").write_text("")
+        repo3.scenario("echo session >> measure.txt\n" + APPROVE_SCENARIO)
+        r1 = repo3.run(env={"FINAL_KIND": "no", "MAX_ITERATIONS": "1"})
+        self.assertEqual(r1.returncode, -9, r1.stdout + r1.stderr)
+        self.assertEqual((repo3.repo / "measure.txt").read_text().count("measured"), 1)
+        repo3.reset_stub()
+        repo3.scenario(ORIENT_SCENARIO)
+        r2 = repo3.run(env={"MAX_ITERATIONS": "1"})
+        out2 = r2.stdout + r2.stderr
+        self.assertIn("settling that gate's footprint", out2)
+        self.assertEqual((repo3.repo / "measure.txt").read_text(), "baseline\nsession\n", out2)
+        self.assertEqual(repo3.git("log", "--all", "--not", repo3.base, "--format=%H", "--", "measure.txt"), "",
+                         "no commit on any ref carries the gate's write")
+        self.assertEqual(self._vf(repo3)["gate_footprint"], ["measure.txt"], out2)
+
+
+FOOTPRINT_BLOCK = _extract_block(r"^# --- verify-gate footprint \(v0\.14\.10\)", r"^run_contracts_gate\(\) \{")
+
+
+class FootprintPrimitives(unittest.TestCase):
+    """The helpers, extracted from the shipped script, on the shapes the
+    review is pointed at: NUL-safe paths (a space, a newline), both ends of
+    a rename the session staged, a deletion and a staged add by the gate, an
+    untracked directory — and the session's dirt untouched throughout."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="pk-footprint-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        (self.tmp / "artifacts").mkdir()
+        (self.tmp / "sub").mkdir()
+        for rel, content in (("sp ace.txt", "a\n"), ("old.txt", "b\n"), ("sub/keep", "c\n"),
+                             ("measure.txt", "m\n"), ("new\nline.txt", "n\n")):
+            (self.tmp / rel).write_text(content)
+        for args in (["init", "-q", "-b", "main"], ["config", "user.email", "t@t"],
+                     ["config", "user.name", "t"], ["add", "-A"], ["commit", "-qm", "base"]):
+            subprocess.run(["git", *args], cwd=self.tmp, check=True, capture_output=True)
+
+    def bash(self, body):
+        prelude = ["set -uo pipefail", f'cd "{self.tmp}"', f'ROOT_DIR="{self.tmp}"',
+                   f'ARTIFACTS_DIR="{self.tmp}/artifacts"', _transient_array(), FOOTPRINT_BLOCK]
+        return subprocess.run(["bash", "-c", "\n".join(prelude) + "\n" + body], capture_output=True,
+                              text=True, timeout=60, env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"})
+
+    def porcelain(self):
+        r = subprocess.run(["git", "-C", str(self.tmp), "status", "--porcelain", "-z", "-uall"],
+                           capture_output=True, text=True, check=True)
+        return [e for e in r.stdout.split("\0") if e]
+
+    def test_the_footprint_is_after_minus_before_by_path_and_the_restore_is_exact(self):
+        r = self.bash(r'''
+# the session's dirt (S0): an edit, a staged rename
+printf 'x\n' >> 'sp ace.txt'; git mv old.txt new.txt; git add -A
+b=$(mktemp); a=$(mktemp); f=$(mktemp)
+gate_status_snapshot "$b" || { echo BEFORE-FAILED; exit 9; }
+# the gate: rewrites two tracked files, deletes one, stages a new one, creates untracked files
+echo t >> measure.txt; echo t >> $'new\nline.txt'; rm sub/keep; echo n > gateadded; git add gateadded
+echo e > evidence.json; mkdir udir; echo u > udir/x
+gate_status_snapshot "$a" || { echo AFTER-FAILED; exit 9; }
+gate_footprint_diff "$b" "$a" "$f"
+echo "FOOTPRINT:$(tr '\0\n' '|~' < "$f")"
+echo "JSON:$(gate_footprint_json "$f")"
+gate_footprint_restore "$f"
+echo "EMPTY:$(: > "$f"; gate_footprint_json "$f")"
+''')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stderr, "", r.stderr)
+        fp = [m for m in r.stdout.splitlines() if m.startswith("FOOTPRINT:")][0]
+        self.assertEqual(sorted(fp[len("FOOTPRINT:"):].strip("|").split("|")),
+                         sorted(["A \tgateadded", " M\tmeasure.txt", " M\tnew~line.txt", " D\tsub/keep",
+                                 "??\tevidence.json", "??\tudir/x"]))
+        js = [m for m in r.stdout.splitlines() if m.startswith("JSON:")][0][len("JSON:"):]
+        self.assertEqual(sorted(json.loads(js)), sorted(["gateadded", "measure.txt", "new\nline.txt",
+                                                           "sub/keep", "evidence.json", "udir/x"]))
+        self.assertIn("EMPTY:[]", r.stdout)
+        # after the restore only the session's dirt remains — rename (both ends) and the edit
+        self.assertEqual(sorted(self.porcelain()),
+                         sorted(["R  new.txt", "old.txt", "M  sp ace.txt"]))
+        self.assertEqual((self.tmp / "measure.txt").read_text(), "m\n")
+        self.assertEqual((self.tmp / "new\nline.txt").read_text(), "n\n")
+        self.assertEqual((self.tmp / "sub" / "keep").read_text(), "c\n")
+        self.assertEqual((self.tmp / "sp ace.txt").read_text(), "a\nx\n")
+        for gone in ("gateadded", "evidence.json", "udir/x"):
+            self.assertFalse((self.tmp / gone).exists(), gone)
+
+    def test_a_rename_or_deletion_the_gate_staged_comes_back_whole(self):
+        r = self.bash(r'''
+b=$(mktemp); a=$(mktemp); f=$(mktemp)
+gate_status_snapshot "$b"
+git mv old.txt moved.txt; git rm -q sub/keep
+gate_status_snapshot "$a"; gate_footprint_diff "$b" "$a" "$f"
+echo "JSON:$(gate_footprint_json "$f")"
+gate_footprint_restore "$f"
+''')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        js = [m for m in r.stdout.splitlines() if m.startswith("JSON:")][0][len("JSON:"):]
+        self.assertEqual(sorted(json.loads(js)), ["moved.txt", "old.txt", "sub/keep"])
+        self.assertEqual(self.porcelain(), [])
+        self.assertEqual((self.tmp / "old.txt").read_text(), "b\n")
+        self.assertEqual((self.tmp / "sub" / "keep").read_text(), "c\n")
+        self.assertFalse((self.tmp / "moved.txt").exists())
+
+    def test_glob_and_magic_names_restore_only_themselves(self):
+        # review MAJOR-3: pathspecs are literal — `a*b.txt` must not revert
+        # the session's `axb.txt`, `:colon.txt` must not be read as magic
+        for rel in ("a*b.txt", "axb.txt", ":colon.txt", "colon.txt", "[id].txt", "i.txt"):
+            (self.tmp / rel).write_text("v1\n")
+        subprocess.run(["git", "add", "-A"], cwd=self.tmp, check=True)
+        subprocess.run(["git", "commit", "-qm", "names"], cwd=self.tmp, check=True)
+        r = self.bash(r'''
+printf 'SESSION\n' >> axb.txt; printf 'SESSION\n' >> colon.txt; printf 'SESSION\n' >> i.txt; git add -A
+b=$(mktemp); a=$(mktemp); f=$(mktemp)
+gate_status_snapshot "$b"
+printf 'gate\n' >> 'a*b.txt'; printf 'gate\n' >> ':colon.txt'; printf 'gate\n' >> '[id].txt'
+gate_status_snapshot "$a"; gate_footprint_diff "$b" "$a" "$f"
+echo "JSON:$(gate_footprint_json "$f")"
+gate_footprint_restore "$f"
+''')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        js = [m for m in r.stdout.splitlines() if m.startswith("JSON:")][0][len("JSON:"):]
+        self.assertEqual(sorted(json.loads(js)), sorted(["a*b.txt", ":colon.txt", "[id].txt"]))
+        for rel in ("a*b.txt", ":colon.txt", "[id].txt"):
+            self.assertEqual((self.tmp / rel).read_text(), "v1\n", rel)
+        for rel in ("axb.txt", "colon.txt", "i.txt"):
+            self.assertEqual((self.tmp / rel).read_text(), "v1\nSESSION\n", rel)
+        self.assertEqual(sorted(self.porcelain()), sorted(["M  axb.txt", "M  colon.txt", "M  i.txt"]))
+
+    def test_a_session_path_the_gate_rewrites_is_restored_to_the_index_not_head(self):
+        # review MAJOR-2: staged (session) bytes kept, the gate's unstaged
+        # rewrite gone; a leading-dash name rides jq --args (MINOR-1)
+        r = self.bash(r'''
+printf 'SESSION\n' >> measure.txt; printf 'd\n' > -dash.txt; git add -A
+b=$(mktemp); a=$(mktemp); f=$(mktemp)
+gate_status_snapshot "$b"
+printf 'gate\n' >> measure.txt; printf 'gate\n' >> -dash.txt; rm 'sp ace.txt'
+gate_status_snapshot "$a"; gate_footprint_diff "$b" "$a" "$f"
+echo "FOOTPRINT:$(tr '\0' '|' < "$f")"
+echo "JSON:$(gate_footprint_json "$f")"
+gate_footprint_restore "$f"
+''')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        fp = [m for m in r.stdout.splitlines() if m.startswith("FOOTPRINT:")][0]
+        self.assertEqual(sorted(fp[len("FOOTPRINT:"):].strip("|").split("|")),
+                         sorted(["SM\tmeasure.txt", "SM\t-dash.txt", " D\tsp ace.txt"]))
+        js = [m for m in r.stdout.splitlines() if m.startswith("JSON:")][0][len("JSON:"):]
+        self.assertEqual(sorted(json.loads(js)), sorted(["measure.txt", "-dash.txt", "sp ace.txt"]))
+        self.assertEqual((self.tmp / "measure.txt").read_text(), "m\nSESSION\n")
+        self.assertEqual((self.tmp / "-dash.txt").read_text(), "d\n")
+        self.assertEqual((self.tmp / "sp ace.txt").read_text(), "a\n")
+        self.assertEqual(sorted(self.porcelain()), sorted(["A  -dash.txt", "M  measure.txt"]))
+
+    def test_a_file_the_session_deleted_and_the_gate_recreated_is_deleted_again(self):
+        # review NEW-1: before `D `, after `D ` + `??` — the `??` is the gate's
+        r = self.bash(r'''
+git rm -q old.txt; git add -A
+b=$(mktemp); a=$(mktemp); f=$(mktemp)
+gate_status_snapshot "$b"
+printf 'gate\n' > old.txt
+gate_status_snapshot "$a"; gate_footprint_diff "$b" "$a" "$f"
+echo "JSON:$(gate_footprint_json "$f")"
+gate_footprint_restore "$f"
+''')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        js = [m for m in r.stdout.splitlines() if m.startswith("JSON:")][0][len("JSON:"):]
+        self.assertEqual(json.loads(js), ["old.txt"])
+        self.assertFalse((self.tmp / "old.txt").exists())
+        self.assertEqual(self.porcelain(), ["D  old.txt"], "the session's deletion stands")
+        # ...but a healed tracked transient has the same `D ` + `??` shape and
+        # is the loop's, never the gate's (heal_tracked_transients; the v0.6.6
+        # deferred-heal tests)
+        (self.tmp / "artifacts" / "phase-verify-failed.json").write_text("{}\n")
+        subprocess.run(["git", "add", "-f", "artifacts/phase-verify-failed.json"], cwd=self.tmp, check=True)
+        subprocess.run(["git", "commit", "-qm", "legacy tracked transient"], cwd=self.tmp, check=True)
+        r = self.bash(r'''
+git rm -q --cached artifacts/phase-verify-failed.json
+b=$(mktemp); a=$(mktemp); f=$(mktemp)
+gate_status_snapshot "$b"; gate_status_snapshot "$a"; gate_footprint_diff "$b" "$a" "$f"
+echo "SIZE:$(stat -c %s "$f")"
+''')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("SIZE:0", r.stdout)
+        self.assertTrue((self.tmp / "artifacts" / "phase-verify-failed.json").exists())
+
+    def test_a_gate_that_unignores_files_by_rewriting_gitignore_does_not_get_them_deleted(self):
+        # review MINOR-5 + MINOR-3: .gitignore restored first, then the
+        # exposed files are ignored again and kept; `git rm --cached` yields
+        # two records for one path and the file survives
+        (self.tmp / ".gitignore").write_text("logs/\n")
+        (self.tmp / "logs").mkdir()
+        (self.tmp / "logs" / "run.log").write_text("kept\n")
+        subprocess.run(["git", "add", ".gitignore"], cwd=self.tmp, check=True)
+        subprocess.run(["git", "commit", "-qm", "ignore"], cwd=self.tmp, check=True)
+        r = self.bash(r'''
+b=$(mktemp); a=$(mktemp); f=$(mktemp)
+gate_status_snapshot "$b"
+: > .gitignore; git rm -q --cached measure.txt
+gate_status_snapshot "$a"; gate_footprint_diff "$b" "$a" "$f"
+echo "JSON:$(gate_footprint_json "$f")"
+gate_footprint_restore "$f"
+''')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        js = [m for m in r.stdout.splitlines() if m.startswith("JSON:")][0][len("JSON:"):]
+        self.assertEqual(sorted(json.loads(js)), sorted([".gitignore", "measure.txt", "logs/run.log"]))
+        self.assertIn("ignored again", r.stderr)
+        self.assertEqual((self.tmp / "logs" / "run.log").read_text(), "kept\n")
+        self.assertEqual((self.tmp / "measure.txt").read_text(), "m\n")
+        self.assertEqual(self.porcelain(), [])
+
+    def test_a_snapshot_that_git_cannot_take_returns_nonzero_and_writes_nothing(self):
+        r = self.bash('ROOT_DIR="$ROOT_DIR/does-not-exist"; b=$(mktemp); gate_status_snapshot "$b"; echo "rc=$? size=$(stat -c %s "$b")"')
+        self.assertIn("rc=128 size=0", r.stdout, r.stdout + r.stderr)
+
+
 class StructuralPins(unittest.TestCase):
+    def test_the_gate_measures_its_footprint_around_the_command_and_restores_before_the_verdict(self):
+        fn = _extract_block(r"^run_verify_gate\(\) \{", r"^\}")
+        first = fn.index('gate_status_snapshot "$fp_before"')
+        cmd = fn.index('bash "$cmd" >"$log"')
+        second = fn.index('gate_status_snapshot "$fp_after"')
+        probe = fn.index("_boundary_kill_probe gate footprint")
+        restore = fn.index('gate_footprint_restore "$fp_paths"')
+        green = fn.index('echo "  Verify passed."')
+        self.assertLess(fn.index("verify_memo_hit"), first, "a memo hit runs no command and measures nothing")
+        self.assertLess(first, cmd)
+        self.assertLess(cmd, second)
+        self.assertLess(second, probe)
+        self.assertLess(probe, restore)
+        self.assertLess(restore, green)
+        # the before-snapshot outlives the process from before the command
+        # until after the restore (review MAJOR-1), and is settled at loop
+        # start before the recovery stages anything
+        pend = fn.index('gate_pending_record "$fp_before" "$cmd" "$label"')
+        clear = fn.index("gate_pending_clear")
+        self.assertLess(first, pend)
+        self.assertLess(pend, cmd)
+        self.assertLess(restore, clear)
+        self.assertLess(clear, green)
+        main_flow = SOURCE[SOURCE.index("heal_tracked_transients || true"):]
+        self.assertLess(main_flow.index("gate_settle_pending || true"),
+                        main_flow.index("# --- Boundary recovery at loop start"))
+        settle = _extract_block(r"^gate_settle_pending\(\) \{", r"^\}")
+        self.assertIn('record_verify_failure "$cmd" "$label" null "$log" settle "$json"', settle)
+        writer = _extract_block(r"^record_verify_failure\(\) \{", r"^\}")
+        self.assertIn('[[ "$mode" == "memo" || "$mode" == "settle" ]] && attempts="$prior_attempts"', writer)
+        diff = _extract_block(r"^gate_footprint_diff\(\) \{", r"^\}")
+        self.assertIn('skip["artifacts/session-handoff.json"]=1', diff)
+        self.assertIn('skip["artifacts/$sig"]=1', diff)
+        # the loop's own paths are excluded BEFORE the deleted-then-recreated
+        # rule (review NEW-4 / the v0.6.6 deferred-heal tests)
+        self.assertLess(diff.index('if [[ -n "${skip[$key]:-}" ]]; then continue; fi'),
+                        diff.index('== *D* ]]'))
+        # review MAJOR-1/-3, MINOR-1/-2: literal pathspecs on every restore;
+        # jq --args always behind `--`; the pending record is base64; the
+        # watchdog restores a pending footprint before its last-resort commit
+        gitfn = _extract_block(r"^_gate_git\(\) \{", r"^\}")
+        self.assertIn("git --literal-pathspecs -C", gitfn)
+        restore = _extract_block(r"^gate_footprint_restore\(\) \{", r"^\}")
+        bare = re.findall(r"(?m)^\s*(?:if )?git [^\n]*", restore)
+        self.assertEqual(len(bare), 1, f"every restoring git call goes through _gate_git; only check-ignore is bare: {bare}")
+        self.assertIn("check-ignore", bare[0])
+        self.assertLess(restore.index("check-ignore"), restore.index('rm -rf --'))
+        for helper in ("gate_footprint_json", "gate_pending_record"):
+            self.assertIn("--args -- ", _extract_block(rf"^{helper}\(\) \{{", r"^\}"))
+        self.assertIn("base64 -w0", _extract_block(r"^gate_pending_record\(\) \{", r"^\}"))
+        lastresort = _extract_block(r"^deadline_lastresort_commit\(\) \{", r"^\}")
+        # a pending gate ⇒ the last-resort commit takes the index as it stands
+        self.assertLess(lastresort.index("_gp_pending=1"), lastresort.index("      git add -A 2>/dev/null"))
+        self.assertIn('if [[ "$_gp_pending" -eq 0 ]]; then\n      git add -A', lastresort)
+        self.assertNotIn("gate_pending_restore_now", lastresort, "no restore races the running gate")
+        pend_rec = _extract_block(r"^gate_pending_record\(\) \{", r"^\}")
+        self.assertIn('printf \'%s\' "$rec" | base64 -w0', pend_rec, "the whole record, letters included")
+        self.assertIn('record_verify_failure "$cmd" "$label" null "$log" settle "$json"',
+                      _extract_block(r"^gate_settle_pending\(\) \{", r"^\}"))
+        self.assertLess(settle.index("gate_pending_restore_now"), settle.index("record_verify_failure"))
+        self.assertIn("gate_pending_clear", settle)
+        self.assertIn('[[ "$verify_status" -eq 0 && -z "$footprint_json" ]]', fn,
+                      "green needs BOTH a passing command and an empty footprint")
+        self.assertIn('record_verify_failure "$cmd" "$label" "$verify_status" "$log" "" "$footprint_json"', fn)
+        self.assertIn('verify_memo_record_red "$memo_tree" "$label" "$cmd" "$verify_status" "$log" "$footprint_json"', fn)
+        # the memo replay carries the paths: a red by footprint is never
+        # replayed as a plain red (nor, with its command rc 0, as a green)
+        self.assertIn("boundary_get '.verify_red.gate_footprint // null'", fn)
+        self.assertIn('record_verify_failure "$cmd" "$label" "$memo_code" "$memo_log" memo "$memo_fp"', fn)
+        red = _extract_block(r"^verify_memo_record_red\(\) \{", r"^\}")
+        self.assertIn("gate_footprint: $footprint", red)
+        writer = _extract_block(r"^record_verify_failure\(\) \{", r"^\}")
+        for key in ("gate_footprint:", "gate_footprint_rule:", "gate_footprint_recipe:"):
+            self.assertIn(key, writer)
+        # one snapshot shape for both sides, NUL-safe, every untracked file its own record
+        snap = _extract_block(r"^gate_status_snapshot\(\) \{", r"^\}")
+        self.assertIn("status --porcelain -z --untracked-files=all", snap)
+        self.assertIn("read -r -d ''", snap)
+
+    def test_the_contract_declares_the_footprint_keys_and_the_convention(self):
+        m = json.loads(MANIFEST.read_text())
+        entry = [a for a in m["artifacts"] if a["name"] == "phase-verify-failed.json"][0]
+        for key in ("gate_footprint", "gate_footprint_rule", "gate_footprint_recipe"):
+            self.assertIn(key, entry["keys"])
+        self.assertIn("gate_footprint", entry["when"])
+        conv = [c for c in m["conventions"] if c["name"] == "verify-gate-read-only"]
+        self.assertEqual(len(conv), 1, "exactly one verify-gate-read-only convention")
+        conv = conv[0]
+        self.assertEqual(conv["marker"], GATE_RULE_MARKER)
+        self.assertEqual(set(conv["declared_in"]), {"docs/QUALITY_GATES.md", "CONTINUE_PROMPT.txt"})
+        self.assertIn("session", conv["consumers"])
+        # the marker literal in every home: both docs and the loop's own rule
+        for path in ("docs/QUALITY_GATES.md", "CONTINUE_PROMPT.txt"):
+            self.assertIn(GATE_RULE_MARKER, (REPO_ROOT / path).read_text(), path)
+        self.assertIn(f'GATE_FOOTPRINT_RULE="{GATE_RULE_MARKER}', SOURCE)
+        prompt = (REPO_ROOT / "CONTINUE_PROMPT.txt").read_text()
+        self.assertIn("`gate_footprint`", prompt)
+        gates = (REPO_ROOT / "docs" / "QUALITY_GATES.md").read_text()
+        self.assertIn("`gate_footprint`", gates)
+        self.assertIn("artifacts/logs/", gates)
+        probe = [e for e in m["env"] if e["name"] == "PHASEKIT_BOUNDARY_KILL_PROBE"][0]
+        self.assertIn("gate:footprint", probe["semantics"])
+
     def test_the_wrapup_commit_keys_the_deferrals_it_sweeps(self):
         fn = _extract_block(r"^wrapup_commit\(\) \{", r"^\}")
         self.assertLess(fn.index("normalize_deferral_keys"), fn.index("git add -A"))
