@@ -2015,7 +2015,7 @@ class StructuralPins(unittest.TestCase):
         self.assertIn('skip["artifacts/$sig"]=1', diff)
         # the loop's own paths are excluded BEFORE the deleted-then-recreated
         # rule (review NEW-4 / the v0.6.6 deferred-heal tests)
-        self.assertLess(diff.index('if [[ -n "${skip[$key]:-}" ]]; then continue; fi'),
+        self.assertLess(diff.index('if [[ -n "${skip[$key]:-}" || "$key" == artifacts/logs/* ]]; then continue; fi'),
                         diff.index('== *D* ]]'))
         # review MAJOR-1/-3, MINOR-1/-2: literal pathspecs on every restore;
         # jq --args always behind `--`; the pending record is base64; the
@@ -2058,6 +2058,27 @@ class StructuralPins(unittest.TestCase):
         snap = _extract_block(r"^gate_status_snapshot\(\) \{", r"^\}")
         self.assertIn("status --porcelain -z --untracked-files=all", snap)
         self.assertIn("read -r -d ''", snap)
+
+    def test_no_jq_filter_uses_a_variable_named_label(self):
+        # v0.14.11: `label` is a jq keyword and the runtime container's jq 1.6
+        # rejects `$label` as a variable ("unexpected label, expecting IDENT")
+        # while jq 1.7+ on a developer host accepts it — so in-container the
+        # red capture fell to its minimal fallback, the verify memo never
+        # recorded, and v0.14.10's pending record was never written, with
+        # every test green. xmeo phase-144 patched its vendored copy by hand.
+        # no jq filter in the loop may bind or read a name jq 1.6 reserves
+        for reserved in ("label", "__loc__"):
+            self.assertNotRegex(SOURCE, rf"--arg(?:json)?\s+{reserved}\b", f"a jq binding named {reserved}")
+            # a jq filter is a single-quoted string; bash's own "$label" lives in double quotes
+            self.assertNotRegex(SOURCE, rf"'[^'\n]*\${reserved}\b", f"no jq filter may read ${reserved}")
+        # the one multi-line filter that once read it (the red capture's object literal)
+        self.assertNotIn("label: $label", SOURCE)
+        diff = _extract_block(r"^gate_footprint_diff\(\) \{", r"^\}")
+        self.assertIn('"$key" == artifacts/logs/*', diff, "the loop's scratch is never a footprint")
+        for fn in ("record_verify_failure", "gate_pending_record", "verify_memo_record", "verify_memo_record_red"):
+            body = _extract_block(rf"^{fn}\(\) \{{", r"^\}")
+            self.assertIn("--arg lbl", body, fn)
+            self.assertIn("label: $lbl", body, fn)
 
     def test_the_contract_declares_the_footprint_keys_and_the_convention(self):
         m = json.loads(MANIFEST.read_text())

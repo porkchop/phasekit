@@ -317,6 +317,12 @@ print_json_summary() {
   jq -r '.' "$file"
 }
 
+# jq VARIABLE NAMES: never `$label` — `label` is a jq keyword and the runtime
+# container ships jq 1.6, which rejects it as a variable ("unexpected label,
+# expecting IDENT"); jq 1.7+ on a developer host accepts it, so the suite is
+# blind. xmeo phase-144 patched its vendored copy by hand; v0.14.11 renames
+# every occurrence to `$lbl` (the KEY `label:` is fine). Pinned by
+# tests/test_boundary_state.py StructuralPins.
 record_verify_failure() {
   # Single source of truth for the verify-failure capture. Both the contracts
   # gate and the project's verify script fail through here, so the next
@@ -363,7 +369,7 @@ record_verify_failure() {
   for try_log in "$tail_output" "(unavailable: capture failed)"; do
     if jq -n \
       --arg cmd "$cmd" \
-      --arg label "$label" \
+      --arg lbl "$label" \
       --argjson exit_code "$exit_code" \
       --argjson attempts "$attempts" \
       --arg log "$try_log" \
@@ -374,7 +380,7 @@ record_verify_failure() {
       '{
         verify_failed: true,
         command: $cmd,
-        label: $label,
+        label: $lbl,
         exit_code: $exit_code,
         attempts: $attempts,
         log_tail: $log,
@@ -512,7 +518,10 @@ gate_footprint_diff() {
     key="${rec#*$'\t'}"; xy="${rec%%$'\t'*}"
     # The loop's own paths first, before any judgement (a healed tracked
     # transient is exactly `D ` + `??` on one path — heal_tracked_transients).
-    if [[ -n "${skip[$key]:-}" ]]; then continue; fi
+    # artifacts/logs/ is the loop's scratch (the record's lock and tmp files are
+    # written INSIDE the gate window) and is excluded from status only
+    # best-effort — skipped by name as well.
+    if [[ -n "${skip[$key]:-}" || "$key" == artifacts/logs/* ]]; then continue; fi
     if [[ "$xy" == "??" && "${before[$key]:-}" == *D* ]]; then
       # A file the session deleted (staged or not) that the gate recreated:
       # the `??` is the gate's, whatever the first record for the path said
@@ -625,8 +634,8 @@ gate_pending_record() {
     paths+=("$(printf '%s' "$rec" | base64 -w0)")
   done < "$1"
   if ! json="$(jq -cn '$ARGS.positional' --args -- "${paths[@]}" 2>/dev/null)" \
-     || ! _boundary_write '.gate_pending = {before: $before, command: $cmd, label: $label, at: $now}' \
-          --argjson before "$json" --arg cmd "$2" --arg label "$3"; then
+     || ! _boundary_write '.gate_pending = {before: $before, command: $cmd, label: $lbl, at: $now}' \
+          --argjson before "$json" --arg cmd "$2" --arg lbl "$3"; then
     echo "  (gate footprint: the pending record could not be written — a kill inside this gate run would not be settled at the next start)" >&2
   fi
 }
@@ -2020,8 +2029,8 @@ verify_memo_exact_tree() {
 
 verify_memo_record() {
   # $1 tree $2 tier $3 label $4 command — after a GREEN gate on an exact tree.
-  _boundary_write '.verify_memo = {tree_sha: $tree, tier: $tier, label: $label, command: $cmd, passed_at: $now} | .verify_red = null' \
-    --arg tree "$1" --arg tier "$2" --arg label "$3" --arg cmd "$4"
+  _boundary_write '.verify_memo = {tree_sha: $tree, tier: $tier, label: $lbl, command: $cmd, passed_at: $now} | .verify_red = null' \
+    --arg tree "$1" --arg tier "$2" --arg lbl "$3" --arg cmd "$4"
 }
 
 _verify_memo_fresh() {
@@ -2062,8 +2071,8 @@ verify_memo_record_red() {
   local tail_output footprint="${6:-}"
   [[ -n "$footprint" && "$footprint" != "null" ]] || footprint="null"
   tail_output="$(tail -n 50 "$5" 2>/dev/null | tail -c 4000)" || tail_output=""
-  _boundary_write '.verify_red = {tree_sha: $tree, label: $label, command: $cmd, exit_code: ($code | tonumber), log_tail: $log, gate_footprint: $footprint, failed_at: $now}' \
-    --arg tree "$1" --arg label "$2" --arg cmd "$3" --arg code "$4" --arg log "$tail_output" --argjson footprint "$footprint"
+  _boundary_write '.verify_red = {tree_sha: $tree, label: $lbl, command: $cmd, exit_code: ($code | tonumber), log_tail: $log, gate_footprint: $footprint, failed_at: $now}' \
+    --arg tree "$1" --arg lbl "$2" --arg cmd "$3" --arg code "$4" --arg log "$tail_output" --argjson footprint "$footprint"
 }
 
 verify_memo_hit_red() {
