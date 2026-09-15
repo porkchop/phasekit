@@ -653,6 +653,12 @@ files:
   scripts/verify-phase.sh:
     ownership: scaffold-internal
 
+  scripts/verify-in-container.sh:
+    ownership: scaffold-internal
+    # v0.14.12 release tool: runs phasekit's own suite inside scaffold-runner
+    # (repo read-only, throwaway HOME) and asserts the image's jq >= 1.7 —
+    # the pre-tag step in docs/RELEASING.md. Never installed downstream.
+
   .githooks/pre-commit:
     ownership: scaffold-internal
     # Scaffold's own pre-commit hook (runs --self-check). Downstream

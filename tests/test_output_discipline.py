@@ -97,6 +97,28 @@ class DeferralsContract(unittest.TestCase):
         flat = " ".join(_gate_section("Deferred-scope gate").split()).lower()
         self.assertIn("regardless of execution mode", flat)
 
+    def test_severity_is_a_contract_word_with_a_machine_readable_enum(self):
+        # v0.14.12 (#774, cells 4 + 7): the vocabulary lives at the contract —
+        # prose verbatim enough to pin, and a sibling array a supervisor pins
+        # against — and both human-facing homes name the three words.
+        entry = _entry()
+        self.assertEqual(entry["severity_enum"], ["BLOCKER", "MAJOR", "MINOR"])
+        semantics = entry["semantics"]
+        for phrase in ("`severity`", "`BLOCKER | MAJOR | MINOR`", "Any other word is not a grade",
+                       "files nothing for it", "Absent means MINOR", "severity_enum"):
+            self.assertIn(phrase, semantics, phrase)
+        flat = " ".join(_gate_section("Deferred-scope gate").split())
+        for phrase in ("`severity`", "`BLOCKER | MAJOR | MINOR`", "severity_enum", "not a grade",
+                       "files nothing", "Absent means MINOR"):
+            self.assertIn(phrase, flat, phrase)
+        prompt = PROMPT.read_text()
+        for phrase in ("`severity`", "BLOCKER | MAJOR | MINOR", "files nothing", "absent means MINOR"):
+            self.assertIn(phrase, prompt, phrase)
+        # the loop's WARN names the same three words, in the same order
+        loop = (REPO_ROOT / "scripts" / "run-until-done.sh").read_text()
+        self.assertIn("deferral severity outside BLOCKER | MAJOR | MINOR is not a grade", loop)
+        self.assertIn('$s == "BLOCKER" or $s == "MAJOR" or $s == "MINOR"', loop)
+
     def test_the_manifest_artifact_keys_agree_with_the_convention(self):
         # v0.12.1 (review finding): the conventions entry said verdict
         # artifacts may carry deferrals while the artifacts section's keys

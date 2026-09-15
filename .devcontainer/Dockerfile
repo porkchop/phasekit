@@ -32,7 +32,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   iproute2 \
   dnsutils \
   aggregate \
-  jq \
   nano \
   vim \
   bash \
@@ -43,6 +42,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   python3-pip \
   python3-venv \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# SCAFFOLD: jq from the upstream static release, sha256-pinned (v0.14.12).
+# Debian bookworm's apt jq is 1.6, which rejects `$label` / `$__loc__` as
+# variable names; the loop's filters were written on jq 1.8 hosts and failed
+# silently in-container from phasekit v0.14.5 to v0.14.10 while the host suite
+# stayed green. The build fails on a checksum mismatch, asserts the version,
+# and runs the reserved-word filter. Verify a built image with
+# scripts/verify-in-container.sh (the suite under the runtime's jq).
+ARG JQ_VERSION=1.7.1
+ARG JQ_SHA256_AMD64=5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5
+ARG JQ_SHA256_ARM64=4dd2d8a0661df0b22f1bb9a1f9830f06b6f3b8f7d91211a1ef5d7c4f06a8b4a5
+RUN ARCH="$(dpkg --print-architecture)" && \
+  case "$ARCH" in \
+    amd64) JQ_SHA256="$JQ_SHA256_AMD64" ;; \
+    arm64) JQ_SHA256="$JQ_SHA256_ARM64" ;; \
+    *) echo "unsupported architecture for the pinned jq: $ARCH" >&2; exit 1 ;; \
+  esac && \
+  curl -fsSL --retry 3 --retry-all-errors -o /usr/local/bin/jq "https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-linux-${ARCH}" && \
+  echo "${JQ_SHA256}  /usr/local/bin/jq" | sha256sum -c - && \
+  chmod 0755 /usr/local/bin/jq && \
+  test "$(jq --version)" = "jq-${JQ_VERSION}" && \
+  jq -n --arg label x '{l: $label}' >/dev/null
 
 # SCAFFOLD: Install pyyaml for scaffold scripts
 RUN python3 -m pip install --break-system-packages pyyaml

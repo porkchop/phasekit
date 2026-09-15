@@ -2126,6 +2126,23 @@ normalize_deferral_keys() {
   if [[ -n "$missing" ]]; then
     echo "run-until-done: WARN — $(basename "$file") deferral entry index $missing has neither 'key' nor 'item' text; nothing can name it, so the supervisor's reader will drop it (deferred-scope gate)." >&2
   fi
+  # v0.14.12: `severity` is a contract word — one of exactly BLOCKER | MAJOR |
+  # MINOR (case-insensitive, surrounding whitespace ignored — the consumer
+  # reads it the same way; contracts/interface.json approval-deferrals
+  # severity_enum). Any other word is not a grade: a consumer treats it as
+  # absent (MINOR, below the queue-row floor) and files nothing, so the
+  # operator ask reaches nobody (orchestrator iteration 134: BLOCKING, LOW).
+  # WARN once per artifact naming key + word; never rewrite a session's grade
+  # and never go red — this is a vocabulary, not a gate. An absent or null
+  # severity is silent (absent is a valid grade: MINOR).
+  local ungraded
+  ungraded="$(jq -r '[.deferrals[] | select(.severity != null)
+      | ((.severity | tostring | gsub("^\\s+|\\s+$"; "") | ascii_upcase) as $s
+         | select(($s == "BLOCKER" or $s == "MAJOR" or $s == "MINOR") | not))
+      | "\(.key // "?")=\(.severity | tostring)"] | join(", ")' <<<"$out" 2>/dev/null)" || ungraded=""
+  if [[ -n "$ungraded" ]]; then
+    echo "run-until-done: WARN — $(basename "$file") deferral severity outside BLOCKER | MAJOR | MINOR is not a grade (a consumer files nothing for it; deferred-scope gate): $ungraded" >&2
+  fi
   if ! cmp -s <(printf '%s\n' "$out") "$file"; then
     local tmp="$ARTIFACTS_DIR/logs/.deferrals.$BASHPID.tmp"
     mkdir -p "$ARTIFACTS_DIR/logs" 2>/dev/null || true

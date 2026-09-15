@@ -850,6 +850,41 @@ verify_memo_hit T full scripts/phasekit-verify.sh cmd; echo "full-under-fast=$?"
         self.assertNotIn("WARN", r.stderr)
         self.assertIsNone(out["deferrals"])
 
+    def test_a_severity_outside_the_enum_warns_once_naming_key_and_word_and_is_left_as_written(self):
+        # v0.14.12 (#774, cell 5): `severity` is a contract word — BLOCKER |
+        # MAJOR | MINOR. BLOCKING is what orchestrator iteration 134 found;
+        # the loop names it and the entry is committed unchanged (no red, no
+        # rewrite: the consumer's rule treats it as absent).
+        r, out = self._deferrals([
+            {"item": "AC#3 integer math", "reason": "r", "suggested_task": "t", "severity": "BLOCKING"},
+            {"item": "AC#4 fine", "reason": "r", "suggested_task": "t", "severity": "MAJOR"},
+            {"item": "AC#5 also fine", "reason": "r", "suggested_task": "t", "severity": "low"},
+        ])
+        self.assertIn("rc=0", r.stdout, r.stderr)
+        warns = [ln for ln in r.stderr.splitlines() if "severity outside BLOCKER | MAJOR | MINOR" in ln]
+        self.assertEqual(len(warns), 1, r.stderr)
+        self.assertIn("AC#3=BLOCKING", warns[0])
+        self.assertIn("AC#5=low", warns[0])
+        self.assertNotIn("AC#4", warns[0])
+        self.assertEqual([d["severity"] for d in out["deferrals"]], ["BLOCKING", "MAJOR", "low"], "never rewritten")
+        self.assertNotIn("REFUSED", r.stderr)
+
+    def test_an_in_enum_or_absent_severity_is_silent_and_byte_identical(self):
+        # cell 6: MAJOR (any case) and an absent severity are exactly v0.14.11
+        for entries in (
+            [{"item": "AC#3 x", "reason": "r", "suggested_task": "t", "severity": "MAJOR"}],
+            [{"item": "AC#3 x", "reason": "r", "suggested_task": "t", "severity": "minor"}],
+            [{"item": "AC#3 x", "reason": "r", "suggested_task": "t", "severity": " MAJOR "}],
+            [{"item": "AC#3 x", "reason": "r", "suggested_task": "t", "severity": None}],
+            [{"item": "AC#3 x", "reason": "r", "suggested_task": "t"}],
+        ):
+            with self.subTest(entries=entries):
+                r, out = self._deferrals(entries)
+                self.assertIn("rc=0", r.stdout, r.stderr)
+                self.assertNotIn("WARN", r.stderr)
+                self.assertEqual(out["deferrals"][0].get("severity"), entries[0].get("severity"))
+                self.assertEqual(out["deferrals"][0]["key"], "AC#3")
+
     def test_the_red_memo_covers_the_same_tree_and_the_green_one_clears_it(self):
         log = self.tmp / "log.txt"; log.write_text("boom\n")
         script = f'''
@@ -2079,6 +2114,29 @@ class StructuralPins(unittest.TestCase):
             body = _extract_block(rf"^{fn}\(\) \{{", r"^\}")
             self.assertIn("--arg lbl", body, fn)
             self.assertIn("label: $lbl", body, fn)
+
+    def test_the_runtime_image_pins_a_modern_jq_and_the_suite_can_run_inside_it(self):
+        # v0.14.12 (#765): the image's jq is a tested input. No Docker in the
+        # unit suite — the Dockerfile is pinned by regex; the run itself is
+        # scripts/verify-in-container.sh, the pre-tag step in RELEASING.
+        dockerfile = (REPO_ROOT / ".devcontainer" / "Dockerfile").read_text()
+        m = re.search(r"(?m)^ARG JQ_VERSION=(\d+)\.(\d+)(?:\.(\d+))?\s*$", dockerfile)
+        self.assertIsNotNone(m, "ARG JQ_VERSION=<x.y.z> must be pinned")
+        self.assertGreaterEqual((int(m.group(1)), int(m.group(2))), (1, 7), "jq >= 1.7 (1.6 rejects $label)")
+        shas = re.findall(r"(?m)^ARG JQ_SHA256\w*=([0-9a-f]{64})\s*$", dockerfile)
+        self.assertGreaterEqual(len(shas), 1, "a 64-hex JQ_SHA256 pin per built architecture")
+        self.assertIn("sha256sum -c", dockerfile, "the build fails on a checksum mismatch")
+        self.assertIn('test "$(jq --version)" = "jq-${JQ_VERSION}"', dockerfile, "jq --version asserted at build time")
+        self.assertIn("jq -n --arg label x", dockerfile, "the reserved-word regression runs at build time")
+        apt = dockerfile[dockerfile.index("apt-get install"):dockerfile.index("apt-get clean")]
+        self.assertNotRegex(apt, r"(?m)^\s+jq\s+\\$", "Debian's jq (1.6) must not be installed")
+        script = REPO_ROOT / "scripts" / "verify-in-container.sh"
+        self.assertTrue(script.is_file() and os.access(script, os.X_OK))
+        body = script.read_text()
+        for needle in (":/workspace:ro", "tests.test_boundary_state", "JQ_MIN", "--arg label x", "python3 -m unittest"):
+            self.assertIn(needle, body, needle)
+        self.assertIn("scripts/verify-in-container.sh", (REPO_ROOT / "capabilities" / "project-capabilities.yaml").read_text())
+        self.assertIn("scripts/verify-in-container.sh", (REPO_ROOT / "docs" / "RELEASING.md").read_text())
 
     def test_the_contract_declares_the_footprint_keys_and_the_convention(self):
         m = json.loads(MANIFEST.read_text())

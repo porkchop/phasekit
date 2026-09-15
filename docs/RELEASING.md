@@ -28,6 +28,29 @@ It is recorded in every enriched project's `.scaffold/manifest.json` alongside
 `scaffold_commit` and `origin_url`, so a project always knows what it was built
 from and where upstream lives.
 
+## Pre-tag: the suite under the runtime's jq (v0.14.12)
+
+The unit suite runs on the developer host; the fleet runs the loop inside
+`scaffold-runner`. Those two once disagreed on `jq` (host 1.8, image 1.6 — jq
+1.6 rejects `$label` as a variable name), and every loop filter that bound it
+failed silently in-container from v0.14.5 to v0.14.10 with the host suite
+green. So before tagging a release that touches `scripts/run-until-done.sh`,
+the hooks, or the image, run the boundary-state suite **inside the image**:
+
+```bash
+bash scripts/container-setup.sh build     # if the image is stale
+bash scripts/verify-in-container.sh       # tests.test_boundary_state, repo mounted read-only
+```
+
+It asserts the image's `jq` is >= 1.7 and accepts `$label`, then runs the
+suite with the repo bind-mounted read-only and a throwaway `HOME`. It runs as
+the host uid on a rootful daemon and as container root under rootless Docker
+(`PHASEKIT_ROOTLESS_DOCKER=1`, or auto-detected), the same mapping
+`container-setup.sh` uses — a subuid cannot read the mount. Exit 0 is
+the proof; exit 3 means the image is stale (rebuild — `.devcontainer/Dockerfile`
+pins `JQ_VERSION` and its sha256). This is a release step, not a pre-commit
+gate: it needs Docker.
+
 ## Cutting a release
 
 1. Land all changes on `master` and push.

@@ -100,6 +100,17 @@ iteration's change-request) that a session decides not to implement is a
   one queue task per new key, and those tasks land HELD (ops lane or
   approval-gated), never pre-approved: your own deferral entry is not
   self-granted authorization for the follow-up work.
+- Each entry may carry `severity`, one of exactly `BLOCKER | MAJOR | MINOR`
+  (the vocabulary is pinned in `contracts/interface.json` as the
+  `approval-deferrals` convention's `severity_enum`). Any other word —
+  `BLOCKING`, `LOW`, `high` — is not a grade: a consumer treats it as absent
+  and files nothing for it, and the session that wrote it has recorded no
+  grade. Absent means MINOR, which stays in the supervisor's ledger below
+  the queue-row floor: a deferral that must reach an operator is graded
+  BLOCKER or MAJOR, explicitly. Matching is case-insensitive with
+  surrounding whitespace ignored (write the upper-case spelling). The wrapper
+  warns once per artifact on an out-of-vocabulary word and never rewrites a
+  grade (v0.14.12).
 - This gate binds every verdict artifact regardless of execution mode —
   light and micro iterations included.
 - Prose-only deferrals (a paragraph in PHASES.md, a caveat in a spec
