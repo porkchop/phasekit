@@ -10,6 +10,7 @@
 #   phasekit status               current phase state (derived from artifacts)
 #   phasekit channel [name]       show or set the self-update channel (stable|edge|<ref>)
 #   phasekit self-update          move this phasekit clone along its channel
+#   phasekit roadmap next|done|init  the OPTIONAL docs/ROADMAP.md (see scripts/phasekit-roadmap.py)
 #
 # Anything else is forwarded verbatim to the engine, so the raw flag form
 # still works for any flag enrich-project.py supports:
@@ -120,6 +121,10 @@ case "$verb" in
     ;;
   self-update)
     self_update
+    ;;
+  roadmap)
+    shift
+    exec "${PHASEKIT_PYTHON:-python3}" "$SCRIPT_DIR/phasekit-roadmap.py" "$@"
     ;;
   *)
     # No verb, a flag (-…), or a raw path/target: forward verbatim.

@@ -1811,6 +1811,7 @@ ALWAYS_INSTALLED_FILE_PATHS = (
     "scripts/phasekit-channel.sh",
     "scripts/phasekit-log-fmt.sh",
     "scripts/phasekit-contracts.py",
+    "scripts/phasekit-roadmap.py",
     ".devcontainer/devcontainer.json",
     ".devcontainer/Dockerfile",
     ".devcontainer/entrypoint.sh",

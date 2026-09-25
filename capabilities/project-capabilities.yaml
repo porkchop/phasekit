@@ -400,6 +400,18 @@ scripts:
     # scripts/phasekit-verify.sh could be edited away by the repo it polices.
     # Inert in a repo with no contracts.yaml. See docs/CONTRACTS.md.
 
+  phasekit-roadmap:
+    path: scripts/phasekit-roadmap.py
+    required: false
+    ownership: scaffold
+    # v0.15.0 the OPTIONAL docs/ROADMAP.md: the one reader/writer of its format
+    # (`next` prints the eligible entries as JSON, `done` moves an entry under
+    # ## Done, `init` writes a starter file only when none exists). Ships to
+    # every project so a supervisor can ask "what is next here?" of the
+    # project's own copy. INERT without the file: nothing in the loop, the gates
+    # or the prompts calls it, and upgrade never writes a roadmap. The starter
+    # template is embedded in the script, so it has one home.
+
   generate-skill:
     path: scripts/generate-skill.py
     required: true
