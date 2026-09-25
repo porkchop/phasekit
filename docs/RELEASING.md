@@ -51,6 +51,34 @@ the proof; exit 3 means the image is stale (rebuild — `.devcontainer/Dockerfil
 pins `JQ_VERSION` and its sha256). This is a release step, not a pre-commit
 gate: it needs Docker.
 
+## Pre-tag: shipped Python passes a downstream linter (v0.15.1)
+
+Every `.py` file in `ALWAYS_INSTALLED_FILE_PATHS` lands inside downstream
+repositories, and a downstream project whose verify gate lints its WHOLE tree
+(`ruff check .`, say) will lint phasekit's file as if it were its own — while
+`phasekit upgrade` commits run no gate. v0.15.0 shipped
+`scripts/phasekit-roadmap.py` with 12 violations under a common strict config
+(line-length 100, `E,F,I,B,UP,W`) and was caught only at fleet rollout.
+
+`tests/test_downstream_lint.py` pins the two rules that fired, with the standard
+library (no linter needed): no line over 100 columns, and no `raise` inside an
+`except` clause without `from`. Before tagging, also run the strictest linter any
+downstream project you maintain applies, over exactly those files:
+
+```bash
+python3 - <<'PY' | xargs ruff check --line-length 100 --select E,F,I,B,UP,W --target-version py39
+import importlib.util
+spec = importlib.util.spec_from_file_location("e", "scripts/enrich-project.py")
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+print("\n".join(p for p in m.ALWAYS_INSTALLED_FILE_PATHS if p.endswith(".py")))
+PY
+```
+
+`--target-version py39` matters: phasekit's Python floor is older than most
+consumers', so an "upgrade the syntax" autofix aimed at a newer target (e.g.
+`datetime.UTC`, 3.11+) must be answered with a floor-compatible rewrite, not
+taken.
+
 ## Cutting a release
 
 1. Land all changes on `master` and push.

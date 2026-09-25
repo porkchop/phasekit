@@ -64,7 +64,8 @@ THE FORMAT (pinned in contracts/interface.json, convention `roadmap-entries`)
 
 Usage:
   python3 scripts/phasekit-roadmap.py next [--repo DIR] [--file PATH]
-  python3 scripts/phasekit-roadmap.py done R<n> --iteration LABEL [--date YYYY-MM-DD] [--repo DIR] [--file PATH]
+  python3 scripts/phasekit-roadmap.py done R<n> --iteration LABEL [--date YYYY-MM-DD]
+                                                [--repo DIR] [--file PATH]
   python3 scripts/phasekit-roadmap.py init [--repo DIR] [--file PATH]
 
 Exit codes (every subcommand):
@@ -90,6 +91,7 @@ import re
 import stat
 import sys
 import tempfile
+import time
 import unicodedata
 from pathlib import Path
 
@@ -607,7 +609,8 @@ def _resolve(args) -> tuple[Path, Path, str]:
     try:
         st = os.stat(repo)
     except OSError as exc:
-        raise RoadmapError(f"--repo {args.repo}: {os.strerror(exc.errno or 0) or type(exc).__name__}")
+        reason = os.strerror(exc.errno or 0) or type(exc).__name__
+        raise RoadmapError(f"--repo {args.repo}: {reason}") from exc
     if not stat.S_ISDIR(st.st_mode):
         raise RoadmapError(f"--repo {args.repo} is not a directory")
     repo = repo.resolve()
@@ -633,19 +636,20 @@ def _present(path: Path) -> bool:
         os.lstat(path)
     except OSError as exc:
         if exc.errno != errno.ENOENT:
-            raise RoadmapError(f"cannot inspect {path}: {os.strerror(exc.errno or 0)}")
+            raise RoadmapError(f"cannot inspect {path}: {os.strerror(exc.errno or 0)}") from exc
         # ENOENT for the file is "no roadmap" only if nothing above it is a
         # dangling link: `docs -> /mnt/unmounted` is an unreachable place, not
         # an absent roadmap (round-3 review #3).
         for ancestor in path.parents:
             if os.path.islink(ancestor) and not os.path.exists(ancestor):
-                raise RoadmapError(f"{ancestor} is a link whose target cannot be reached")
+                raise RoadmapError(f"{ancestor} is a link whose target cannot be "
+                                   "reached") from None
         return False
     try:
         st = os.stat(path)
     except OSError as exc:
         raise RoadmapError(f"{path} is a link whose target cannot be reached: "
-                           f"{os.strerror(exc.errno or 0)}")
+                           f"{os.strerror(exc.errno or 0)}") from exc
     if not stat.S_ISREG(st.st_mode):
         raise RoadmapError(f"{path} is not a regular file")
     return True
@@ -658,9 +662,9 @@ def _read(path: Path) -> str:
         with open(path, encoding="utf-8", newline="") as fh:
             return fh.read()
     except UnicodeDecodeError:
-        raise RoadmapError(f"{path} is not UTF-8")
+        raise RoadmapError(f"{path} is not UTF-8") from None
     except OSError as exc:
-        raise RoadmapError(f"cannot read {path}: {os.strerror(exc.errno or 0)}")
+        raise RoadmapError(f"cannot read {path}: {os.strerror(exc.errno or 0)}") from exc
 
 
 class _DirLock:
@@ -811,7 +815,7 @@ def cmd_done(args) -> int:
         try:
             _write_atomic(target, "".join(lines))
         except OSError as exc:
-            raise RoadmapError(f"cannot write {rel}: {os.strerror(exc.errno or 0)}")
+            raise RoadmapError(f"cannot write {rel}: {os.strerror(exc.errno or 0)}") from exc
     _emit(json.dumps({"id": args.id, "changed": True, "iteration": args.iteration,
                       "date": args.date}))
     return EXIT_OK
@@ -830,7 +834,7 @@ def cmd_init(args) -> int:
         print(f"phasekit roadmap: {rel} already exists; refusing to overwrite it", file=sys.stderr)
         return EXIT_EXISTS
     except OSError as exc:
-        raise RoadmapError(f"cannot write {rel}: {os.strerror(exc.errno or 0)}")
+        raise RoadmapError(f"cannot write {rel}: {os.strerror(exc.errno or 0)}") from exc
     _emit(rel)
     return EXIT_OK
 
@@ -841,7 +845,7 @@ def _date(value: str) -> str:
     try:
         return _dt.date.fromisoformat(value).isoformat()
     except ValueError:
-        raise argparse.ArgumentTypeError(f"not a YYYY-MM-DD date: {value!r}")
+        raise argparse.ArgumentTypeError(f"not a YYYY-MM-DD date: {value!r}") from None
 
 
 def _one_line(value: str, what: str) -> str:
@@ -880,7 +884,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_done.add_argument("id", type=_entry_id)
     p_done.add_argument("--iteration", required=True, type=_iteration)
     p_done.add_argument("--date", type=_date,
-                        default=_dt.datetime.now(_dt.timezone.utc).date().isoformat())
+                        default=time.strftime("%Y-%m-%d", time.gmtime()))
     common(p_done)
     common(sub.add_parser("init", help="write a starter roadmap if none exists"))
     return parser
