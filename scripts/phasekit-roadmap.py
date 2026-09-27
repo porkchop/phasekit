@@ -83,6 +83,7 @@ Exit codes (every subcommand):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import errno
 import json
@@ -705,10 +706,8 @@ def _sweep_stale_tmp(directory: Path) -> None:
         return
     for name in names:
         if TMP_RE.match(name):
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(directory / name)
-            except OSError:
-                pass
 
 
 def _write_atomic(target: Path, text: str) -> None:
@@ -720,10 +719,8 @@ def _write_atomic(target: Path, text: str) -> None:
         os.chmod(tmp, mode)
         os.replace(tmp, target)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass
         raise
 
 
