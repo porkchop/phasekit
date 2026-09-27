@@ -148,16 +148,27 @@ class OptOutAndFailSafe(UpgradeFixture):
         self.assertNotIn("phasekit upgrade", self.head_subject())
 
     def test_a_repo_with_no_git_identity_still_upgrades(self):
-        """Non-fatal: the files are already installed on disk."""
+        """Non-fatal: the files are already installed on disk.
+
+        `user.useConfigOnly` makes the missing identity REAL on every machine:
+        without it git invents one from the passwd name + an FQDN hostname, so
+        this pin passed on a workstation while v0.16.0-v0.16.2 exited 5 on the
+        GitHub runner (empty passwd name) — CI red for three releases."""
         self.git("config", "--unset", "user.email")
         self.git("config", "--unset", "user.name")
+        self.git("config", "user.useConfigOnly", "true")
         r = subprocess.run(
             [sys.executable, str(ENRICH), "--upgrade", str(self.project), "--yes"],
             capture_output=True, text=True,
             env={"HOME": str(self.tmp), "PATH": "/usr/bin:/bin",
-                 "GIT_CONFIG_NOSYSTEM": "1"})
+                 "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+                 "XDG_STATE_HOME": str(self.tmp / "state")})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("no git identity", r.stderr)
         self.assertTrue((self.project / ".claude" / "hooks" / "require-verdict.sh").is_file())
+        pending = self.tmp / "state" / "phasekit" / "upgrade-pending"
+        self.assertEqual(list(pending.iterdir()) if pending.exists() else [], [],
+                         "a missing identity must settle the upgrade, not leave it pending")
 
     def test_a_project_with_no_remote_commits_locally_without_error(self):
         r = self.upgrade()

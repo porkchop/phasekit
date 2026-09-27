@@ -448,6 +448,65 @@ class AnInterruptedUpgradeIsSettled(Fixture):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.porcelain(), "")
 
+    def no_identity_env(self):
+        """No identity from anywhere: no global/system config, no ident env,
+        and `user.useConfigOnly` so git cannot invent one from passwd + an
+        FQDN hostname (the workstation blind spot behind v0.16.3)."""
+        self.git("config", "--unset", "user.email")
+        self.git("config", "--unset", "user.name")
+        self.git("config", "user.useConfigOnly", "true")
+        home = self.tmp / "home"
+        home.mkdir(exist_ok=True)
+        env = self.env()
+        for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME",
+                  "GIT_COMMITTER_EMAIL", "EMAIL", "GIT_CONFIG_COUNT",
+                  "GIT_CONFIG_PARAMETERS"):
+            env.pop(k, None)
+        env.update({"HOME": str(home), "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_CONFIG_NOSYSTEM": "1"})
+        return env
+
+    def test_no_git_identity_exits_0_with_a_note_and_settles(self):
+        """v0.16.3: the v0.8 non-fatal case, not a failed commit (v0.16.0-2
+        exited 5 and kept the record pending forever — CI red three releases)."""
+        before = self.head()
+        env = self.no_identity_env()
+        r = subprocess.run(
+            [sys.executable, str(ENRICH), "--upgrade", str(self.project), "--yes"],
+            capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("no git identity", r.stderr)
+        self.assertNotIn("NOT committed", r.stderr)
+        self.assertTrue((self.project / REINSTALLED).is_file())
+        self.assertEqual(self.head(), before)
+        self.assertEqual(self.pending_dirs(), [])
+        c = subprocess.run([sys.executable, str(ENRICH), "--check", str(self.project)],
+                           capture_output=True, text=True, env=env)
+        self.assertNotEqual(c.returncode, 3, "no pending record may survive")
+
+    def test_a_verified_recovery_with_no_identity_settles(self):
+        """The recovery path agrees: a verified record whose commit now meets
+        a missing identity is finished, not retried forever."""
+        lock = self.project / ".git" / "index.lock"
+        lock.write_text("")
+        self.assertEqual(self.upgrade().returncode, 5)
+        self.assertEqual(len(self.pending_dirs()), 1)
+        lock.unlink()
+        r = subprocess.run(
+            [sys.executable, str(ENRICH), "--upgrade", str(self.project), "--yes"],
+            capture_output=True, text=True, env=self.no_identity_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("no git identity", r.stderr)
+        self.assertEqual(self.pending_dirs(), [])
+
+    def test_a_bad_commit_date_is_a_failed_commit_not_a_missing_identity(self):
+        """Review finding: `git var` also refuses a garbage GIT_*_DATE; only
+        git's ident refusals are excused, anything else stays exit 5."""
+        r = self.upgrade(env={"GIT_COMMITTER_DATE": "not a date"})
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+        self.assertNotIn("no git identity", r.stderr)
+        self.assertEqual(len(self.pending_dirs()), 1)
+
     def test_an_in_flight_settings_edit_is_not_swept_into_the_commit(self):
         settings = self.project / ".claude" / "settings.json"
         data = json.loads(settings.read_text())

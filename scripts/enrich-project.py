@@ -1153,8 +1153,9 @@ def cmd_upgrade(target_dir, profile=None, dry_run=False, yes=False, no_lock=Fals
     input; 2 another process holds the lock, or --interactive with --yes; 3
     unresolved refusals; 4 no green verdict — the project's gate failed, could
     not run, or wrote into the tree; every file restored, nothing committed; 5
-    applied and verified but NOT committed (staging failed) — the next upgrade
-    commits it.
+    applied and verified but NOT committed (staging or the commit failed) — the
+    next upgrade commits it. A missing git identity is not a failure: exit 0,
+    files installed, a note, the tree left dirty (v0.8 behavior; v0.16.3).
     """
     target = Path(target_dir).resolve()
     if not target.is_dir():
@@ -1294,6 +1295,7 @@ def _upgrade_locked(target, profile, dry_run, yes, interactive, keep_local, take
                 print("--upgrade: interrupted after the gate passed; the next "
                       "`phasekit upgrade` commits it.", file=sys.stderr)
             return 130
+    # no-identity is deliberately absent: it is the v0.8 non-fatal case (v0.16.3).
     if status in ("stage-failed", "commit-failed"):
         print("  The upgrade is applied and verified but NOT committed; the next "
               "`phasekit upgrade` commits it once the cause above is cleared.",
@@ -2105,6 +2107,7 @@ def recover_pending_upgrade(target):
             message += UNVERIFIED_SUFFIX
         paths = [p for p in (r.get("commit_paths") or []) if p not in theirs]
         status = _commit_paths(pending.target, paths, message)
+        # no-identity settles the record like the normal path does (v0.16.3).
         if status in ("stage-failed", "commit-failed"):
             return EXIT_UPGRADE_UNCOMMITTED
         pending.finish()
@@ -2143,7 +2146,7 @@ UPGRADE_COMMIT_PREFIX = "chore(scaffold): phasekit upgrade"
 
 def commit_upgrade(target, plans, old_version, unverified=False, paths=None):
     """Commit (and try to push) the files this upgrade wrote. Returns one of
-    committed | nothing | no-git | commit-failed | stage-failed.
+    committed | nothing | no-git | no-identity | commit-failed | stage-failed.
 
     Leaving the tree dirty caused two distinct failures in one day:
 
@@ -2160,9 +2163,11 @@ def commit_upgrade(target, plans, old_version, unverified=False, paths=None):
     about the scaffold, which is worse than the problem being fixed.
 
     A missing git identity, remote or upstream stays non-fatal: the files are
-    installed. A STAGING failure is reported and returned (v0.16.0: a stale
-    .git/index.lock once let two upgrades return as if there were nothing to
-    commit), so the caller can keep the pending record and exit 5.
+    installed (no-identity is its own status since v0.16.3, so callers never
+    mistake it for a refused commit). A STAGING or COMMIT failure is reported
+    and returned (v0.16.0: a stale .git/index.lock once let two upgrades return
+    as if there were nothing to commit), so the caller can keep the pending
+    record and exit 5.
     """
     new_version, _ = get_scaffold_version()
     message = f"{UPGRADE_COMMIT_PREFIX} {old_version} -> {new_version}"
@@ -2222,6 +2227,31 @@ def _commit_paths(target, paths, message):
                if p in set(paths)]
     if not changed:
         return "nothing"
+
+    # v0.16.3: a MISSING GIT IDENTITY is not a failed commit. Since v0.8 it has
+    # been deliberately non-fatal (files installed, a note, exit 0 — a fresh
+    # runner or CI box has no identity and nothing to fix); v0.16.0 folded it
+    # into commit-failed -> exit 5 with the record kept pending, so every
+    # identity-less upgrade "failed" and retried forever. It hid for three
+    # releases because a workstation always has an identity (a global config, or
+    # git's own guess from the passwd name + an FQDN hostname) and the GitHub
+    # runner has neither (empty passwd name). Ask git before committing —
+    # `git var` applies the same strict ident rules `git commit` does — so a
+    # refusing hook still lands on commit-failed and only this cause is excused.
+    # Only git's IDENT refusals count (review: a garbage GIT_*_DATE also fails
+    # `git var`, and that one must stay a failed commit, exit 5).
+    ident_refusal = ("ident name", "auto-detect", "tell me who you are",
+                     "name consists only of disallowed")
+    for ident in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"):
+        r = git("var", ident)
+        if r.returncode != 0 and any(m in r.stderr.lower() for m in ident_refusal):
+            err = r.stderr.strip().splitlines()
+            detail = next((line for line in err if line.startswith(("fatal:", "error:"))),
+                          err[-1] if err else "no git identity")
+            print(f"  note: could not commit the upgrade (no git identity: {detail}); "
+                  f"the files are installed but the tree is left dirty — set "
+                  f"user.name/user.email and commit them.", file=sys.stderr)
+            return "no-identity"
 
     # `--only <paths>` is load-bearing, not a flourish. A plain `git commit`
     # commits the WHOLE index, so anything the project had already staged when
