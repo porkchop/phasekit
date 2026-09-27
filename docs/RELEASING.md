@@ -79,6 +79,23 @@ consumers', so an "upgrade the syntax" autofix aimed at a newer target (e.g.
 `datetime.UTC`, 3.11+) must be answered with a floor-compatible rewrite, not
 taken.
 
+## Pre-tag: the release note names every loop surface it moved (v0.16.0)
+
+A downstream project may pin a loop internal in its own tests — xmeo-v3 pinned
+the argument list of the loop's jq capture filter, and v0.14.10 added three
+bindings to it without saying so; the project found out by going red. Before
+tagging, run:
+
+```bash
+python3 scripts/release-surfaces.py <previous-tag>
+```
+
+and paste its output into the release commit message under a `Loop surfaces:`
+heading. It lists contract entries added, removed or changed, `PHASEKIT_*`
+variables the loop reads, and, per loop function, the names its jq calls bind.
+`(none)` is a valid answer and is pasted too, so a reader can tell "nothing
+moved" from "nobody looked".
+
 ## Cutting a release
 
 1. Land all changes on `master` and push.

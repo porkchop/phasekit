@@ -29,6 +29,8 @@ import json
 import os
 import re
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -679,6 +681,9 @@ ACTION_ADOPT = "adopt"           # collision-novel: record current sha as canoni
 ACTION_RENAME_LOCAL = "rename-local"  # collision-novel: move out of the way
 ACTION_REFUSE = "refuse"         # ambiguous: needs an explicit per-file flag
 
+# v0.16.0: the manifest value recording a STANDING keep-local decision.
+LOCAL_KEPT = "kept"
+
 
 def _scaffold_source_for_spec(spec):
     """Return the scaffold-side path that supplies content for this install spec.
@@ -738,6 +743,16 @@ def compute_upgrade_plan(
 
         existing = existing_by_path.get(path)
         manifest_sha = existing.get("sha256") if existing else None
+        # v0.16.0: a `--keep-local` is a STANDING decision, recorded on the
+        # manifest entry as `"local": "kept"`, and honoured by every later
+        # upgrade until `--take-new PATH` releases it. Before this, the flag
+        # re-baselined the file to the project's bytes and was then forgotten:
+        # the next upgrade saw local == manifest with a newer scaffold version,
+        # called it `update-available`, and TOOK NEW — silently deleting the
+        # project's amendment. xmeo-v3's docs/CONVENTIONS.md lost its amended
+        # block that way three times (row 813).
+        standing = bool(existing) and existing.get("local") == LOCAL_KEPT
+        keep = path in keep_local or (standing and path not in take_new)
 
         # State + default action
         if existing is None:
@@ -773,7 +788,7 @@ def compute_upgrade_plan(
                 action = ACTION_INSTALL
             elif stub_reseed:
                 state = "stub-reseed"
-                action = ACTION_KEEP_LOCAL if path in keep_local else ACTION_TAKE_NEW
+                action = ACTION_KEEP_LOCAL if keep else ACTION_TAKE_NEW
             elif current_sha == manifest_sha:
                 # local == manifest. For `scaffold` class, also compare
                 # scaffold-new sha to surface an "update available". For
@@ -791,7 +806,7 @@ def compute_upgrade_plan(
                     # `--keep-local` overrides — the user intent ("preserve
                     # my version even though scaffold has a newer canonical")
                     # applies symmetrically to drifted and update-available.
-                    if path in keep_local:
+                    if keep:
                         action = ACTION_KEEP_LOCAL
                     else:
                         action = ACTION_TAKE_NEW
@@ -801,7 +816,7 @@ def compute_upgrade_plan(
             else:
                 # drifted: current != manifest
                 state = "drifted"
-                if path in keep_local:
+                if keep:
                     action = ACTION_KEEP_LOCAL
                 elif path in take_new:
                     action = ACTION_TAKE_NEW
@@ -812,6 +827,14 @@ def compute_upgrade_plan(
                     else:
                         action = ACTION_REFUSE
 
+        # What the entry records afterwards: a keep-local the project ASKED for
+        # (flagged now, or standing from before) stands; the ownership default
+        # (a drifted bootstrap-* file is kept without asking) is not a decision
+        # and records nothing; take-new, reinstall or removal releases it.
+        if action in (ACTION_KEEP_LOCAL, ACTION_NOOP):
+            local_after = LOCAL_KEPT if (path in keep_local or standing) else None
+        else:
+            local_after = None
         plans.append({
             "path": path,
             "state": state,
@@ -823,6 +846,8 @@ def compute_upgrade_plan(
             "current_sha": current_sha,
             "scaffold_new_sha": scaffold_new_sha,
             "rename_target": rename_local_map.get(path),
+            "standing": standing and action == ACTION_KEEP_LOCAL and path not in keep_local,
+            "local_after": local_after,
         })
 
     # Removed: in existing manifest but not in scaffold-new install set.
@@ -882,6 +907,8 @@ def print_upgrade_plan(plans):
                 note = "  (no longer declared by the scaffold)"
             elif p["state"] == "new-install":
                 note = "  (not yet installed)"
+            if p.get("standing"):
+                note += "  (standing keep-local; release with --take-new PATH)"
             elif p["state"] == "missing":
                 note = "  (tracked but file missing)"
             print(f"    {p['path']}{note}")
@@ -912,7 +939,7 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
             file_specs_for_manifest.append({
                 "path": path, "ownership": p["ownership"],
                 "text": p["text"], "rendered_from": p["rendered_from"],
-                "installed": False,
+                "installed": False, "local": p.get("local_after"),
             })
         elif action == ACTION_TAKE_NEW or action == ACTION_INSTALL:
             spec = {"path": path, "ownership": p["ownership"], "text": p["text"],
@@ -923,14 +950,15 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
                 print(f"  REFUSE: {e}", file=sys.stderr)
                 return 1
             print(f"  {action}: {path}")
-            file_specs_for_manifest.append({**spec, "installed": True})
+            file_specs_for_manifest.append({**spec, "installed": True, "local": None})
         elif action == ACTION_KEEP_LOCAL:
-            # Leave on-disk file as-is. Manifest sha will be updated to current.
-            print(f"  keep-local: {path}")
+            # Leave on-disk file as-is. Manifest sha will be updated to current,
+            # and the decision is recorded so the next upgrade honours it too.
+            print(f"  keep-local: {path}" + ("  (standing)" if p.get("standing") else ""))
             file_specs_for_manifest.append({
                 "path": path, "ownership": p["ownership"],
                 "text": p["text"], "rendered_from": p["rendered_from"],
-                "installed": False,
+                "installed": False, "local": p.get("local_after"),
             })
         elif action == ACTION_ADOPT:
             # collision-novel: trust on-disk content; record under scaffold-new path
@@ -1116,17 +1144,42 @@ def _interactive_resolve(plans, target):
 def cmd_upgrade(target_dir, profile=None, dry_run=False, yes=False, no_lock=False,
                 interactive=False,
                 keep_local=(), take_new=(), adopt=(), rename_local=(),
-                accept_removal=(), commit=True):
+                accept_removal=(), commit=True, no_verify=False):
     """Upgrade a downstream project: re-evaluate scaffold-owned files and
     apply changes after a plan-then-confirm cycle.
 
-    Returns 0 on success, 1 on error, 3 on unresolved refusals.
+    Exit codes (pinned in contracts/interface.json): 0 success; 1 error or bad
+    input; 2 another process holds the lock, or --interactive with --yes; 3
+    unresolved refusals; 4 no green verdict — the project's gate failed, could
+    not run, or wrote into the tree; every file restored, nothing committed; 5
+    applied and verified but NOT committed (staging failed) — the next upgrade
+    commits it.
     """
     target = Path(target_dir).resolve()
     if not target.is_dir():
         print(f"Error: target does not exist: {target}", file=sys.stderr)
         return 1
+    try:
+        verify_mode = upgrade_verify_mode(no_verify=no_verify, commit=commit)
+    except ValueError as e:
+        print(f"--upgrade: {e}", file=sys.stderr)
+        return 1
 
+    with target_lock(target, no_lock=no_lock):
+        if dry_run and _pending_upgrade(target):
+            print("--upgrade: an interrupted upgrade is pending for this project; run "
+                  "the upgrade (without --dry-run) to recover it first.", file=sys.stderr)
+            return 1
+        rc = recover_pending_upgrade(target)
+        if rc is not None:
+            return rc
+        return _upgrade_locked(target, profile, dry_run, yes, interactive, keep_local,
+                               take_new, adopt, rename_local, accept_removal, commit,
+                               no_verify, verify_mode)
+
+
+def _upgrade_locked(target, profile, dry_run, yes, interactive, keep_local, take_new,
+                    adopt, rename_local, accept_removal, commit, no_verify, verify_mode):
     sweep_orphan_tmpfiles(target)
 
     existing = load_downstream_manifest(target)
@@ -1158,10 +1211,15 @@ def cmd_upgrade(target_dir, profile=None, dry_run=False, yes=False, no_lock=Fals
         if yes:
             print("Error: --interactive cannot be used with --yes", file=sys.stderr)
             return 2
+        before = {p["path"]: p["action"] for p in plans}
         plans = _interactive_resolve(plans, target)
         if plans is None:
             print("Stopped.", file=sys.stderr)
             return 1
+        # An answer given here is as much a decision as the flag (review r2).
+        for p in plans:
+            if p["action"] != before.get(p["path"]):
+                p["local_after"] = LOCAL_KEPT if p["action"] == ACTION_KEEP_LOCAL else None
 
     print_upgrade_plan(plans)
 
@@ -1186,22 +1244,719 @@ def cmd_upgrade(target_dir, profile=None, dry_run=False, yes=False, no_lock=Fals
             return 1
 
     old_version = existing.get("scaffold_version") or "unknown"
+    new_version, _ = get_scaffold_version()
+    # Decided from the PRE-apply tree: a project that had no gate is never
+    # blocked by the gate its own upgrade just seeded (review round 1, M3).
+    pre_label, pre_command = resolve_upgrade_gate(target)
+    paths = _upgrade_touched_paths(plans)
 
-    with target_lock(target, no_lock=no_lock):
-        rc = apply_upgrade_plan(target, scaffold_manifest, plans, profile)
-    if rc != 0:
-        return rc
+    pending = PendingUpgrade.begin(target, paths, old_version, new_version, no_verify)
 
-    if commit:
-        commit_upgrade(target, plans, old_version)
+    with _interruptible() as killers:
+        try:
+            rc = apply_upgrade_plan(target, scaffold_manifest, plans, profile)
+            if rc != 0:
+                pending.abandon("the upgrade stopped partway; every file it wrote is restored")
+                return rc
+            pending.mark_applied()
+            if verify_mode != "off":
+                changed = pending.changed_paths()
+                if changed:
+                    if pre_label is None:
+                        print(f"  gate: skipped — {pre_command}")
+                    else:
+                        result = run_upgrade_gate(target, verify_mode, killers)
+                        if result["status"] != "passed":
+                            pending.abandon(None)
+                            report_red_upgrade(result, changed)
+                            return EXIT_UPGRADE_GATE_RED
+                        print(f"  gate: {result['label']} passed ({result['where']}) on the "
+                              "upgraded tree")
+        except UpgradeInterrupted:
+            pending.abandon("interrupted; every file the upgrade wrote is restored")
+            print("--upgrade: interrupted — nothing was committed.", file=sys.stderr)
+            return 130
+
+        if not commit:
+            pending.finish()
+            return 0
+        try:
+            to_commit = pending.write_set(upgrade_commit_paths(plans))
+            pending.mark_verified(to_commit)
+            status = commit_upgrade(target, plans, old_version, unverified=no_verify,
+                                    paths=to_commit)
+        except UpgradeInterrupted:
+            if (_pending_upgrade(target) or {}).get("phase") != "verified":
+                pending.abandon("interrupted; every file the upgrade wrote is restored")
+                print("--upgrade: interrupted — nothing was committed.", file=sys.stderr)
+            else:
+                print("--upgrade: interrupted after the gate passed; the next "
+                      "`phasekit upgrade` commits it.", file=sys.stderr)
+            return 130
+    if status in ("stage-failed", "commit-failed"):
+        print("  The upgrade is applied and verified but NOT committed; the next "
+              "`phasekit upgrade` commits it once the cause above is cleared.",
+              file=sys.stderr)
+        return EXIT_UPGRADE_UNCOMMITTED
+    pending.finish()
     return 0
+
+
+# === The upgrade gate (v0.16.0, row 813) ====================================
+#
+# WHY. Upgrade commits ran no gate, so a scaffold change that broke a
+# project's own checks landed silently and surfaced only when the next real
+# iteration spent a session and blocked (xmeo-v3, 2026-09-15: 9 red tests on
+# master from one upgrade commit). Now the project's pre-commit gate runs on
+# the upgraded tree BEFORE the commit; anything but a clean green restores the
+# tree byte-for-byte and commits nothing.
+#
+# WHERE IT RUNS, and why that is a policy rather than a detail. A project's
+# gate is written for the runner image (its toolchain, its jq), and on a
+# supervisor host it must never run bare — one managed project's suite kills
+# every live runner container when started with the docker socket. So:
+#
+#   auto (default)  the runner image when docker is reachable; the HOST only
+#                   when there is no docker CLI at all (a solo user without
+#                   docker). A daemon that fails or hangs, or a missing image,
+#                   is a refusal with the one-line fix — never a fallback.
+#   container       the runner image or nothing
+#   host            the host, always
+#   off             no gate (also: --no-verify; also: --no-commit)
+#
+# A project whose gate was not configured BEFORE the upgrade (no script, or
+# still the stub) is skipped: there was nothing to verify. The gate runs under
+# `bash -eo pipefail -c`, as the loop runs it; it is read-only over the tree
+# (the v0.14.10 `verify-gate-read-only` convention), and a footprint makes it
+# red and is restored. The cross-project contracts check is not part of it: it
+# needs a supervisor-staged provider mount, and the next session's first
+# commit runs it anyway.
+#
+# SURVIVING A KILL. Before anything is written, the exact pre-upgrade bytes of
+# every path the upgrade may touch are copied OUTSIDE the tree, beside a
+# pending record naming the phase. SIGINT/SIGTERM restore in-process; after a
+# SIGKILL the next upgrade restores (phase `applied`) or commits (phase
+# `verified`) before it plans anything, and `--check` reports the pending
+# record as non-zero so a rollout loop cannot mistake it for clean.
+
+UPGRADE_VERIFY_ENV = "PHASEKIT_UPGRADE_VERIFY"
+UPGRADE_VERIFY_MODES = ("auto", "container", "host", "off")
+UPGRADE_VERIFY_TIMEOUT_ENV = "PHASEKIT_UPGRADE_VERIFY_TIMEOUT"
+UPGRADE_VERIFY_TIMEOUT_DEFAULT = 1800
+RUNNER_IMAGE_ENV = "PHASEKIT_RUNNER_IMAGE"
+RUNNER_IMAGE_DEFAULT = "scaffold-runner"
+UPGRADE_GATE_TAIL_LINES = 40
+EXIT_UPGRADE_GATE_RED = 4
+EXIT_UPGRADE_UNCOMMITTED = 5
+UNVERIFIED_SUFFIX = " (unverified: --no-verify)"
+PENDING_SCHEMA = 1
+
+
+class UpgradeInterrupted(Exception):
+    """SIGINT or SIGTERM arrived while the upgrade held the tree."""
+
+
+@contextlib.contextmanager
+def _interruptible():
+    """Turn SIGINT/SIGTERM into UpgradeInterrupted for the duration, so the
+    tree is restored instead of left half-upgraded. Yields a list the gate
+    appends its kill function to."""
+    killers = []
+    fired = []
+
+    def handler(signum, frame):
+        if fired:  # a second signal while restoring must not abort the restore
+            return
+        fired.append(signum)
+        for kill in list(killers):
+            try:
+                kill()
+            except Exception:  # noqa: BLE001 — best effort while unwinding
+                pass
+        raise UpgradeInterrupted()
+
+    previous = {}
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous[sig] = signal.signal(sig, handler)
+        except (ValueError, OSError):  # not the main thread
+            pass
+    try:
+        yield killers
+    finally:
+        for sig, old in previous.items():
+            signal.signal(sig, old)
+
+
+def upgrade_verify_mode(no_verify=False, commit=True):
+    """The effective gate mode, or raise ValueError for an unusable env value."""
+    if no_verify or not commit:
+        return "off"
+    raw = (os.environ.get(UPGRADE_VERIFY_ENV) or "auto").strip().lower()
+    if raw not in UPGRADE_VERIFY_MODES:
+        raise ValueError(f"{UPGRADE_VERIFY_ENV}={raw!r} is not one of "
+                         f"{', '.join(UPGRADE_VERIFY_MODES)}")
+    return raw
+
+
+def resolve_upgrade_gate(target):
+    """(label, shell command) for this project's gate, or (None, reason)."""
+    env_cmd = (os.environ.get("PHASEKIT_VERIFY_CMD") or "").strip()
+    if env_cmd:
+        return "PHASEKIT_VERIFY_CMD", env_cmd
+    script = Path(target) / VERIFY_DEST_PATH
+    if not script.is_file():
+        return None, "no verify gate was configured (scripts/phasekit-verify.sh absent)"
+    if verify_gate_is_stub(script):
+        return None, "the verify gate was still the unconfigured stub"
+    return VERIFY_DEST_PATH, f"bash {VERIFY_DEST_PATH}"
+
+
+def _docker_state(image):
+    """'absent' (no docker CLI at all) | 'unreachable' | 'no-image' | 'ready'.
+
+    Only a missing CLI licenses the host: a CLI whose daemon fails or hangs is
+    the supervisor host on a bad day (a wedged daemon; a non-login shell
+    without the rootless DOCKER_HOST), exactly where a bare run is dangerous."""
+    if shutil.which("docker") is None:
+        return "absent"
+    try:
+        info = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"],
+                              capture_output=True, timeout=30)
+        if info.returncode != 0:
+            return "unreachable"
+        img = subprocess.run(["docker", "image", "inspect", image],
+                             capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unreachable"
+    return "ready" if img.returncode == 0 else "no-image"
+
+
+def _runner_user():
+    """The user the gate runs as in the runner image — the pairing
+    scripts/container-setup.sh documents: PHASEKIT_CONTAINER_USER when set;
+    else 0:0 under rootless docker (container root IS the host user); else the
+    host uid."""
+    explicit = (os.environ.get("PHASEKIT_CONTAINER_USER") or "").strip()
+    if explicit:
+        return "0:0" if explicit == "root" else explicit
+    rootless = os.environ.get("PHASEKIT_ROOTLESS_DOCKER") == "1"
+    if not rootless:
+        try:
+            r = subprocess.run(["docker", "info", "--format", "{{json .SecurityOptions}}"],
+                               capture_output=True, text=True, timeout=60)
+            rootless = "rootless" in (r.stdout or "")
+        except (OSError, subprocess.TimeoutExpired):
+            rootless = False
+    return "0:0" if rootless else f"{os.getuid()}:{os.getgid()}"
+
+
+def _forward_env_args():
+    """`-e NAME` for each PHASEKIT_FORWARD_ENV key that is set — the same keys
+    scripts/container-setup.sh forwards to a session, so a suite that needs
+    them is not red only at upgrade time. By name: docker reads the value from
+    this environment, so it never appears in argv."""
+    args = []
+    raw = (os.environ.get("PHASEKIT_FORWARD_ENV") or "").replace("\n", ",")
+    for name in (n.strip() for n in raw.split(",")):
+        if (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name or "")
+                and name not in ("HOME", "PATH", "CLAUDE_CONFIG_DIR", "IS_SANDBOX")
+                and os.environ.get(name)):
+            args += ["-e", name]
+    return args
+
+
+def _mount_arg(target):
+    """--mount value; CSV-quoted so a path with ':' or ',' is still one field."""
+    src = str(target).replace('"', '""')
+    return f'type=bind,"src={src}",dst=/workspace'
+
+
+def _tail(text, lines=UPGRADE_GATE_TAIL_LINES):
+    return "\n".join((text or "").rstrip().splitlines()[-lines:])
+
+
+def run_upgrade_gate(target, mode, killers=None):
+    """Run the project's gate on the upgraded tree; never raises except
+    UpgradeInterrupted. Returns {status: passed|failed|infra, where, label,
+    detail, tail}. The gate's footprint (anything it changed outside ignored
+    paths) is restored and turns the verdict red."""
+    target = Path(target).resolve()
+    killers = killers if killers is not None else []
+    label, command = resolve_upgrade_gate(target)
+    image = (os.environ.get(RUNNER_IMAGE_ENV) or RUNNER_IMAGE_DEFAULT).strip()
+    where = mode
+    if mode in ("auto", "container"):
+        state = _docker_state(image)
+        if state == "ready":
+            where = "container"
+        elif mode == "auto" and state == "absent":
+            where = "host"
+        else:
+            why = {"absent": "docker is not installed",
+                   "unreachable": "the docker daemon did not answer"}.get(
+                       state, f"the runner image '{image}' is not present")
+            return {"status": "infra", "where": "container", "label": label,
+                    "detail": f"{why}; refusing to run the gate on the host. Build the "
+                              "image (bash scripts/container-setup.sh build), or set "
+                              f"{UPGRADE_VERIFY_ENV}=host where running it bare is safe",
+                    "tail": ""}
+    try:
+        timeout = int(os.environ.get(UPGRADE_VERIFY_TIMEOUT_ENV)
+                      or UPGRADE_VERIFY_TIMEOUT_DEFAULT)
+    except ValueError:
+        timeout = UPGRADE_VERIFY_TIMEOUT_DEFAULT
+
+    try:
+        before = _dirty_state(target)
+    except RuntimeError as exc:
+        return {"status": "infra", "where": where, "label": label,
+                "detail": f"cannot observe the tree, so a footprint would go unseen ({exc})",
+                "tail": ""}
+    before_snap = _snapshot(target, sorted(before)) if before else {}
+    index_before = _index_state(target)
+
+    name = None
+    if where == "container":
+        name = (f"phasekit-upgrade-gate-{os.getpid()}-"
+                f"{int(datetime.now(timezone.utc).timestamp() * 1000)}")
+        argv = ["docker", "run", "--rm", "--name", name, "--entrypoint", "bash",
+                "--mount", _mount_arg(target), "-w", "/workspace",
+                "--user", _runner_user(),
+                "-e", "HOME=/tmp/phasekit-upgrade-home",
+                "-e", "GIT_CONFIG_COUNT=1",
+                "-e", "GIT_CONFIG_KEY_0=safe.directory",
+                "-e", "GIT_CONFIG_VALUE_0=*",
+                *_forward_env_args(),
+                image, "-eo", "pipefail", "-c", command]
+        cwd = None
+    else:
+        argv = ["bash", "-eo", "pipefail", "-c", command]
+        cwd = str(target)
+    try:
+        proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True,
+                                start_new_session=True)
+    except OSError as exc:
+        return {"status": "infra", "where": where, "label": label,
+                "detail": f"could not start the gate ({type(exc).__name__})", "tail": ""}
+
+    def kill():
+        # The whole process group on the host; the named container under docker
+        # (killing the docker CLIENT does not stop the container).
+        if name:
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=120)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    killers.append(kill)
+    try:
+        try:
+            out, _ = proc.communicate(timeout=timeout)
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            kill()
+            timed_out = True
+            try:
+                out, _ = proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:  # something escaped the group holds the pipe
+                out = ""
+        # A green gate may still have left background children in its group:
+        # they must not write after the footprint check (review r2). A child
+        # that setsid()s out of the group is beyond reach — declined, recorded.
+        if not name:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    finally:
+        killers.remove(kill)
+
+    # The index first: the worktree restore below checks tracked paths out
+    # FROM the index, so a gate that edited-and-staged a file would otherwise
+    # have its own content checked back out (review r3).
+    index_touched = []
+    index_after = _index_state(target)
+    if index_before is not None and (index_after is None or index_after[0] != index_before[0]):
+        Path(index_before[1]).write_bytes(index_before[2])
+        index_touched = ["(the git index)"]
+    try:
+        footprint = _restore_footprint(target, before, before_snap) + index_touched
+    except RuntimeError as exc:
+        return {"status": "infra", "where": where, "label": label,
+                "detail": f"cannot observe the tree after the gate ({exc})", "tail": _tail(out)}
+    if timed_out:
+        verdict = {"status": "failed", "detail": f"timed out after {timeout}s"}
+    elif name and proc.returncode == 125:
+        verdict = {"status": "infra", "detail": "the runner could not start (docker exit 125)"}
+    elif proc.returncode != 0:
+        verdict = {"status": "failed", "detail": f"exit {proc.returncode}"}
+    elif footprint:
+        verdict = {"status": "failed",
+                   "detail": "the gate wrote into the tree (restored): " + ", ".join(footprint[:8])
+                   + (" …" if len(footprint) > 8 else "")
+                   + ". A verify gate is read-only over the tree; its output belongs "
+                   "under an ignored path"}
+    else:
+        verdict = {"status": "passed", "detail": "exit 0"}
+    return {**verdict, "where": where, "label": label, "tail": _tail(out)}
+
+
+def _dirty_state(target):
+    """{path: digest} for every path git reports as not clean, ignored paths
+    excluded; {} for a clean tree or a directory that is not a git work tree.
+    Raises RuntimeError when git cannot answer for a work tree — a silent {}
+    would make footprint detection vacuous."""
+    if not (Path(target) / ".git").exists():
+        return {}
+    try:
+        r = subprocess.run(["git", "-C", str(target), "status", "--porcelain=v1", "-z",
+                            "--untracked-files=all"], capture_output=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"git status: {type(exc).__name__}") from exc
+    if r.returncode != 0:
+        err = os.fsdecode(r.stderr).strip().splitlines()
+        raise RuntimeError(f"git status: {err[0] if err else 'exit ' + str(r.returncode)}")
+    out = {}
+    fields = r.stdout.split(b"\0")
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        if entry[:1] in (b"R", b"C"):
+            i += 1  # the rename source follows as its own field
+        rel = os.fsdecode(entry[3:])
+        out[rel] = _digest(Path(target) / rel)
+    return out
+
+
+def _index_state(target):
+    """(staged-entries digest, index path, index bytes), or None outside git.
+    A gate that runs `git add` changes no worktree digest; this catches it."""
+    if not (Path(target) / ".git").exists():
+        return None
+    ls = subprocess.run(["git", "-C", str(target), "ls-files", "-s", "-z"],
+                        capture_output=True)
+    where = subprocess.run(["git", "-C", str(target), "rev-parse", "--git-path", "index"],
+                           capture_output=True, text=True)
+    if ls.returncode != 0 or where.returncode != 0:
+        return None
+    index = Path(where.stdout.strip())
+    if not index.is_absolute():
+        index = Path(target) / index
+    try:
+        data = index.read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha256(ls.stdout).hexdigest(), str(index), data
+
+
+def _state_digest(target, rel):
+    return _digest(Path(target) / rel)
+
+
+def _digest(f):
+    if f.is_symlink():
+        return "link:" + os.readlink(f)
+    if f.is_file():
+        return (hashlib.sha256(f.read_bytes()).hexdigest()
+                + f":{stat.S_IMODE(f.stat().st_mode):o}")
+    return "absent"
+
+
+def _restore_footprint(target, before, before_snap):
+    """Undo everything the gate changed; return the paths it touched."""
+    after = _dirty_state(target)
+    touched = sorted(p for p in set(before) | set(after)
+                     if before.get(p) != after.get(p))
+    for rel in touched:
+        if rel in before_snap:
+            _restore(target, {rel: before_snap[rel]})
+            continue
+        # clean before the gate: back to the index (tracked) or gone (untracked)
+        tracked = subprocess.run(["git", "-C", str(target), "ls-files", "--error-unmatch",
+                                  "--", rel], capture_output=True).returncode == 0
+        if tracked:
+            subprocess.run(["git", "-C", str(target), "checkout", "--", rel],
+                           capture_output=True)
+        else:
+            f = Path(target) / rel
+            if f.is_symlink() or f.is_file():
+                f.unlink()
+            _prune_empty_parents(target, f.parent)
+    return touched
+
+
+def _prune_empty_parents(target, d):
+    target = Path(target).resolve()
+    d = Path(d)
+    while d != target and target in d.parents:
+        try:
+            d.rmdir()
+        except OSError:
+            return
+        d = d.parent
+
+
+def _upgrade_touched_paths(plans):
+    paths = {".scaffold/manifest.json", ".claude/settings.json"}
+    for p in plans:
+        paths.add(p["path"])
+        if p.get("rename_target"):
+            paths.add(p["rename_target"])
+    return sorted(paths)
+
+
+def _snapshot(target, paths):
+    """The exact current state of each path: file bytes + mode, link, or absent."""
+    snap = {}
+    for rel in paths:
+        f = Path(target) / rel
+        if f.is_symlink():
+            snap[rel] = ("link", os.readlink(f))
+        elif f.is_file():
+            snap[rel] = ("file", f.read_bytes(), stat.S_IMODE(f.stat().st_mode))
+        else:
+            snap[rel] = ("absent",)
+    return snap
+
+
+def _restore(target, snap):
+    for rel, rec in snap.items():
+        f = Path(target) / rel
+        if rec[0] == "absent":
+            if f.is_symlink() or f.exists():
+                f.unlink()
+                _prune_empty_parents(target, f.parent)
+        elif rec[0] == "link":
+            if f.is_symlink() or f.exists():
+                f.unlink()
+            f.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(rec[1], f)
+        else:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            tmp = f.with_name(f.name + ".pk-restore")
+            tmp.write_bytes(rec[1])
+            os.chmod(tmp, rec[2])
+            os.replace(tmp, f)
+
+
+def _pending_dir(target):
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state")
+    key = hashlib.sha256(str(Path(target).resolve()).encode()).hexdigest()[:16]
+    return Path(base) / "phasekit" / "upgrade-pending" / key
+
+
+def _pending_upgrade(target):
+    """The pending record for this project, or None."""
+    f = _pending_dir(target) / "pending.json"
+    try:
+        return json.loads(f.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+class PendingUpgrade:
+    """The out-of-tree record that makes an upgrade survive a kill: the exact
+    pre-upgrade bytes of every path it may touch, the digest of each path as
+    the upgrade LEFT it (`post`), and the phase it reached. Recovery only ever
+    touches a path still exactly as the upgrade left it: anything newer is the
+    project's work and wins (review r2)."""
+
+    def __init__(self, target, record, snap):
+        self.target, self.record, self.snap = target, record, snap
+        self.dir = _pending_dir(target)
+
+    @classmethod
+    def begin(cls, target, paths, from_version, to_version, unverified):
+        snap = _snapshot(target, paths)
+        d = _pending_dir(target)
+        if d.exists():
+            shutil.rmtree(d)
+        (d / "blobs").mkdir(parents=True)
+        index = {}
+        for n, (rel, rec) in enumerate(sorted(snap.items())):
+            if rec[0] == "file":
+                (d / "blobs" / f"{n:05d}").write_bytes(rec[1])
+                index[rel] = {"kind": "file", "blob": f"{n:05d}", "mode": rec[2]}
+            elif rec[0] == "link":
+                index[rel] = {"kind": "link", "target": rec[1]}
+            else:
+                index[rel] = {"kind": "absent"}
+        record = {"schema": PENDING_SCHEMA, "target": str(Path(target).resolve()),
+                  "pid": os.getpid(), "started_at": utc_now_iso(), "phase": "applying",
+                  "from_version": from_version, "to_version": to_version,
+                  "unverified": bool(unverified), "paths": sorted(snap), "snapshot": index,
+                  "pre": {rel: _state_digest(target, rel) for rel in snap}}
+        self = cls(target, record, snap)
+        self._write()
+        return self
+
+    @classmethod
+    def load(cls, target):
+        """The pending upgrade, None when there is none; raises RuntimeError
+        for a record that exists but cannot be used (never discarded silently)."""
+        d = _pending_dir(target)
+        if not d.exists():
+            return None
+        record = _pending_upgrade(target)
+        if not isinstance(record, dict) or record.get("schema") != PENDING_SCHEMA:
+            if not (d / "pending.json").exists():  # killed inside begin(): nothing written yet
+                shutil.rmtree(d, ignore_errors=True)
+                return None
+            raise RuntimeError(f"the pending-upgrade record in {d} is unreadable")
+        snap = {}
+        try:
+            for rel, e in (record.get("snapshot") or {}).items():
+                if e.get("kind") == "file":
+                    snap[rel] = ("file", (d / "blobs" / e["blob"]).read_bytes(), e["mode"])
+                elif e.get("kind") == "link":
+                    snap[rel] = ("link", e["target"])
+                else:
+                    snap[rel] = ("absent",)
+        except (OSError, KeyError) as exc:
+            raise RuntimeError(f"the pending-upgrade record in {d} is incomplete "
+                               f"({type(exc).__name__})") from exc
+        return cls(target, record, snap)
+
+    def _write(self):
+        tmp = self.dir / "pending.json.tmp"
+        tmp.write_text(json.dumps(self.record, indent=2))
+        os.replace(tmp, self.dir / "pending.json")
+
+    def changed_paths(self):
+        now = _snapshot(self.target, [r for r in self.snap if r != ".scaffold/manifest.json"])
+        return sorted(r for r, rec in now.items() if rec != self.snap[r])
+
+    def mark_applied(self):
+        self.record["phase"] = "applied"
+        self.record["post"] = {rel: _state_digest(self.target, rel) for rel in self.snap}
+        self._write()
+
+    def write_set(self, candidates):
+        """The candidates this upgrade actually changed. `.claude/settings.json`
+        is always a candidate, so without this a project's in-flight edit to it
+        rode along in a commit the upgrade never needed (review r3)."""
+        pre, post = self.record.get("pre") or {}, self.record.get("post") or {}
+        rel = ".claude/settings.json"
+        # Only this always-listed path is filtered: every other candidate the
+        # upgrade wrote, and staging an unchanged one is how an untracked
+        # manifest gets re-tracked.
+        return sorted(p for p in candidates
+                      if p != rel or post.get(p) != pre.get(p))
+
+    def mark_verified(self, commit_paths):
+        self.record["phase"] = "verified"
+        self.record["commit_paths"] = sorted(commit_paths)
+        self._write()
+
+    def ours(self):
+        """(paths still exactly as the upgrade left them, paths changed since)."""
+        post = self.record.get("post")
+        pre = self.record.get("pre") or {}
+        mine, theirs = [], []
+        for rel in self.snap:
+            now = _state_digest(self.target, rel)
+            if post is None:
+                # Killed while applying (a window of file writes, no gate yet):
+                # there is no post-image to compare, so every path off its
+                # pre-image is taken as the upgrade's. Recorded, narrow.
+                if now != pre.get(rel):
+                    mine.append(rel)
+            elif now == post.get(rel):
+                if now != pre.get(rel):
+                    mine.append(rel)
+            else:
+                theirs.append(rel)
+        return sorted(mine), sorted(theirs)
+
+    def abandon(self, message, only=None):
+        for rel in self.snap:  # a restore killed mid-write leaves its temp file
+            tmp = Path(self.target) / (rel + ".pk-restore")
+            if tmp.is_file():
+                tmp.unlink()
+        _restore(self.target, self.snap if only is None
+                 else {r: self.snap[r] for r in only})
+        self.finish()
+        if message:
+            print(f"--upgrade: {message}.", file=sys.stderr)
+
+    def finish(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def recover_pending_upgrade(target):
+    """Settle an upgrade a previous run could not finish. Returns None to
+    continue with the new upgrade, or an exit code to stop with. Only paths
+    still exactly as the upgrade left them are restored or committed; a path
+    changed since belongs to whoever changed it and is named, not touched."""
+    try:
+        pending = PendingUpgrade.load(target)
+    except RuntimeError as exc:
+        print(f"--upgrade: {exc}. Inspect it — it holds the pre-upgrade bytes of every "
+              f"file the interrupted upgrade may have written — then delete "
+              f"{_pending_dir(target)} to proceed.", file=sys.stderr)
+        return 1
+    if pending is None:
+        return None
+    r = pending.record
+    what = f"({r.get('from_version')} -> {r.get('to_version')}, started {r.get('started_at')})"
+    mine, theirs = pending.ours()
+    if theirs:
+        print(f"--upgrade: changed since the interrupted upgrade {what}, so left as they "
+              "are: " + ", ".join(theirs), file=sys.stderr)
+    if r.get("phase") == "verified":
+        print(f"--upgrade: completing an earlier upgrade {what} that was applied and "
+              "verified but not committed.")
+        message = f"{UPGRADE_COMMIT_PREFIX} {r.get('from_version')} -> {r.get('to_version')}"
+        if r.get("unverified"):
+            message += UNVERIFIED_SUFFIX
+        paths = [p for p in (r.get("commit_paths") or []) if p not in theirs]
+        status = _commit_paths(pending.target, paths, message)
+        if status in ("stage-failed", "commit-failed"):
+            return EXIT_UPGRADE_UNCOMMITTED
+        pending.finish()
+        return None
+    print(f"--upgrade: an earlier upgrade {what} was interrupted before its verdict; "
+          "restoring the files it wrote before planning again.", file=sys.stderr)
+    pending.abandon(None, only=mine)
+    return None
+
+
+def report_red_upgrade(result, changed):
+    if result["status"] == "infra":
+        print("\nUPGRADE NOT APPLIED: the project's gate could not run here,", file=sys.stderr)
+    else:
+        print("\nUPGRADE NOT APPLIED: the project's own gate did not pass on the upgraded "
+              "tree,", file=sys.stderr)
+    print("so every file this upgrade wrote has been restored byte-for-byte and "
+          "nothing was committed.", file=sys.stderr)
+    print(f"  gate:  {result['label']} ({result['where']}) — {result['detail']}",
+          file=sys.stderr)
+    print("  files the upgrade changed (restored):", file=sys.stderr)
+    for rel in changed:
+        print(f"    {rel}", file=sys.stderr)
+    if result.get("tail"):
+        print("  last lines of the gate's output:", file=sys.stderr)
+        for line in result["tail"].splitlines():
+            print(f"    | {line}", file=sys.stderr)
+    print("  Next: keep a project-edited file with --keep-local PATH (it then stays "
+          "kept), or fix the project forward and upgrade again. As a last resort, "
+          "--no-verify commits without the gate and says so in the commit subject.",
+          file=sys.stderr)
 
 
 UPGRADE_COMMIT_PREFIX = "chore(scaffold): phasekit upgrade"
 
 
-def commit_upgrade(target, plans, old_version):
-    """Commit (and try to push) the files this upgrade wrote.
+def commit_upgrade(target, plans, old_version, unverified=False, paths=None):
+    """Commit (and try to push) the files this upgrade wrote. Returns one of
+    committed | nothing | no-git | commit-failed | stage-failed.
 
     Leaving the tree dirty caused two distinct failures in one day:
 
@@ -1217,14 +1972,22 @@ def commit_upgrade(target, plans, old_version):
     happened to be dirty would hand a project's in-flight work a commit message
     about the scaffold, which is worse than the problem being fixed.
 
-    Every failure here is non-fatal: the upgrade itself already succeeded on
-    disk, and a repo with no git identity, no remote, or a rejected push must
-    not turn that into an error.
+    A missing git identity, remote or upstream stays non-fatal: the files are
+    installed. A STAGING failure is reported and returned (v0.16.0: a stale
+    .git/index.lock once let two upgrades return as if there were nothing to
+    commit), so the caller can keep the pending record and exit 5.
     """
-    if not (target / ".git").exists():
-        return
-
     new_version, _ = get_scaffold_version()
+    message = f"{UPGRADE_COMMIT_PREFIX} {old_version} -> {new_version}"
+    if unverified:
+        message += UNVERIFIED_SUFFIX
+    return _commit_paths(target, upgrade_commit_paths(plans) if paths is None else paths,
+                         message)
+
+
+def upgrade_commit_paths(plans):
+    """The paths an upgrade commit may carry: the ones it WROTE. A kept or
+    untouched path is the project's, whatever state it is in."""
     touched = {".scaffold/manifest.json", ".claude/settings.json"}
     for p in plans:
         if p["action"] in (ACTION_INSTALL, ACTION_TAKE_NEW, ACTION_DELETE,
@@ -1232,24 +1995,47 @@ def commit_upgrade(target, plans, old_version):
             touched.add(p["path"])
         if p["action"] == ACTION_RENAME_LOCAL and p.get("rename_target"):
             touched.add(p["rename_target"])
+    return sorted(touched)
 
-    def git(*args, check=False):
+
+def _commit_paths(target, paths, message):
+    target = Path(target)
+    if not (target / ".git").exists():
+        return "no-git"
+
+    def git(*args):
         return subprocess.run(["git", "-C", str(target), *args],
-                              capture_output=True, text=True, check=check)
+                              capture_output=True, text=True)
 
     # Stage what we touched (`--all` on the pathspec so a deletion is recorded
-    # too, and a path the plan removed does not error).
-    for path in sorted(touched):
-        git("add", "--all", "--", path)
+    # too). A path that is neither on disk nor tracked has nothing to stage and
+    # is skipped; any OTHER staging failure is reported, never swallowed.
+    staging_failed = []
+    for path in paths:
+        if not (target / path).exists() and not git("ls-files", "--", path).stdout.strip():
+            continue
+        r = git("add", "--all", "--", path)
+        if r.returncode != 0:
+            # git's FIRST fatal/error line names the cause (e.g. the lock file);
+            # its last line is generic advice.
+            err = r.stderr.strip().splitlines()
+            cause = next((line for line in err if line.startswith(("fatal:", "error:"))),
+                         err[0] if err else "")
+            staging_failed.append((path, cause))
+    if staging_failed:
+        path, detail = staging_failed[0]
+        print(f"  note: could not stage the upgrade ({len(staging_failed)} path(s); first: "
+              f"{path}: {detail}); the files are installed but the tree is left dirty.",
+              file=sys.stderr)
+        return "stage-failed"
 
     # Which of them actually differ from HEAD. An idempotent re-upgrade reaches
     # here with nothing to say and must not make an empty commit.
     changed = [p for p in git("diff", "--cached", "--name-only").stdout.split()
-               if p in touched]
+               if p in set(paths)]
     if not changed:
-        return
+        return "nothing"
 
-    message = f"{UPGRADE_COMMIT_PREFIX} {old_version} -> {new_version}"
     # `--only <paths>` is load-bearing, not a flourish. A plain `git commit`
     # commits the WHOLE index, so anything the project had already staged when
     # the upgrade ran would be swept into a commit whose message says
@@ -1262,21 +2048,22 @@ def commit_upgrade(target, plans, old_version):
         detail = (r.stderr.strip().splitlines() or [""])[-1]
         print(f"  note: could not commit the upgrade ({detail}); "
               f"the files are installed but the tree is left dirty.", file=sys.stderr)
-        return
+        return "commit-failed"
     print(f"  commit: {message}")
 
     # Push only when there is somewhere to push to. A project with no remote or
     # no upstream is a normal standalone case, not a failure.
     if not git("remote").stdout.strip():
-        return
+        return "committed"
     if git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}").returncode != 0:
         print("  note: no upstream branch — commit is local.", file=sys.stderr)
-        return
+        return "committed"
     r = git("push")
     if r.returncode == 0:
         print("  push: ok")
     else:
         print("  note: push failed; the upgrade commit is local.", file=sys.stderr)
+    return "committed"
 
 
 # === --uninstall (M9 §5) ===================================================
@@ -1555,7 +2342,7 @@ def lookup_template_info(scaffold_manifest, downstream_path):
 
 def build_manifest_entry(downstream_path, ownership, target_dir,
                           scaffold_manifest, is_text=True, rendered_from_override=None,
-                          installed_at=None):
+                          installed_at=None, local=None):
     """Build one entry for the downstream `.scaffold/manifest.json`.
 
     `installed_at` defaults to now. `write_downstream_manifest` passes the
@@ -1578,6 +2365,8 @@ def build_manifest_entry(downstream_path, ownership, target_dir,
         "overlays": [],
         "installed_at": installed_at or utc_now_iso(),
     }
+    if local:
+        entry["local"] = local
 
     if ownership == "bootstrap-with-template-tracking":
         rendered_from, template_sha = lookup_template_info(
@@ -1653,10 +2442,17 @@ def write_downstream_manifest(target_dir, scaffold_manifest, profile, file_specs
     for spec in file_specs:
         installed = bool(spec.get("installed", True))
         carried_stamp = None
+        prior_entry = prior_entries.get(spec["path"])
         if not installed:
-            prior_entry = prior_entries.get(spec["path"])
             if prior_entry is not None:
                 carried_stamp = prior_entry.get("installed_at") or None
+        # A standing keep-local survives any writer that does not decide it:
+        # an upgrade states it explicitly per file; enrich and reconcile carry
+        # whatever the prior entry recorded.
+        if "local" in spec:
+            local = spec["local"]
+        else:
+            local = prior_entry.get("local") if isinstance(prior_entry, dict) else None
         entry = build_manifest_entry(
             spec["path"],
             spec["ownership"],
@@ -1665,6 +2461,7 @@ def write_downstream_manifest(target_dir, scaffold_manifest, profile, file_specs
             is_text=spec.get("text", True),
             rendered_from_override=spec.get("rendered_from"),
             installed_at=carried_stamp,
+            local=local,
         )
         if entry is not None:
             entries.append(entry)
@@ -2011,12 +2808,21 @@ def cmd_check(target_dir, strict=False, include_templates=False):
     recorded `template_sha`; mismatches are reported as advisory drift
     (never auto-overwritten — the file was rendered once and is project-owned).
 
-    Returns 0 if clean, 3 if drift or template-source drift detected, 1 on error.
+    Returns 0 if clean, 3 if drift or template-source drift detected — or an
+    interrupted upgrade is pending (v0.16.0) — 1 on error.
     """
     target = Path(target_dir).resolve()
     if not target.is_dir():
         print(f"Error: target directory does not exist: {target}", file=sys.stderr)
         return 1
+
+    if (_pending_dir(target) / "pending.json").exists():
+        pending = _pending_upgrade(target) or {}
+        print(f"PENDING UPGRADE: an upgrade ({pending.get('from_version')} -> "
+              f"{pending.get('to_version')}, phase {pending.get('phase', 'unreadable')}) was "
+              "interrupted before it finished; run `phasekit upgrade` to settle it.",
+              file=sys.stderr)
+        return 3
 
     manifest = load_downstream_manifest(target)
     if manifest is None:
@@ -2362,6 +3168,12 @@ def main():
                         help="--upgrade: install the files but do not commit or push them "
                              "(default is to commit the upgrade's own work, so an idle "
                              "project is not left with a dirty tree it can never absorb)")
+    parser.add_argument("--no-verify", dest="no_verify", action="store_true",
+                        help="--upgrade: commit without running the project's own gate on "
+                             "the upgraded tree (the commit subject says so). Default: the "
+                             "gate runs first and a red gate restores the tree and commits "
+                             "nothing. Where it runs: PHASEKIT_UPGRADE_VERIFY=auto|container|"
+                             "host|off")
     parser.add_argument("--uninstall", action="store_true",
                         help="Remove scaffold-owned files (scaffold class). Use --include-once to also remove bootstrap-* files.")
     parser.add_argument("--include-once", dest="include_once", action="store_true",
@@ -2452,6 +3264,7 @@ def main():
             rename_local=args.rename_local,
             accept_removal=args.accept_removal,
             commit=not args.no_commit,
+            no_verify=args.no_verify,
         ))
 
     # Default: enrich

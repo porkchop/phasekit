@@ -107,10 +107,10 @@
     {
       "name": "PHASEKIT_VERIFY_CMD",
       "kind": "consumed",
-      "read_by": ["scripts/run-until-done.sh"],
+      "read_by": ["scripts/run-until-done.sh", "scripts/enrich-project.py"],
       "default": "unset — the loop runs scripts/phasekit-verify.sh if present",
       "container_forwarded": false,
-      "semantics": "One-shot shell command overriding the project's verify gate; run via bash -eo pipefail -c. Non-empty also satisfies light-mode verify eligibility on its own."
+      "semantics": "One-shot shell command overriding the project's verify gate; run via bash -eo pipefail -c. Non-empty also satisfies light-mode verify eligibility on its own. v0.16.0: also the gate `phasekit upgrade` runs on the upgraded tree before committing, under the same bash -eo pipefail -c."
     },
     {
       "name": "PHASEKIT_VERIFY_BUDGET_SECONDS",
@@ -188,18 +188,18 @@
     {
       "name": "PHASEKIT_CONTAINER_USER",
       "kind": "consumed",
-      "read_by": ["scripts/container-setup.sh"],
+      "read_by": ["scripts/container-setup.sh", "scripts/enrich-project.py"],
       "default": "unset — image default user (node, UID 1000)",
       "container_forwarded": true,
-      "semantics": "Raw docker run --user spec; root normalizes to 0:0 (with HOME=/home/node pinned and IS_SANDBOX=1 exported). Takes precedence over PHASEKIT_ROOTLESS_DOCKER."
+      "semantics": "Raw docker run --user spec; root normalizes to 0:0 (with HOME=/home/node pinned and IS_SANDBOX=1 exported). Takes precedence over PHASEKIT_ROOTLESS_DOCKER. v0.16.0: also the user `phasekit upgrade` runs the project's gate as in the runner image."
     },
     {
       "name": "PHASEKIT_ROOTLESS_DOCKER",
       "kind": "consumed",
-      "read_by": ["scripts/container-setup.sh"],
+      "read_by": ["scripts/container-setup.sh", "scripts/enrich-project.py"],
       "default": "unset",
       "container_forwarded": true,
-      "semantics": "1 (with PHASEKIT_CONTAINER_USER empty) runs the container as root, the UID-0 mode for rootless Docker where container root maps to the unprivileged host user."
+      "semantics": "1 (with PHASEKIT_CONTAINER_USER empty) runs the container as root, the UID-0 mode for rootless Docker where container root maps to the unprivileged host user. v0.16.0: also decides the user the upgrade gate runs as in the runner image (0:0 when rootless, the host uid otherwise; detected from the daemon when unset)."
     },
     {
       "name": "PHASEKIT_PYTHON",
@@ -208,6 +208,30 @@
       "default": "python3",
       "container_forwarded": false,
       "semantics": "Interpreter used to run scripts/enrich-project.py, so a global install can point at an isolated venv (e.g. one that has pyyaml)."
+    },
+    {
+      "name": "PHASEKIT_UPGRADE_VERIFY",
+      "kind": "consumed",
+      "read_by": ["scripts/enrich-project.py"],
+      "default": "auto",
+      "container_forwarded": false,
+      "semantics": "v0.16.0. Where `phasekit upgrade` runs the project's own gate on the upgraded tree before committing: auto = the runner image when docker is reachable, the host only when there is no docker CLI at all (a daemon that fails or hangs, or a missing image, is a refusal, never a silent host run); container = the runner image or nothing; host = the host; off = no gate. --no-verify and --no-commit also mean off. A project whose gate was not configured before the upgrade (no scripts/phasekit-verify.sh, or still the stub) is skipped. Anything but a clean green (red, timed out, a footprint in the tree, or unable to run) restores every file the upgrade wrote byte-for-byte, commits nothing and exits 4. Any other value is an error (exit 1)."
+    },
+    {
+      "name": "PHASEKIT_UPGRADE_VERIFY_TIMEOUT",
+      "kind": "consumed",
+      "read_by": ["scripts/enrich-project.py"],
+      "default": "1800",
+      "container_forwarded": false,
+      "semantics": "v0.16.0. Seconds the upgrade gate may run before it is treated as red (tree restored, nothing committed). A non-integer falls back to the default."
+    },
+    {
+      "name": "PHASEKIT_RUNNER_IMAGE",
+      "kind": "consumed",
+      "read_by": ["scripts/enrich-project.py"],
+      "default": "scaffold-runner",
+      "container_forwarded": false,
+      "semantics": "v0.16.0. The runner image the upgrade gate uses in auto and container modes; the project is mounted read-write at /workspace with a throwaway HOME and git safe.directory set."
     },
     {
       "name": "CLAUDE_MODE",
@@ -834,6 +858,18 @@
     ".claude/hooks/compact-reanchor.sh": {
       "codes": {
         "0": "always — contractually fail-open; internal python failures are swallowed and output is capped at 2048 bytes"
+      },
+      "passthrough": null
+    },
+    "scripts/enrich-project.py": {
+      "codes": {
+        "0": "success (for --upgrade: applied, gated green or skipped, and committed — or nothing to do)",
+        "1": "error or bad input: no target, no manifest, an unusable PHASEKIT_UPGRADE_VERIFY value, a declined confirmation, a failed install (the upgrade's writes are restored)",
+        "2": "another process holds the target's lock, or --interactive combined with --yes",
+        "3": "--upgrade: unresolved refusals, nothing written; --check: drift, template-source drift, or an interrupted upgrade still pending",
+        "4": "--upgrade: no green verdict from the project's gate (red, timed out, wrote into the tree, or could not run here); every file restored, nothing committed",
+        "5": "--upgrade: applied and verified but NOT committed (staging or the commit failed, e.g. a stale .git/index.lock or a refusing pre-commit hook); the next --upgrade commits it",
+        "130": "--upgrade: interrupted by SIGINT/SIGTERM; before the verdict, every file the upgrade wrote is restored and nothing committed; after a green gate, the upgrade stays pending and the next --upgrade commits it"
       },
       "passthrough": null
     },

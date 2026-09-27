@@ -671,6 +671,13 @@ files:
     # (repo read-only, throwaway HOME) and asserts the image's jq >= 1.7 —
     # the pre-tag step in docs/RELEASING.md. Never installed downstream.
 
+  scripts/release-surfaces.py:
+    ownership: scaffold-internal
+    # v0.16.0 release tool: lists the loop-internal surfaces a release changed
+    # (contract families, loop env reads, per-function jq bindings) for the
+    # release note — the pre-tag step in docs/RELEASING.md. Never installed
+    # downstream.
+
   .githooks/pre-commit:
     ownership: scaffold-internal
     # Scaffold's own pre-commit hook (runs --self-check). Downstream

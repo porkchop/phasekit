@@ -76,6 +76,33 @@ It leaves the tree clean because a dirty tree after an upgrade caused two distin
 
 **Only the paths the upgrade wrote are committed.** It uses `git commit --only` on exactly those paths, so anything you already had staged or modified stays exactly where it was — an upgrade must never hand your in-flight work a commit message about the scaffold. Everything about the commit and push is non-fatal: no git identity, no remote, no upstream, or a rejected push each print a note and leave the installed files in place.
 
+## `--upgrade` runs the project's gate first, and remembers keep-local (v0.16.0)
+
+- **The project's own gate runs on the upgraded tree before anything is committed.**
+  Anything but a clean green — red, timed out, a gate that wrote into the tree, or a gate
+  that could not run here — restores every file the upgrade wrote byte-for-byte, commits
+  nothing, names the check and the files, and exits 4. Where it runs is
+  `PHASEKIT_UPGRADE_VERIFY`: `auto` (the runner image when docker is reachable; the host
+  only when there is no docker CLI at all — a daemon that fails or hangs, or a missing image,
+  refuses and says what to do), `container`, `host`, `off`. A project whose gate was not configured before
+  the upgrade (no script, or the stub) is skipped. `--no-verify` commits without it and
+  says so in the commit subject; `--no-commit` never runs it.
+- **An interrupted upgrade is settled by the next one.** The exact pre-upgrade bytes of
+  every path the upgrade may touch are kept outside the tree
+  (`$XDG_STATE_HOME/phasekit/upgrade-pending/`) until it commits. Ctrl-C or SIGTERM
+  restores on the spot (exit 130); after a SIGKILL the next `--upgrade` restores an
+  unverified tree, or commits a verified one, before planning anything — touching only
+  files still exactly as the upgrade left them (anything changed since is named and left
+  alone) — and `--check`
+  exits 3 while one is pending. A staging failure (a stale `.git/index.lock`) exits 5 and
+  leaves the verified upgrade pending for the next run to commit.
+- **`--keep-local PATH` is a standing decision.** It is recorded on the file's manifest
+  entry (`"local": "kept"`) and every later upgrade keeps the file by default, marking
+  it `(standing keep-local)` in the plan, until `--take-new PATH` releases it. (A
+  drifted `bootstrap-*` file kept by default is not a decision and records nothing.) Before
+  v0.16.0 the flag was forgotten after one upgrade, and the next scaffold update of the
+  file silently replaced the project's version.
+
 ## What to commit (and what to gitignore)
 
 Phasekit installs files and produces runtime artifacts. Most of what it installs is project-shared (commit it); a few specific paths are runtime-only or per-user (gitignore them).

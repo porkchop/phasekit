@@ -424,7 +424,7 @@ record_verify_failure() {
         reason: "pre-commit verify failed repeatedly",
         command: $cmd,
         attempts: $attempts,
-        next_step: "fix the failing verify or set VERIFY_SKIP=1 for this iteration"
+        next_step: "fix the failing verify: artifacts/phase-verify-failed.json names the command and its output. Only as a last resort, VERIFY_SKIP=1 bypasses the gate for this iteration."
       }' > "$ARTIFACTS_DIR/phase-blocked.json"
   fi
 }

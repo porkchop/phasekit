@@ -189,7 +189,11 @@ class UpgradeReseeding(unittest.TestCase):
         self.addCleanup(fx.cleanup)
         custom = "#!/usr/bin/env bash\nset -euo pipefail\nmy-own-checks\nPHASEKIT_VERIFY_CONFIGURED=1\n"
         fx.verify.write_text(custom)
-        result = _upgrade(fx.target, profile="python-uv")
+        # --no-verify: `my-own-checks` is a placeholder that marks the gate as
+        # configured, not a runnable gate. Since v0.16.0 upgrade RUNS a
+        # configured gate before committing (tests/test_upgrade_gate.py), and
+        # this test is about ownership — never overwriting it — not execution.
+        result = _upgrade(fx.target, profile="python-uv", extra=["--no-verify"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(fx.verify.read_text(), custom)
 
