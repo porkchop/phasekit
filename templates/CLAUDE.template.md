@@ -8,12 +8,14 @@ This repository uses the phasekit workflow.
 - Prefer minimal, backward-compatible changes unless a rewrite is explicitly justified
 - Stop after writing `artifacts/phase-approval.json`
 - Do not proceed past a phase until the repository has been committed externally
+- Do not edit scaffold-owned files (`"ownership": "scaffold"` in `.scaffold/manifest.json`, e.g. `docs/QUALITY_GATES.md`): upgrades replace them. Project additions go in the companion `docs/project/<NAME>.md`; changes to the scaffold's text go upstream to phasekit. `docs/CONVENTIONS.md` and this file are the project's own.
 
 ## Required references
 - @docs/SPEC.md
 - @docs/ARCHITECTURE.md
 - @docs/PHASES.md
 - @docs/QUALITY_GATES.md
+- @docs/project/QUALITY_GATES.md
 - @docs/PROD_REQUIREMENTS.md
 
 ## Optional references

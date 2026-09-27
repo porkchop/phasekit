@@ -1,9 +1,11 @@
 # Stack conventions — docs-only
 
-> Fleet-consistent conventions installed by the `docs-only` profile.
-> This file is **scaffold-owned**: it propagates via `phasekit upgrade` and is
-> drift-checked. Propose changes upstream in phasekit (`templates/
-> conventions.docs-only.md`) instead of editing it here.
+> Stack conventions seeded by the `docs-only` profile. This file is
+> **project-owned**: phasekit wrote it once and never overwrites it. Amend it
+> in place when this project's reality differs from the stack default — a
+> correction belongs here. When phasekit's template
+> (`templates/conventions.docs-only.md`) changes, `phasekit check
+> --include-templates` reports it as advisory; adopt what fits.
 
 ## The contract
 

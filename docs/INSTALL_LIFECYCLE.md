@@ -135,6 +135,43 @@ It leaves the tree clean because a dirty tree after an upgrade caused two distin
   v0.16.0 the flag was forgotten after one upgrade, and the next scaffold update of the
   file silently replaced the project's version.
 
+## Which files a project may edit (v0.17.0)
+
+Amendments are not merged on upgrade (the M9.4 overlay idea, declined 2026-09-27: a real
+amendment usually rewrites an inherited rule in place, and a mechanical merge can leave
+two rules that contradict each other). Instead every file has one owner:
+
+- **Scaffold-owned** (`scaffold`) files are never edited in the project. What a project
+  wants to add goes in the file's **companion**, `docs/project/<NAME>.md` for
+  `docs/<NAME>.md`; what it wants changed goes upstream to phasekit. phasekit seeds one
+  companion, `docs/project/QUALITY_GATES.md` (`bootstrap-frozen`): the quality gates are
+  the one scaffold doc that is per-project policy, and the only one a fleet project ever
+  amended. It is seeded once and never rewritten; a project that already has one keeps
+  it (adopted, not refused). A standing `--keep-local` remains the escape hatch.
+- **Project-owned** (`bootstrap-*`) files are seeded once and never overwritten.
+  `docs/CONVENTIONS.md` joined them in v0.17.0 (it was `scaffold`): the stack's
+  conventions are a starting point a project corrects. The upgrade that migrates it
+  judges it one last time as the scaffold file it was — an unedited copy takes the
+  release's text, an edited or kept one is kept (never refused) — and records the new
+  class. A standing `"local": "kept"` on it is cleared with a note: nothing overwrites
+  a project-owned file, so the mark means nothing there (it still means something on
+  `scripts/phasekit-verify.sh`, where it stops a stub re-seed). A re-profile to another
+  stack gives an unedited `docs/CONVENTIONS.md` (still byte-identical to the template it
+  was seeded from) the new stack's text, and keeps and reports an edited one; leaving the
+  stacks keeps the file project-owned, so a plain `--uninstall` never deletes it.
+  The migration is `--upgrade`'s: an `enrich` or `--reconcile --force` run first
+  re-records the file as project-owned without it, so an unedited copy keeps its old text
+  (reported by `--include-templates`; `--take-new PATH` takes the new one).
+- **Template changes are advisory.** A `bootstrap-with-template-tracking` entry records
+  the template sha its file is based on (`template_sha`), and every later write carries
+  it forward, so `--check --include-templates` keeps reporting a template change until the
+  project acts: `--take-new PATH` re-renders from the template, `--keep-local PATH`
+  records "seen, keeping ours". (Before v0.17.0 every upgrade re-stamped the current
+  template's sha, so the advisory vanished at the next upgrade.) A file adopted from the
+  scaffold class or from a collision is based on its own bytes. (A base recorded before
+  v0.17.0 is the template as of that project's last v0.16 upgrade, not necessarily the
+  one its file was first rendered from — template changes before then are not reported.)
+
 ## What to commit (and what to gitignore)
 
 Phasekit installs files and produces runtime artifacts. Most of what it installs is project-shared (commit it); a few specific paths are runtime-only or per-user (gitignore them).
@@ -177,7 +214,9 @@ Project-language gitignores (`node_modules/`, `.venv/`, build outputs, etc.) are
 
 - **`AGENTS.md` at project root** is rendered with your project name and is `bootstrap-with-template-tracking` — write your project-specific guidance into it; future template improvements surface as advisory drift via `--check --include-templates`, never auto-overwriting your edits.
 - **`docs/SPEC.md`, `docs/ARCHITECTURE.md`, `docs/PHASES.md`, `docs/PROD_REQUIREMENTS.md`** are `bootstrap-frozen` — written once, never re-rendered. Customize freely.
-- **`.claude/agents/<name>.md`** files are `scaffold` class — you can extend them with project-specific rules (use `--keep-local` on `--upgrade` to preserve those edits until M9.4 ships overlay support).
+- **`docs/CONVENTIONS.md`** (stack profiles) is `bootstrap-with-template-tracking` since v0.17.0 — seeded from the stack's template, then yours to amend.
+- **`docs/project/QUALITY_GATES.md`** is the project-owned companion of the scaffold's `docs/QUALITY_GATES.md` — put the project's own gates there, never in the scaffold doc.
+- **`.claude/agents/<name>.md`** files are `scaffold` class — project-specific rules belong in project-owned docs (`AGENTS.md`, `.claude/CLAUDE.md`, a companion); `--keep-local` on `--upgrade` preserves an in-place edit as a standing decision. (The M9.4 overlay mechanism was declined, v0.17.0.)
 - **`artifacts/`** as a directory should always exist (the engine creates it during enrichment) but its contents accumulate over time as phases land. Each artifact you commit is a piece of the project's audit trail.
 
 ## Ownership classes (M9 §2)
@@ -261,7 +300,7 @@ python3 enrich-project.py --upgrade --yes \
     ~/projects/myapp
 ```
 
-If a project genuinely has no customizations, `--upgrade --yes` without flags is fine. The risk scales with how heavily the project has extended scaffold-installed files. Until **M9.4 (subagent overlay mechanism)** ships — which lets customizations live alongside scaffold updates without per-file flag handling — this dry-run-first discipline is the working stop-gap.
+If a project genuinely has no customizations, `--upgrade --yes` without flags is fine. The risk scales with how heavily the project has extended scaffold-installed files — which, since v0.17.0, it should not do: project content goes in companions and project-owned files (see "Which files a project may edit").
 
 A quick way to inventory likely-customized files: run `python3 enrich-project.py --check ~/projects/myapp` first. Anything reported as `DRIFT:` is a definite candidate for `--keep-local`. The trickier cases are files in `update-available` (clean against manifest, behind canonical) — those don't surface in `--check`, only in `--upgrade --dry-run`.
 
@@ -269,10 +308,9 @@ A quick way to inventory likely-customized files: run `python3 enrich-project.py
 
 These are reserved by M9 for future sub-phases. Do not use them yet:
 
-- **`overlays: []`** per file entry — M9.4 will populate with overlay metadata enabling append-only project-specific extensions to subagent files.
-- **`*.project.md`** files alongside `.claude/agents/<name>.md` — M9.4 will introduce concat semantics so customizations survive scaffold upgrades.
+- **`overlays: []`** per file entry — reserved; M9.4 (overlays) was declined in v0.17.0 in favour of explicit ownership, and the field stays empty.
 
-In M9, agent customizations show up as drift. Use `--check` to inventory them; manual merge for now.
+Agent customizations show up as drift. Use `--check` to inventory them.
 
 ## Concurrency and locking
 

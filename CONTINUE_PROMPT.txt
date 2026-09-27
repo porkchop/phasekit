@@ -14,6 +14,7 @@ Read and follow, in this order, if present:
 - docs/META_SPEC.md
 - docs/META_PHASES.md
 - docs/QUALITY_GATES.md
+- docs/project/QUALITY_GATES.md (this project's own gates; they add to the scaffold's)
 - docs/CAPABILITY_MANIFEST.md
 - capabilities/project-capabilities.yaml
 - docs/ARCHITECTURE.md
@@ -26,6 +27,7 @@ Operating rules:
 - Work in audit-first mode
 - Prefer approval over rewrite when existing implementation satisfies the phase
 - Prefer minimal, backward-compatible fixes when a phase is partially complete
+- Do not edit scaffold-owned files (`"ownership": "scaffold"` in .scaffold/manifest.json: docs/QUALITY_GATES.md and the other process docs, .claude/agents/, .claude/hooks/, the loop scripts, this prompt) — every upgrade replaces them. What the project adds goes in the companion docs/project/<NAME>.md; what should change goes upstream to phasekit. docs/CONVENTIONS.md, SPEC, ARCHITECTURE, PHASES and the verify gate are the project's to edit (docs/QUALITY_GATES.md "Scaffold-owned and project-owned files")
 - Do not skip quality gates
 - Use strategy-planner for material design choices
 - Use architecture-red-team for architecture, autonomy, packaging, workflow, or control-loop changes

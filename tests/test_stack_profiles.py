@@ -5,7 +5,7 @@ conventions doc).
 Covers the acceptance surface of DESIGN-stack-profiles.md:
 - profile resolution carries `stack:` (inherited, overridable, None default)
 - enumerate_install_targets picks the stack verify template and adds
-  docs/CONVENTIONS.md (scaffold class) for stack profiles only
+  docs/CONVENTIONS.md (project-owned since v0.17.0) for stack profiles only
 - greenfield enrich under a stack profile seeds a CONFIGURED=1 gate
 - --upgrade re-seeds the verify gate ONLY while it is still the stub
   (PHASEKIT_VERIFY_CONFIGURED=0); a configured gate is never overwritten
@@ -16,6 +16,7 @@ Run from the repo root: `python3 -m unittest tests.test_stack_profiles`
 """
 
 import importlib.util
+import json
 import re
 import shutil
 import subprocess
@@ -89,12 +90,13 @@ class StackProfileResolution(unittest.TestCase):
         self.assertFalse(
             [s for s in targets if s["path"] == self.m.CONVENTIONS_DEST_PATH])
 
-    def test_conventions_spec_is_scaffold_class(self):
+    def test_conventions_spec_is_project_owned(self):
         for name in STACKS:
             resolved = self.m.resolve_profile(self.profiles, name)
             targets = self.m.enumerate_install_targets(self.manifest, resolved)
             conv = next(s for s in targets if s["path"] == self.m.CONVENTIONS_DEST_PATH)
-            self.assertEqual(conv["ownership"], "scaffold")
+            # v0.17.0 (row 1140): seeded once, then the project's.
+            self.assertEqual(conv["ownership"], "bootstrap-with-template-tracking")
             self.assertEqual(conv["rendered_from"], self.m.STACK_CONVENTIONS_TEMPLATES[name])
 
 
@@ -123,12 +125,40 @@ class TemplateHygiene(unittest.TestCase):
         self.assertIn("--durations", text)
 
     def test_conventions_templates_are_placeholder_free(self):
-        # scaffold-class update detection hashes the template as if it were
-        # the rendered output; any {{PLACEHOLDER}} would break that identity.
+        # The migrating upgrade (v0.17.0) hashes the template as if it were
+        # the rendered output to tell an unedited copy from an amended one;
+        # any {{PLACEHOLDER}} would break that identity.
         for name in STACKS:
             path = REPO_ROOT / "templates" / f"conventions.{name}.md"
             self.assertTrue(path.exists(), path)
             self.assertNotIn("{{", path.read_text())
+
+
+    def test_stack_conventions_point_at_the_verify_budget(self):
+        # Row 1140: the stale "fast (< ~30s)" budget is replaced by the
+        # verify-budget doctrine (fast tier per commit, full suite at the
+        # sprint and at completion). docs-only is unchanged.
+        for name in ("python-uv", "static-web", "game-canvas"):
+            text = (REPO_ROOT / "templates" / f"conventions.{name}.md").read_text()
+            self.assertNotIn("< ~30s", text, name)
+            self.assertIn('"Verify budget"', text, name)
+            self.assertRegex(text, r"at\s+completion", name)
+
+    def test_static_web_names_its_limit(self):
+        text = (REPO_ROOT / "templates" / "conventions.static-web.md").read_text()
+        self.assertIn("**Zero runtime dependencies.**", text)
+        self.assertIn("has outgrown\n  this stack", text)
+
+    def test_game_canvas_is_not_static_web_and_keeps_game_rules(self):
+        text = (REPO_ROOT / "templates" / "conventions.game-canvas.md").read_text()
+        self.assertNotIn("is a static-web project", text)
+        self.assertNotIn("Zero runtime dependencies", text)
+        self.assertIn("runtime-dependencies.json", text)
+        self.assertIn("One ADR per addition", text)
+        self.assertIn("A build step is allowed", text)
+        for rule in ("deterministic core", "Fixed-timestep", "seedable RNG",
+                     "Unit-test the deterministic core"):
+            self.assertIn(rule, text)
 
 
 class _ProjectFixture:
@@ -280,6 +310,110 @@ class SeededGatesWork(unittest.TestCase):
             (Path(tmp) / "missing.js").write_text("export const x = 1;\n")
             result = self._run(dest)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def _game_canvas(self, tmp, files):
+        dest = self._render(tmp, "game-canvas")
+        for rel, text in files.items():
+            f = Path(tmp) / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(text)
+        return self._run(dest)
+
+    @unittest.skipUnless(shutil.which("node"), "node not available")
+    def test_game_canvas_gate_accepts_declared_dependencies(self):
+        # Row 1140: an allowlist, not a prohibition — declared + ADR = green.
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._game_canvas(tmp, {
+                "package.json": '{"name": "g", "workspaces": ["packages/*"], '
+                                '"dependencies": {"howler": "^2"}}\n',
+                "packages/render/package.json":
+                    '{"name": "@g/render", "dependencies": {"pixi.js": "^8", "@g/core": "^0"}}\n',
+                "packages/core/package.json": '{"name": "@g/core"}\n',
+                "docs/adr/ADR-0001-audio.md": "# audio\n",
+                "docs/adr/ADR-0002-pixi.md": "# pixi\n",
+                "runtime-dependencies.json": json.dumps({
+                    ".": {"howler": "docs/adr/ADR-0001-audio.md"},
+                    "packages/render": {"pixi.js": "docs/adr/ADR-0002-pixi.md"},
+                }),
+            })
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("3 package.json checked", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "node not available")
+    def test_game_canvas_gate_rejects_undeclared_dependencies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # No allowlist at all = an empty one: a fresh project stays dep-free.
+            result = self._game_canvas(tmp, {
+                "package.json": '{"name": "g", "dependencies": {"left-pad": "^1.0.0"}}\n'})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('"left-pad"', result.stderr)
+        with tempfile.TemporaryDirectory() as tmp:
+            # Declared for another workspace is not declared for this one.
+            result = self._game_canvas(tmp, {
+                "package.json": '{"name": "g", "workspaces": ["server"]}\n',
+                "server/package.json": '{"name": "s", "optionalDependencies": {"ws": "8"}}\n',
+                "docs/adr/ADR-0001-ws.md": "# ws\n",
+                "runtime-dependencies.json": '{".": {"ws": "docs/adr/ADR-0001-ws.md"}}',
+            })
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('server/package.json: runtime dependency "ws"', result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "node not available")
+    def test_game_canvas_gate_odd_inputs(self):
+        # Review r1 MINOR 5: `**` workspaces are walked; an `npm:` alias under
+        # a workspace's name is third-party; allowlist keys are normalised.
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._game_canvas(tmp, {
+                "package.json": '{"name": "g", "workspaces": ["packages/**"]}\n',
+                "packages/a/b/package.json": '{"name": "@g/b", "dependencies": {"left-pad": "1"}}\n',
+            })
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('packages/a/b/package.json: runtime dependency "left-pad"', result.stderr)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._game_canvas(tmp, {
+                "package.json": '{"name": "g", "workspaces": ["w"]}\n',
+                "w/package.json": '{"name": "w", "dependencies": {"g": "npm:evil@1"}}\n',
+            })
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('runtime dependency "g"', result.stderr)
+        # Round 2: a git/URL source under a workspace's name is third-party;
+        # a workspace:/file: link or a plain range is the workspace itself.
+        for spec, ok in (("github:evil/core", False), ("https://x/core.tgz", False),
+                         ("evil/core", False), ("workspace:*", True),
+                         ("file:../core", True), ("^0.1.0", True)):
+            with tempfile.TemporaryDirectory() as tmp:
+                result = self._game_canvas(tmp, {
+                    "package.json": '{"name": "g", "workspaces": ["core", "app"]}\n',
+                    "core/package.json": '{"name": "@g/core"}\n',
+                    "app/package.json": json.dumps(
+                        {"name": "@g/app", "dependencies": {"@g/core": spec}}),
+                })
+                self.assertEqual(result.returncode == 0, ok, (spec, result.stderr))
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._game_canvas(tmp, {
+                "package.json": '{"name": "g", "workspaces": ["server"]}\n',
+                "server/package.json": '{"name": "s", "dependencies": {"ws": "8"}}\n',
+                "docs/adr/ADR-0001-ws.md": "# ws\n",
+                "runtime-dependencies.json": '{"./server": {"ws": "docs/adr/ADR-0001-ws.md"}}',
+            })
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "node not available")
+    def test_game_canvas_gate_requires_the_adr_to_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._game_canvas(tmp, {
+                "package.json": '{"name": "g", "dependencies": {"pixi.js": "^8"}}\n',
+                "runtime-dependencies.json": '{".": {"pixi.js": "docs/adr/ADR-0009-nope.md"}}',
+            })
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("ADR-0009-nope.md", result.stderr)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._game_canvas(tmp, {
+                "package.json": '{"name": "g"}\n',
+                "runtime-dependencies.json": '["not", "a", "map"]',
+            })
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("runtime-dependencies.json: expected", result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "node not available")
     def test_static_web_gate_rejects_runtime_dependencies(self):

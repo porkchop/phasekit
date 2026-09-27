@@ -863,7 +863,7 @@
     },
     "scripts/enrich-project.py": {
       "codes": {
-        "0": "success (for --upgrade: applied, gated green or skipped, and committed — or nothing to do)",
+        "0": "success (for --upgrade: applied, gated green or skipped, and committed — or nothing to do; with no git identity, applied and gated but left uncommitted, a note naming it)",
         "1": "error or bad input: no target, no manifest, an unusable PHASEKIT_UPGRADE_VERIFY value, a declined confirmation, a failed install (the upgrade's writes are restored)",
         "2": "another process holds the target's lock, or --interactive combined with --yes",
         "3": "--upgrade: unresolved refusals, nothing written; --check: drift, template-source drift, or an interrupted upgrade still pending",

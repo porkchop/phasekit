@@ -1,24 +1,54 @@
 # Stack conventions — game-canvas
 
-> Fleet-consistent conventions installed by the `game-canvas` profile.
-> This file is **scaffold-owned**: it propagates via `phasekit upgrade` and is
-> drift-checked. Propose changes upstream in phasekit (`templates/
-> conventions.game-canvas.md`) instead of editing it here.
+> Stack conventions seeded by the `game-canvas` profile. This file is
+> **project-owned**: phasekit wrote it once and never overwrites it. Amend it
+> in place when this project's reality differs from the stack default — a
+> correction belongs here. When phasekit's template
+> (`templates/conventions.game-canvas.md`) changes, `phasekit check
+> --include-templates` reports it as advisory; adopt what fits.
 
 ## The contract
 
-A game-canvas project is a static-web project (see below) whose product is a
-browser game rendered to `<canvas>`. Everything a static server can't host is
-out of scope; everything the static-web contract requires still applies.
+A game-canvas project is a browser game rendered to `<canvas>`. It is not a
+static-web project: it may have a build step (a bundler, TypeScript, an
+asset pipeline) and runtime dependencies (a renderer, a physics or audio
+library), both under the policy below. What makes it a game-canvas project
+are the game rules that follow: a deterministic core split from rendering, a
+fixed-timestep loop, seedable randomness, and a unit-tested core.
 
-## Static-web rules (inherited)
+## Dependency policy
 
-- **Zero runtime dependencies** — plain browser ESM, no engine libraries, no
-  bundler. Breaking this requires an ADR. `package.json` is dev-only and its
-  `dependencies` must stay empty (the verify gate asserts this).
-- Relative imports include the `.js` extension; the verify gate checks the
-  import graph resolves.
-- `index.html` at the repo root; the repo deploys as-is.
+- Runtime dependencies are an **allowlist, not a prohibition** — the
+  python-uv policy applied to npm. Prefer the platform; every runtime
+  dependency is an architecture decision, not a convenience.
+- Each one is declared, per workspace, in `runtime-dependencies.json` at the
+  repo root, naming the ADR that decided it:
+
+  ```json
+  {
+    ".": {},
+    "packages/render": {"pixi.js": "docs/adr/ADR-0003-pixi-renderer.md"}
+  }
+  ```
+
+  Keys are workspace directories as the root `package.json`'s `workspaces`
+  resolves them (`.` is the root itself); values map a dependency name to its
+  ADR. **One ADR per addition**, reviewed like any architecture change. No
+  file means an empty allowlist.
+- The verify gate reads `dependencies` and `optionalDependencies` in the root
+  `package.json` and in every workspace's, and rejects a dependency with no
+  entry and an entry whose ADR file does not exist. Another workspace's
+  package (by its `name`) needs no entry. Dev tooling goes in
+  `devDependencies`, which the policy does not cover.
+- Versions live in `package.json` and the committed lockfile, never in code.
+
+## Build
+
+- A build step is allowed. Record it in `docs/ARCHITECTURE.md` — the
+  command, what it emits, what deploys — and keep build outputs out of git.
+- Without one, the repo deploys as-is: `index.html` at the root, plain
+  browser ESM, relative imports with the `.js` extension (the seeded gate
+  checks that every relative import in `.js`/`.mjs` files resolves).
 
 ## Engine / rendering split
 
@@ -42,12 +72,15 @@ out of scope; everything the static-web contract requires still applies.
 
 - Unit-test the deterministic core in node (`node --test` / `npm test`) —
   rules, collisions, scoring, edge cases. No canvas required; that's the
-  point of the split.
+  point of the split. If the core itself is compiled (TypeScript), the verify
+  gate builds it before running its tests.
 - Rendering and input are verified in a real browser at phase boundaries
   (qa-playwright), not in the pre-commit gate.
 
 ## Quality bar
 
 - The pre-commit gate (`scripts/phasekit-verify.sh`) runs unit tests, the
-  no-dependency assertion, and the import-graph check. Keep it green and
-  fast (< ~30s).
+  dependency-allowlist check, and the import-graph check. Keep it green
+  within the verify budget (`docs/QUALITY_GATES.md` "Verify budget"): a fast
+  tier per commit, the full suite at the verification sprint and at
+  completion.

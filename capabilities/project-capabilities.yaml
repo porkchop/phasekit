@@ -40,6 +40,7 @@ profiles:
       - ARCHITECTURE
       - PHASES
       - QUALITY_GATES
+      - PROJECT_QUALITY_GATES
       - PROD_REQUIREMENTS
       - USAGE_PATTERNS
       - META_SPEC
@@ -108,9 +109,11 @@ profiles:
   #      project-owned after seeding; upgrade re-seeds ONLY while the on-disk
   #      gate is still the stub (PHASEKIT_VERIFY_CONFIGURED=0) and never
   #      overwrites a configured gate.
-  #   2. conventions doc — docs/CONVENTIONS.md installed scaffold-class
-  #      (fleet-consistent, upgrade-propagated, drift-checked) from
-  #      templates/conventions.<stack>.md.
+  #   2. conventions doc — docs/CONVENTIONS.md seeded from
+  #      templates/conventions.<stack>.md and PROJECT-OWNED after that
+  #      (bootstrap-with-template-tracking since v0.17.0; scaffold class
+  #      before): never overwritten, a template change is advisory via
+  #      `phasekit check --include-templates`.
   # `default` keeps the stub verify behavior; stack profiles are opt-in via
   # --profile at enrich time or re-profile at upgrade.
   python-uv:
@@ -121,8 +124,10 @@ profiles:
     extends: default
     stack: static-web
 
-  # game-canvas = static-web contract + the game agents (successor to
-  # game-project, which stays valid for backward compatibility).
+  # game-canvas = the game agents + its own stack contract (successor to
+  # game-project, which stays valid for backward compatibility). Not a
+  # static-web project since v0.17.0: a build step and allowlisted runtime
+  # dependencies are allowed (runtime-dependencies.json, one ADR per entry).
   game-canvas:
     extends: game-project
     stack: game-canvas
@@ -216,6 +221,21 @@ docs:
     path: docs/QUALITY_GATES.md
     required: true
     ownership: scaffold
+
+  PROJECT_QUALITY_GATES:
+    path: docs/project/QUALITY_GATES.md
+    required: false
+    ownership: bootstrap-frozen
+    # v0.17.0 (row 1140): the project-owned COMPANION of the scaffold-owned
+    # docs/QUALITY_GATES.md. Seeded once from
+    # templates/project-quality-gates.template.md, never written again; a
+    # project that already has one keeps it (adopted, not refused). Project
+    # gates live here instead of amending the scaffold doc in place, which
+    # every upgrade replaces. Convention: scaffold doc docs/<NAME>.md ->
+    # companion docs/project/<NAME>.md. Only QUALITY_GATES has one: it is the
+    # one scaffold doc that is per-project policy (the other scaffold docs
+    # describe phasekit's own machinery), and the only one a fleet project
+    # ever amended.
 
   PROD_REQUIREMENTS:
     path: docs/PROD_REQUIREMENTS.md
@@ -595,11 +615,11 @@ files:
   templates/phasekit-verify.template.docs-only.sh:
     ownership: scaffold-template
 
-  # v0.5.0 stack-profile conventions docs. Installed downstream as
-  # docs/CONVENTIONS.md with `scaffold` ownership (fleet-consistent,
-  # upgrade-propagated, drift-checked). Placeholder-free by design: the
-  # rendered output must hash identically to the template so scaffold-class
-  # update detection works.
+  # v0.5.0 stack-profile conventions docs. Seeded downstream as
+  # docs/CONVENTIONS.md, `bootstrap-with-template-tracking` since v0.17.0
+  # (row 1140; `scaffold` before). Placeholder-free by design: the rendered
+  # output hashes identically to the template, which is how the migrating
+  # upgrade tells an unedited scaffold-era copy from an amended one.
   templates/conventions.python-uv.md:
     ownership: scaffold-template
 
@@ -620,6 +640,11 @@ files:
 
   templates/spec.template.md:
     ownership: scaffold-template
+
+  templates/project-quality-gates.template.md:
+    ownership: scaffold-template
+    # v0.17.0 — rendered once into downstream docs/project/QUALITY_GATES.md
+    # (bootstrap-frozen), the project-owned companion of docs/QUALITY_GATES.md.
 
   # --- scaffold-internal (never installable) ---
   .claude/CLAUDE.md:

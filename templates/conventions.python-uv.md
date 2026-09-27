@@ -1,9 +1,11 @@
 # Stack conventions — python-uv
 
-> Fleet-consistent conventions installed by the `python-uv` profile.
-> This file is **scaffold-owned**: it propagates via `phasekit upgrade` and is
-> drift-checked. Propose changes upstream in phasekit (`templates/
-> conventions.python-uv.md`) instead of editing it here.
+> Stack conventions seeded by the `python-uv` profile. This file is
+> **project-owned**: phasekit wrote it once and never overwrites it. Amend it
+> in place when this project's reality differs from the stack default — a
+> correction belongs here. When phasekit's template
+> (`templates/conventions.python-uv.md`) changes, `phasekit check
+> --include-templates` reports it as advisory; adopt what fits.
 
 ## Toolchain
 
@@ -34,9 +36,10 @@
   `files = [...]` in `[tool.mypy]`. New code lands typed; don't accumulate
   `# type: ignore` without a comment saying why.
 - The pre-commit gate (`scripts/phasekit-verify.sh`) runs
-  `uv sync --extra dev` → `ruff check` → `mypy` → `pytest -q` and must stay
-  green and fast (< ~30s). Long integration/E2E suites belong to the
-  verification sprint, not this gate.
+  `uv sync --extra dev` → `ruff check` → `mypy` → `pytest` and must stay
+  green within the verify budget (`docs/QUALITY_GATES.md` "Verify budget"):
+  the fast tier per commit (`-m "not slow"`), the full suite at the
+  verification sprint and at completion.
 
 ## Dependency policy
 

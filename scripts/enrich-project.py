@@ -685,6 +685,29 @@ ACTION_REFUSE = "refuse"         # ambiguous: needs an explicit per-file flag
 # v0.16.0: the manifest value recording a STANDING keep-local decision.
 LOCAL_KEPT = "kept"
 
+# v0.17.0 (row 1140): the classes a project OWNS after seeding. phasekit never
+# overwrites them on upgrade (the verify gate's stub re-seed is the one
+# exception), so a standing keep-local on one of them decides nothing — except
+# on the verify gate, where it also stops that re-seed.
+PROJECT_OWNED_CLASSES = frozenset({"bootstrap-frozen", "bootstrap-with-template-tracking"})
+
+
+def _keep_is_moot(path, ownership):
+    """True when a standing keep-local on this path can never change an outcome."""
+    return ownership in PROJECT_OWNED_CLASSES and path != VERIFY_DEST_PATH
+
+
+def _local_after(path, ownership, action, asked_keep):
+    """What the manifest entry's `local` records after this upgrade: a keep the
+    project ASKED for (flag, standing, or an interactive answer) stands; the
+    ownership default records nothing; take-new/reinstall/removal releases it;
+    and on a project-owned file it is moot, so it is never recorded (v0.17.0)."""
+    if action not in (ACTION_KEEP_LOCAL, ACTION_NOOP) or not asked_keep:
+        return None
+    if _keep_is_moot(path, ownership):
+        return None
+    return LOCAL_KEPT
+
 
 def _scaffold_source_for_spec(spec):
     """Return the scaffold-side path that supplies content for this install spec.
@@ -732,7 +755,7 @@ def compute_upgrade_plan(
             cur_norm, cur_strict = compute_file_shas(on_disk, is_text)
             current_sha = cur_norm if is_text else cur_strict
         else:
-            current_sha = None
+            current_sha = cur_strict = None
 
         # Compute scaffold-new sha (what the engine would install today).
         src = _scaffold_source_for_spec(spec)
@@ -744,6 +767,29 @@ def compute_upgrade_plan(
 
         existing = existing_by_path.get(path)
         manifest_sha = existing.get("sha256") if existing else None
+        # v0.17.0 (row 1140): a file the scaffold owned until now and the
+        # project owns from this release (docs/CONVENTIONS.md). This one
+        # upgrade still judges it as the scaffold file it was — an unedited
+        # copy takes the release's text, an edited or kept one is kept, never
+        # refused — and from then on phasekit never writes it again.
+        adopting = (
+            existing is not None
+            and existing.get("ownership") == "scaffold"
+            and ownership in PROJECT_OWNED_CLASSES
+        )
+        # A re-profile moved a project-owned file to another stack's template
+        # (docs/CONVENTIONS.md, static-web -> game-canvas). A copy still
+        # byte-identical to the template it was seeded from takes the new
+        # stack's text; an edited one is the project's and is kept. The
+        # verify gate never: a configured gate is never overwritten.
+        template_switched = (
+            existing is not None
+            and ownership == "bootstrap-with-template-tracking"
+            and path != VERIFY_DEST_PATH
+            and bool(rendered_from)
+            and bool(existing.get("rendered_from"))
+            and existing.get("rendered_from") != rendered_from
+        )
         # v0.16.0: a `--keep-local` is a STANDING decision, recorded on the
         # manifest entry as `"local": "kept"`, and honoured by every later
         # upgrade until `--take-new PATH` releases it. Before this, the flag
@@ -764,6 +810,12 @@ def compute_upgrade_plan(
                     action = ACTION_ADOPT
                 elif path in rename_local_map:
                     action = ACTION_RENAME_LOCAL
+                elif ownership in PROJECT_OWNED_CLASSES:
+                    # v0.17.0: the project owns this path after seeding
+                    # anyway, so its own file IS the seed — adopt, never
+                    # refuse (a project-owned companion that pre-dates the
+                    # release that declares it).
+                    action = ACTION_ADOPT
                 else:
                     action = ACTION_REFUSE
             else:
@@ -790,6 +842,10 @@ def compute_upgrade_plan(
             elif stub_reseed:
                 state = "stub-reseed"
                 action = ACTION_KEEP_LOCAL if keep else ACTION_TAKE_NEW
+            elif (template_switched and not keep
+                  and (path in take_new or cur_strict == existing.get("template_sha"))):
+                state = "template-switched"
+                action = ACTION_TAKE_NEW
             elif current_sha == manifest_sha:
                 # local == manifest. For `scaffold` class, also compare
                 # scaffold-new sha to surface an "update available". For
@@ -798,7 +854,7 @@ def compute_upgrade_plan(
                 # `--check --include-templates`, not via the upgrade plan
                 # (M9 review F5 fix).
                 if (
-                    ownership == "scaffold"
+                    (ownership == "scaffold" or adopting)
                     and scaffold_new_sha is not None
                     and scaffold_new_sha != manifest_sha
                 ):
@@ -813,7 +869,9 @@ def compute_upgrade_plan(
                         action = ACTION_TAKE_NEW
                 else:
                     state = "clean"
-                    action = ACTION_NOOP
+                    # An explicit --take-new re-renders a clean file too: it
+                    # is how a project adopts a later template (v0.17.0).
+                    action = ACTION_TAKE_NEW if path in take_new else ACTION_NOOP
             else:
                 # drifted: current != manifest
                 state = "drifted"
@@ -831,11 +889,35 @@ def compute_upgrade_plan(
         # What the entry records afterwards: a keep-local the project ASKED for
         # (flagged now, or standing from before) stands; the ownership default
         # (a drifted bootstrap-* file is kept without asking) is not a decision
-        # and records nothing; take-new, reinstall or removal releases it.
-        if action in (ACTION_KEEP_LOCAL, ACTION_NOOP):
-            local_after = LOCAL_KEPT if (path in keep_local or standing) else None
-        else:
-            local_after = None
+        # and records nothing; take-new, reinstall or removal releases it. On a
+        # project-owned file it is moot and cleared, with a note (v0.17.0).
+        local_after = _local_after(path, ownership, action, path in keep_local or standing)
+        cleared_standing = (
+            standing and action in (ACTION_KEEP_LOCAL, ACTION_NOOP)
+            and _keep_is_moot(path, ownership)
+        )
+
+        # v0.17.0: the template base a project-owned file records, so that
+        # `check --include-templates` keeps reporting a template change until
+        # the project acts on it (before, every upgrade re-stamped the current
+        # template's sha and the advisory vanished at the next upgrade). A
+        # file this run writes is based on today's template (None = current);
+        # `--keep-local PATH` acknowledges today's template; a file adopted
+        # from the scaffold class or from a collision is based on its own
+        # bytes; anything else carries the recorded base forward.
+        template_sha_after = None
+        if (ownership == "bootstrap-with-template-tracking"
+                and action in (ACTION_KEEP_LOCAL, ACTION_NOOP, ACTION_ADOPT)):
+            if path in keep_local:
+                template_sha_after = None
+            elif (adopting or template_switched or action == ACTION_ADOPT
+                  or not existing.get("template_sha")):
+                # Based on its own bytes: adopted from the scaffold class or a
+                # collision, kept across a template switch, or no base recorded
+                # (a scaffold-orphan coming back, a pre-M9 entry).
+                template_sha_after = cur_strict
+            else:
+                template_sha_after = existing.get("template_sha")
         plans.append({
             "path": path,
             "state": state,
@@ -847,8 +929,12 @@ def compute_upgrade_plan(
             "current_sha": current_sha,
             "scaffold_new_sha": scaffold_new_sha,
             "rename_target": rename_local_map.get(path),
-            "standing": standing and action == ACTION_KEEP_LOCAL and path not in keep_local,
+            "standing": (standing and action == ACTION_KEEP_LOCAL and path not in keep_local
+                         and not cleared_standing),
             "local_after": local_after,
+            "cleared_standing": cleared_standing,
+            "adopting": adopting,
+            "template_sha_after": template_sha_after,
         })
 
     # Removed: in existing manifest but not in scaffold-new install set.
@@ -900,6 +986,8 @@ def print_upgrade_plan(plans):
                 note = "  (scaffold has a newer canonical version)"
             elif p["state"] == "update-available-advisory":
                 note = "  (scaffold updated but bootstrap-* never auto-overwritten)"
+            elif p["state"] == "template-switched":
+                note = "  (profile changed its template; the copy was unedited, taking the new one)"
             elif p["state"] == "stub-reseed":
                 note = "  (verify gate still in stub mode; seeding the stack profile's real gate)"
             elif p["state"] == "collision-novel":
@@ -910,6 +998,12 @@ def print_upgrade_plan(plans):
                 note = "  (not yet installed)"
             if p.get("standing"):
                 note += "  (standing keep-local; release with --take-new PATH)"
+            if p.get("adopting"):
+                note += f"  (now project-owned: {p['ownership']}; never overwritten after this)"
+            elif p["state"] == "collision-novel" and p["action"] == ACTION_ADOPT:
+                note = "  (the project already has it; adopted as its own)"
+            if p.get("cleared_standing"):
+                note += "  (standing keep-local cleared: moot on a project-owned file)"
             elif p["state"] == "missing":
                 note = "  (tracked but file missing)"
             print(f"    {p['path']}{note}")
@@ -935,12 +1029,17 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
         action = p["action"]
         dest = target / path
 
+        if p.get("cleared_standing"):
+            print(f"  note: {path}: standing keep-local cleared — the file is "
+                  f"project-owned ({p['ownership']}), so phasekit never overwrites it; a "
+                  "template change shows in `phasekit check --include-templates`")
         if action == ACTION_NOOP:
             # Tracked clean files stay in the manifest
             file_specs_for_manifest.append({
                 "path": path, "ownership": p["ownership"],
                 "text": p["text"], "rendered_from": p["rendered_from"],
                 "installed": False, "local": p.get("local_after"),
+                "template_sha": p.get("template_sha_after"),
             })
         elif action == ACTION_TAKE_NEW or action == ACTION_INSTALL:
             spec = {"path": path, "ownership": p["ownership"], "text": p["text"],
@@ -960,6 +1059,7 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
                 "path": path, "ownership": p["ownership"],
                 "text": p["text"], "rendered_from": p["rendered_from"],
                 "installed": False, "local": p.get("local_after"),
+                "template_sha": p.get("template_sha_after"),
             })
         elif action == ACTION_ADOPT:
             # collision-novel: trust on-disk content; record under scaffold-new path
@@ -968,7 +1068,7 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
             file_specs_for_manifest.append({
                 "path": path, "ownership": p["ownership"],
                 "text": p["text"], "rendered_from": p["rendered_from"],
-                "installed": True,
+                "installed": True, "template_sha": p.get("template_sha_after"),
             })
         elif action == ACTION_RENAME_LOCAL:
             # Move on-disk file aside; install scaffold-new on the original path
@@ -997,9 +1097,14 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
             # Do NOT add to file_specs_for_manifest
         elif action == ACTION_ORPHAN:
             print(f"  orphan: {path}  (left in place; scaffold no longer declares it)")
-            # Re-record under a downgraded class so subsequent --check stays sane
+            # Re-record under a downgraded class so subsequent --check stays
+            # sane — except a project-owned file, which stays the project's:
+            # a plain --uninstall removes orphans, and must never remove
+            # project content (v0.17.0; CONVENTIONS.md after a re-profile).
+            orphan_class = (p["ownership"] if p["ownership"] in PROJECT_OWNED_CLASSES
+                            else OWNERSHIP_CLASS_ORPHAN)
             file_specs_for_manifest.append({
-                "path": path, "ownership": OWNERSHIP_CLASS_ORPHAN,
+                "path": path, "ownership": orphan_class,
                 "text": p["text"], "rendered_from": p["rendered_from"],
                 "installed": False,
             })
@@ -1113,6 +1218,11 @@ def _interactive_resolve(plans, target):
                 ans = "s"
             if ans in ("k", "keep", "keep-local"):
                 p["action"] = ACTION_KEEP_LOCAL
+                # Keeping it after seeing the diff acknowledges the template,
+                # as `--keep-local PATH` does (v0.17.0) — even when keep was
+                # already the default for this project-owned file.
+                if p["ownership"] == "bootstrap-with-template-tracking":
+                    p["template_sha_after"] = None
                 break
             elif ans in ("t", "take", "take-new"):
                 p["action"] = ACTION_TAKE_NEW
@@ -1221,7 +1331,8 @@ def _upgrade_locked(target, profile, dry_run, yes, interactive, keep_local, take
         # An answer given here is as much a decision as the flag (review r2).
         for p in plans:
             if p["action"] != before.get(p["path"]):
-                p["local_after"] = LOCAL_KEPT if p["action"] == ACTION_KEEP_LOCAL else None
+                p["local_after"] = _local_after(p["path"], p["ownership"], p["action"],
+                                                p["action"] == ACTION_KEEP_LOCAL)
 
     print_upgrade_plan(plans)
 
@@ -2559,13 +2670,16 @@ def lookup_template_info(scaffold_manifest, downstream_path):
 
 def build_manifest_entry(downstream_path, ownership, target_dir,
                           scaffold_manifest, is_text=True, rendered_from_override=None,
-                          installed_at=None, local=None):
+                          installed_at=None, local=None, template_sha=None):
     """Build one entry for the downstream `.scaffold/manifest.json`.
 
     `installed_at` defaults to now. `write_downstream_manifest` passes the
     PRIOR entry's stamp for a file this run did not install, so the stamp
     keeps meaning "when phasekit last wrote this file" rather than "when the
     manifest was last rewritten" (v0.14.1).
+
+    `template_sha` (v0.17.0) is the template base to record for a
+    `bootstrap-with-template-tracking` file; None means today's template.
     """
     file_path = Path(target_dir) / downstream_path
     if not file_path.exists():
@@ -2586,15 +2700,16 @@ def build_manifest_entry(downstream_path, ownership, target_dir,
         entry["local"] = local
 
     if ownership == "bootstrap-with-template-tracking":
-        rendered_from, template_sha = lookup_template_info(
+        rendered_from, current_template_sha = lookup_template_info(
             scaffold_manifest, downstream_path
         )
         if rendered_from_override:
             rendered_from = rendered_from_override
             tmpl = REPO_ROOT / rendered_from_override
-            template_sha = sha256_strict(tmpl) if tmpl.exists() else None
+            current_template_sha = sha256_strict(tmpl) if tmpl.exists() else None
         if rendered_from:
             entry["rendered_from"] = rendered_from
+        template_sha = template_sha or current_template_sha
         if template_sha:
             entry["template_sha"] = template_sha
 
@@ -2670,6 +2785,23 @@ def write_downstream_manifest(target_dir, scaffold_manifest, profile, file_specs
             local = spec["local"]
         else:
             local = prior_entry.get("local") if isinstance(prior_entry, dict) else None
+        if local and _keep_is_moot(spec["path"], spec["ownership"]):
+            local = None  # moot on a project-owned file (v0.17.0)
+        # The template base (v0.17.0): an upgrade states it per file; any
+        # other writer carries the prior entry's base for a file it did not
+        # write, so a template change stays reported until the project acts.
+        if "template_sha" in spec:
+            template_sha = spec["template_sha"]
+        elif not installed and isinstance(prior_entry, dict):
+            template_sha = prior_entry.get("template_sha")
+            on_disk = target / spec["path"]
+            if (not template_sha and spec["ownership"] == "bootstrap-with-template-tracking"
+                    and on_disk.is_file()):
+                # No recorded base (e.g. a scaffold-class entry enrich now
+                # re-records as project-owned): based on its own bytes.
+                template_sha = sha256_strict(on_disk)
+        else:
+            template_sha = None
         entry = build_manifest_entry(
             spec["path"],
             spec["ownership"],
@@ -2679,6 +2811,7 @@ def write_downstream_manifest(target_dir, scaffold_manifest, profile, file_specs
             rendered_from_override=spec.get("rendered_from"),
             installed_at=carried_stamp,
             local=local,
+            template_sha=template_sha,
         )
         if entry is not None:
             entries.append(entry)
@@ -2762,6 +2895,8 @@ DOC_TEMPLATE_MAP = {
     "PROD_REQUIREMENTS": "templates/prod-requirements.template.md",
     "DESIGN": "templates/design.template.md",  # M10 — opt-in via with-design profile
     "LEARNINGS": "templates/learnings.template.md",  # v0.4.7 cross-session learnings
+    # v0.17.0: project-owned companion of the scaffold's docs/QUALITY_GATES.md
+    "PROJECT_QUALITY_GATES": "templates/project-quality-gates.template.md",
 }
 
 # Docs that exist in the scaffold but never install downstream (matches
@@ -2938,15 +3073,18 @@ def enumerate_install_targets(scaffold_manifest, resolved_profile):
         "rendered_from": STACK_VERIFY_TEMPLATES.get(stack, DEFAULT_VERIFY_TEMPLATE),
     })
 
-    # Stack conventions doc (v0.5.0): docs/CONVENTIONS.md, scaffold class —
-    # fleet-consistent, upgrade-propagated, drift-checked. The conventions
-    # templates are placeholder-free, so rendering is an identity copy and the
-    # template's sha doubles as the canonical content sha for update
-    # detection in compute_upgrade_plan.
+    # Stack conventions doc (v0.5.0): docs/CONVENTIONS.md. PROJECT-OWNED since
+    # v0.17.0 (row 1140; scaffold class before): seeded once from the stack's
+    # template, then the project's to amend — a stack rule a project corrects
+    # is a correction, and no upgrade may put the old rule back. A template
+    # change is reported, never applied: `check --include-templates`. The
+    # templates stay placeholder-free, so rendering is an identity copy: that
+    # is what lets the one migrating upgrade tell an unedited scaffold-era copy
+    # (which takes the release's text) from an amended one (kept).
     if stack:
         specs.append({
             "path": CONVENTIONS_DEST_PATH,
-            "ownership": "scaffold",
+            "ownership": "bootstrap-with-template-tracking",
             "text": True,
             "rendered_from": STACK_CONVENTIONS_TEMPLATES[stack],
         })

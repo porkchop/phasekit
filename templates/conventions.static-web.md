@@ -1,9 +1,11 @@
 # Stack conventions — static-web
 
-> Fleet-consistent conventions installed by the `static-web` profile.
-> This file is **scaffold-owned**: it propagates via `phasekit upgrade` and is
-> drift-checked. Propose changes upstream in phasekit (`templates/
-> conventions.static-web.md`) instead of editing it here.
+> Stack conventions seeded by the `static-web` profile. This file is
+> **project-owned**: phasekit wrote it once and never overwrites it. Amend it
+> in place when this project's reality differs from the stack default — a
+> correction belongs here. When phasekit's template
+> (`templates/conventions.static-web.md`) changes, `phasekit check
+> --include-templates` reports it as advisory; adopt what fits.
 
 ## The contract
 
@@ -18,6 +20,9 @@ no framework. What's in the repo is what ships.
 - `package.json`, if present, exists only for dev convenience (a `test`
   script). Dev tooling goes in `devDependencies`; `dependencies` must stay
   empty — the verify gate asserts this.
+- A project that needs runtime dependencies or a build step has outgrown
+  this stack: re-profile it (a game: `game-canvas`, which allows both under
+  an allowlist) rather than bending these rules.
 
 ## Modules and imports
 
@@ -48,5 +53,6 @@ no framework. What's in the repo is what ships.
 ## Quality bar
 
 - The pre-commit gate (`scripts/phasekit-verify.sh`) runs unit tests, the
-  no-dependency assertion, and the import-graph check. Keep it green and
-  fast (< ~30s).
+  no-dependency assertion, and the import-graph check. Keep it green within
+  the verify budget (`docs/QUALITY_GATES.md` "Verify budget"): a fast tier
+  per commit, the full suite at the verification sprint and at completion.

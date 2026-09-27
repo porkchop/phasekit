@@ -37,7 +37,8 @@ Before non-trivial work, read:
 - `docs/ARCHITECTURE.md` — technical architecture
 - `docs/DESIGN.md` (if present) — steady-state system design: subsystems, data flows, hot spots, boundaries
 - `docs/PHASES.md` — phase plan for this project
-- `docs/QUALITY_GATES.md` — universal/testing/DRY/drift/planning/control-loop/commit gates
+- `docs/QUALITY_GATES.md` — universal/testing/DRY/drift/planning/control-loop/commit gates (scaffold-owned)
+- `docs/project/QUALITY_GATES.md` — this project's own gates, read alongside the scaffold's
 - `docs/PROD_REQUIREMENTS.md` — production/deployment requirements
 - `docs/USAGE_PATTERNS.md` — workflow patterns
 - `.claude/CLAUDE.md` — project instructions (loaded automatically by Claude Code)
@@ -85,6 +86,13 @@ Stop and confirm with the human before:
 - Anything touching auth, secrets, or public exposure
 - Force-push or amending published commits
 - Changing `.claude/settings.json`, hooks, or other shared scaffold-managed files (these are tracked by `.scaffold/manifest.json` and will surface as drift on upgrade)
+
+## Which files this project may edit
+
+Every phasekit-installed file has an owner (`ownership` in `.scaffold/manifest.json`):
+
+- **Scaffold-owned** (`scaffold`) — `docs/QUALITY_GATES.md` and the other process docs, `.claude/agents/`, `.claude/hooks/`, the loop scripts. Do not edit them here: every `phasekit upgrade` replaces them. Project additions go in the companion `docs/project/<NAME>.md` (`docs/project/QUALITY_GATES.md` is seeded); changes to the scaffold's text go upstream to phasekit.
+- **Project-owned** (`bootstrap-*`) — `docs/SPEC.md`, `docs/ARCHITECTURE.md`, `docs/PHASES.md`, `docs/CONVENTIONS.md`, `docs/project/*`, this file, `.claude/CLAUDE.md`, `scripts/phasekit-verify.sh`. Edit freely; phasekit never overwrites them and reports template changes only as advisory (`phasekit check --include-templates`).
 
 ## Anti-rationalization
 
