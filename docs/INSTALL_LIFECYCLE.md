@@ -87,6 +87,38 @@ It leaves the tree clean because a dirty tree after an upgrade caused two distin
   refuses and says what to do), `container`, `host`, `off`. A project whose gate was not configured before
   the upgrade (no script, or the stub) is skipped. `--no-verify` commits without it and
   says so in the commit subject; `--no-commit` never runs it.
+- **The gate runs in a session's environment, not a bare container (v0.16.2).** A suite
+  that is green in a session must not be refused at upgrade for what the runner lacked
+  (foundry-orchestrator, 2026-09-27: 15 red on its landed main — no git identity, no
+  contracts provider). So the container gate mirrors what `scripts/container-setup.sh`
+  gives a session and a test can observe:
+  - `HOME=/home/node` (the image's baked `.gitconfig` and Playwright cache) when the gate
+    user is root or `node` (uid 0 or 1000, by number or name), as container-setup pins it
+    for a `--user` override; any other uid gets a throwaway HOME, because the image's home
+    is not its to write (a session there would run as `node` — a divergence recorded, not
+    mirrored: set `PHASEKIT_CONTAINER_USER` to the session's user).
+    `CLAUDE_CONFIG_DIR` is set as a session's is, and `IS_SANDBOX=1` as root.
+  - A **global** git identity, written before the gate the way
+    `.devcontainer/entrypoint.sh` writes one: `GIT_USER_NAME`/`GIT_USER_EMAIL` when set,
+    else what the project repo resolves (`git config user.name`), else
+    `phasekit upgrade <phasekit-upgrade@localhost>`. Global config, never
+    `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env: env would outrank a test's own
+    `git config user.name` in its scratch repo, which no session does. On the host the
+    gate gets the same identity only when the host has none (a temporary
+    `GIT_CONFIG_GLOBAL` that includes the real global files first).
+  - The contracts provider: `PHASEKIT_CONTRACTS_MOUNT`, else `PHASEKIT_CONTRACTS_DIR` on
+    the upgrading host, bind-mounted **read-only** at `/contracts` with
+    `PHASEKIT_CONTRACTS_DIR=/contracts` inside — container-setup's mount. A set-but-unusable
+    provider (not a directory, or no readable `index.json`) refuses the upgrade (exit 4,
+    in either mode) exactly as it would refuse a session; unset mounts nothing — so a
+    project whose suite needs a provider must be upgraded with one exported (Foundry: the
+    orchestrator stages it with `orchestrator.contracts_mount`). A host-mode gate sees the
+    same tree as `PHASEKIT_CONTRACTS_DIR` (the mount name wins when both are set).
+
+  Not mirrored, on purpose: the entrypoint (firewall + dropped capabilities — it needs
+  sudo and `NET_ADMIN`, and a gate with more network is never refused for it), the Claude
+  credential volume (a gate gets no credentials), and the ssh agent and push tokens (a
+  gate pushes nothing).
 - **An interrupted upgrade is settled by the next one.** The exact pre-upgrade bytes of
   every path the upgrade may touch are kept outside the tree
   (`$XDG_STATE_HOME/phasekit/upgrade-pending/`) until it commits. Ctrl-C or SIGTERM

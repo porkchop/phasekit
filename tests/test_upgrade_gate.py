@@ -39,11 +39,12 @@ NO_SUCH_IMAGE = "phasekit-test-no-such-runner-image"
 
 FAKE_DOCKER = """#!/usr/bin/env bash
 # A docker stand-in: FAKE_DOCKER_MODE = down | noimage | ready.
-echo "$*" >> "$FAKE_DOCKER_LOG"
+a="$*"; nl='\\n'; echo "${a//$'\n'/$nl}" >> "$FAKE_DOCKER_LOG"  # one line per call
 case "$1" in
   info)  [ "$FAKE_DOCKER_MODE" = down ] && exit 1; echo 27.0; exit 0 ;;
   image) [ "$FAKE_DOCKER_MODE" = ready ] && exit 0; exit 1 ;;
-  run)   exit "${FAKE_DOCKER_RUN_RC:-0}" ;;
+  run)   [ -n "${FAKE_DOCKER_RUN_SAY:-}" ] && echo "$FAKE_DOCKER_RUN_SAY"
+         exit "${FAKE_DOCKER_RUN_RC:-0}" ;;
   rm)    exit 0 ;;
 esac
 exit 0
@@ -228,7 +229,8 @@ class GreenGateCommits(Fixture):
         self.assertIn("passed (container)", r.stdout)
         run = next(c for c in self.docker_calls() if c.startswith("run "))
         self.assertIn(f"--user {os.getuid()}:{os.getgid()}", run)
-        self.assertIn("-eo pipefail -c bash scripts/phasekit-verify.sh", run)
+        self.assertIn("-eo pipefail -c mkdir -p", run)  # the identity preamble, then the gate
+        self.assertTrue(run.endswith("\\nbash scripts/phasekit-verify.sh"), run)
 
     def test_a_manifest_only_re_run_runs_no_gate(self):
         self.assertEqual(self.upgrade().returncode, 0)
@@ -524,6 +526,297 @@ class TheRunnerInvocation(Fixture):
         self.assertIn("could not run here", r.stderr)
         self.assertIn("docker exit 125", r.stderr)
         self.assertEqual(self.porcelain(), "")
+
+
+class TheGateRunsInASessionsEnvironment(Fixture):
+    """Row 1137 (v0.16.2): foundry-orchestrator's gate was refused with 15 red
+    on a green tree — no git identity and no contracts provider in the runner,
+    both of which a session has. The gate now mirrors a session."""
+
+    GATE = 'echo "fine"'
+
+    def run_call(self):
+        return next(c for c in self.docker_calls() if c.startswith("run "))
+
+    def provider(self, name="provider"):
+        d = self.tmp / name
+        d.mkdir()
+        (d / "index.json").write_text('{"contracts": []}\n')
+        return d
+
+    def no_identity_env(self, extra=None):
+        """A host with no global or system git identity at all."""
+        home = self.tmp / "home"
+        home.mkdir(exist_ok=True)
+        e = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
+             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": ""}
+        e.update(extra or {})
+        return e
+
+    def upgrade_clean(self, *extra, mode="host", env=None, docker=None):
+        e = self.env(mode, docker)
+        for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME",
+                  "GIT_COMMITTER_EMAIL", "GIT_USER_NAME", "GIT_USER_EMAIL",
+                  "PHASEKIT_CONTRACTS_DIR", "PHASEKIT_CONTRACTS_MOUNT", "PHASEKIT_FORWARD_ENV"):
+            e.pop(k, None)
+        e.update(env or {})
+        if e.get("GIT_CONFIG_GLOBAL") == "":
+            del e["GIT_CONFIG_GLOBAL"]
+        return subprocess.run(
+            [sys.executable, str(ENRICH), "--upgrade", str(self.project), "--yes", *extra],
+            capture_output=True, text=True, env=e)
+
+    # --- the runner's argv (fake docker) ---------------------------------
+
+    def test_the_runner_gets_the_repos_identity_written_as_a_session_writes_it(self):
+        r = self.upgrade_clean(mode="container", docker="ready",
+                               env={"PHASEKIT_CONTAINER_USER": "root"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        call = self.run_call()
+        self.assertIn("-e GIT_USER_NAME=t ", call)
+        self.assertIn("-e GIT_USER_EMAIL=t@t ", call)
+        self.assertIn('git config --global user.name "$GIT_USER_NAME"', call)
+        # config, never env: env would outrank a test's own scratch-repo identity
+        self.assertNotIn("GIT_AUTHOR_NAME", call)
+        self.assertNotIn("GIT_COMMITTER_NAME", call)
+
+    def test_git_user_name_overrides_like_container_setup(self):
+        r = self.upgrade_clean(mode="container", docker="ready",
+                               env={"GIT_USER_NAME": "Ops", "GIT_USER_EMAIL": "ops@x"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("-e GIT_USER_NAME=Ops ", self.run_call())
+        self.assertIn("-e GIT_USER_EMAIL=ops@x ", self.run_call())
+
+    def test_root_gets_the_sessions_home_and_sandbox_flag(self):
+        r = self.upgrade_clean(mode="container", docker="ready",
+                               env={"PHASEKIT_CONTAINER_USER": "root"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        call = self.run_call()
+        self.assertIn("-e HOME=/home/node ", call)
+        self.assertIn("-e IS_SANDBOX=1 ", call)
+        self.assertIn("-e CLAUDE_CONFIG_DIR=/home/node/.claude ", call)
+
+    def test_a_uid_that_cannot_write_the_images_home_gets_a_throwaway_one(self):
+        r = self.upgrade_clean(mode="container", docker="ready",
+                               env={"PHASEKIT_CONTAINER_USER": "4242:4242"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        call = self.run_call()
+        self.assertIn("-e HOME=/tmp/phasekit-upgrade-home ", call)
+        self.assertNotIn("IS_SANDBOX", call)
+
+    def test_the_contracts_dir_is_mounted_read_only_at_slash_contracts(self):
+        d = self.provider("pro:vi,der")
+        r = self.upgrade_clean(mode="container", docker="ready",
+                               env={"PHASEKIT_CONTRACTS_DIR": str(d)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        call = self.run_call()
+        self.assertIn(f'--mount type=bind,"src={d}",dst=/contracts,readonly ', call)
+        self.assertIn("-e PHASEKIT_CONTRACTS_DIR=/contracts ", call)
+
+    def test_the_mount_name_wins_over_the_dir_name(self):
+        mount, other = self.provider("mount"), self.provider("other")
+        r = self.upgrade_clean(mode="container", docker="ready",
+                               env={"PHASEKIT_CONTRACTS_MOUNT": str(mount),
+                                    "PHASEKIT_CONTRACTS_DIR": str(other)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f'"src={mount}",dst=/contracts,readonly', self.run_call())
+        self.assertNotIn(f'"src={other}"', self.run_call())
+
+    def test_no_provider_means_no_mount(self):
+        r = self.upgrade_clean(mode="container", docker="ready")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("/contracts", self.run_call())
+
+    def test_an_unusable_provider_refuses_before_any_run(self):
+        empty = self.tmp / "empty-provider"
+        empty.mkdir()
+        r = self.upgrade_clean(mode="container", docker="ready",
+                               env={"PHASEKIT_CONTRACTS_DIR": str(empty)})
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn("no readable index.json", r.stderr)
+        self.assertFalse([c for c in self.docker_calls() if c.startswith("run ")])
+        self.assertEqual(self.porcelain(), "")
+
+    def test_a_forwarded_key_cannot_repoint_the_provider(self):
+        d = self.provider()
+        r = self.upgrade_clean(mode="container", docker="ready",
+                               env={"PHASEKIT_CONTRACTS_DIR": str(d),
+                                    "PHASEKIT_FORWARD_ENV": "PHASEKIT_CONTRACTS_DIR,GIT_USER_NAME"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        call = self.run_call()
+        self.assertNotIn("-e PHASEKIT_CONTRACTS_DIR ", call)
+        self.assertNotIn("-e GIT_USER_NAME ", call)
+
+    # --- the host branch, for real ---------------------------------------
+
+    COMMITS_IN_SCRATCH = ('d=$(mktemp -d); trap \'rm -rf "$d"\' EXIT; git -C "$d" init -q; '
+                          'git -C "$d" commit -q --allow-empty -m gate; ')
+
+    def test_a_host_gate_that_commits_passes_on_a_host_with_no_identity(self):
+        r = self.upgrade_clean(env=self.no_identity_env({
+            "PHASEKIT_VERIFY_CMD": self.COMMITS_IN_SCRATCH
+            + 'test "$(git -C "$d" log -1 --format=%an/%ae)" = t/t@t'}))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn(".claude", self.porcelain())
+
+    def test_a_scratch_repos_own_identity_still_wins_on_the_host(self):
+        r = self.upgrade_clean(env=self.no_identity_env({
+            "PHASEKIT_VERIFY_CMD": 'd=$(mktemp -d); trap \'rm -rf "$d"\' EXIT; '
+            'git -C "$d" init -q; git -C "$d" config user.name mine; '
+            'git -C "$d" config user.email mine@x; '
+            'git -C "$d" commit -q --allow-empty -m gate; '
+            'test "$(git -C "$d" log -1 --format=%an)" = mine'}))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_host_that_has_an_identity_is_left_as_it_is(self):
+        env = self.no_identity_env({"PHASEKIT_VERIFY_CMD": 'test -z "${GIT_CONFIG_GLOBAL:-}"'})
+        (Path(env["HOME"]) / ".gitconfig").write_text("[user]\n\tname = h\n\temail = h@h\n")
+        r = self.upgrade_clean(env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_the_host_keeps_its_other_global_settings(self):
+        env = self.no_identity_env({"PHASEKIT_VERIFY_CMD":
+                                    'test "$(git config --get pk.marker)" = kept'})
+        (Path(env["HOME"]) / ".gitconfig").write_text("[pk]\n\tmarker = kept\n")
+        r = self.upgrade_clean(env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_host_gate_sees_the_mount_as_the_contracts_dir(self):
+        d = self.provider()
+        r = self.upgrade_clean(env={"PHASEKIT_CONTRACTS_MOUNT": str(d),
+                                    "PHASEKIT_VERIFY_CMD":
+                                    f'test "$PHASEKIT_CONTRACTS_DIR" = "{d}"'})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_the_fixed_identity_when_nothing_names_one(self):
+        mod = load_enrich()
+        bare = self.tmp / "bare"
+        bare.mkdir()
+        subprocess.run(["git", "-C", str(bare), "init", "-q"], check=True)
+        saved = dict(os.environ)
+        try:
+            for k in ("GIT_USER_NAME", "GIT_USER_EMAIL", "GIT_CONFIG_GLOBAL"):
+                os.environ.pop(k, None)
+            os.environ.update(self.no_identity_env())
+            del os.environ["GIT_CONFIG_GLOBAL"]
+            self.assertEqual(mod._gate_git_identity(bare),
+                             (mod.GATE_GIT_NAME_DEFAULT, mod.GATE_GIT_EMAIL_DEFAULT))
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+
+    def test_the_images_user_by_name_or_bare_uid_gets_the_sessions_home(self):
+        mod = load_enrich()
+        for user in ("node", "node:node", "0", "0:0", "1000", "1000:1000"):
+            self.assertEqual(mod._runner_home(user), "/home/node", user)
+        for user in ("4242:4242", "nobody"):
+            self.assertEqual(mod._runner_home(user), mod.RUNNER_THROWAWAY_HOME, user)
+        r = self.upgrade_clean(mode="container", docker="ready",
+                               env={"PHASEKIT_CONTAINER_USER": "node"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("-e HOME=/home/node ", self.run_call())
+
+    def test_a_preamble_failure_is_infra_not_the_projects_red(self):
+        mod = load_enrich()
+        ro = self.tmp / "ro-home"
+        ro.mkdir()
+        ro.chmod(0o500)
+        self.addCleanup(ro.chmod, 0o700)
+        env = {"PATH": os.environ["PATH"], "HOME": str(ro / "sub"),
+               "GIT_USER_NAME": "n", "GIT_USER_EMAIL": "e@e", "GIT_CONFIG_NOSYSTEM": "1"}
+        r = subprocess.run(["bash", "-eo", "pipefail", "-c",
+                            mod.GATE_IDENTITY_PREAMBLE + "\necho REACHED"],
+                           capture_output=True, text=True, env=env)
+        if os.geteuid() == 0:
+            self.skipTest("root writes anywhere")
+        self.assertEqual(r.returncode, mod.RUNNER_START_FAILED_RC, r.stdout + r.stderr)
+        self.assertIn(mod.GATE_SETUP_FAILED_MARK, r.stderr)
+        self.assertNotIn("REACHED", r.stdout)
+        # and a writable HOME writes the identity then runs the gate
+        home = self.tmp / "okhome"
+        r = subprocess.run(["bash", "-eo", "pipefail", "-c", mod.GATE_IDENTITY_PREAMBLE
+                            + '\ntest "$(git config --global user.name)" = n; echo REACHED'],
+                           capture_output=True, text=True, env={**env, "HOME": str(home)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("REACHED", r.stdout)
+
+    def test_the_setup_mark_turns_a_125_into_setup_infra(self):
+        r = self.upgrade_clean(mode="container", docker="ready",
+                               env={"FAKE_DOCKER_RUN_RC": "125"})
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn("docker exit 125", r.stderr)  # no mark: docker's own failure
+
+    def test_a_marked_125_is_reported_as_the_gates_setup(self):
+        mod = load_enrich()
+        r = self.upgrade_clean(mode="container", docker="ready",
+                               env={"FAKE_DOCKER_RUN_RC": "125",
+                                    "FAKE_DOCKER_RUN_SAY": mod.GATE_SETUP_FAILED_MARK})
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn("session setup failed", r.stderr)
+        self.assertEqual(self.porcelain(), "")
+
+    def test_a_tmpdir_inside_the_tree_is_not_the_gates_footprint(self):
+        tmpdir = self.project / "work-scratch"  # not ignored by the scaffold
+        tmpdir.mkdir()
+        r = self.upgrade_clean(env=self.no_identity_env({
+            "TMPDIR": str(tmpdir), "PHASEKIT_VERIFY_CMD": "true"}))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_tmpdir_in_another_repo_does_not_lend_its_identity(self):
+        other = self.tmp / "other"
+        other.mkdir()
+        subprocess.run(["git", "-C", str(other), "init", "-q"], check=True)
+        subprocess.run(["git", "-C", str(other), "config", "user.name", "lender"], check=True)
+        subprocess.run(["git", "-C", str(other), "config", "user.email", "l@l"], check=True)
+        (other / "tmp").mkdir()
+        r = self.upgrade_clean(env=self.no_identity_env({
+            "TMPDIR": str(other / "tmp"),
+            "PHASEKIT_VERIFY_CMD": 'd=$(mktemp -d /tmp/pkgate-XXXX); trap \'rm -rf "$d"\' EXIT; '
+            'git -C "$d" init -q; git -C "$d" commit -q --allow-empty -m g; '
+            'test "$(git -C "$d" log -1 --format=%an)" = t'}))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_relative_provider_is_resolved_where_the_upgrade_ran(self):
+        d = self.provider("relprov")
+        e = self.env("host")
+        for k in ("PHASEKIT_CONTRACTS_DIR", "PHASEKIT_CONTRACTS_MOUNT"):
+            e.pop(k, None)
+        e["PHASEKIT_CONTRACTS_MOUNT"] = "relprov"
+        e["PHASEKIT_VERIFY_CMD"] = f'test "$PHASEKIT_CONTRACTS_DIR" = "{d}"'
+        r = subprocess.run([sys.executable, str(ENRICH), "--upgrade", str(self.project), "--yes"],
+                           capture_output=True, text=True, env=e, cwd=str(self.tmp))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_relative_git_config_global_is_still_included(self):
+        env = self.no_identity_env({"PHASEKIT_VERIFY_CMD":
+                                    'test "$(git config --get pk.marker)" = kept'})
+        rel = self.tmp / "rel.cfg"
+        rel.write_text("[pk]\n\tmarker = kept\n")
+        env["GIT_CONFIG_GLOBAL"] = os.path.relpath(rel, os.getcwd())
+        r = self.upgrade_clean(env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_the_host_gate_sees_the_mount_when_both_names_are_set(self):
+        mount, other = self.provider("mount"), self.provider("other")
+        r = self.upgrade_clean(env={"PHASEKIT_CONTRACTS_MOUNT": str(mount),
+                                    "PHASEKIT_CONTRACTS_DIR": str(other),
+                                    "PHASEKIT_VERIFY_CMD":
+                                    f'test "$PHASEKIT_CONTRACTS_DIR" = "{mount}"'})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_an_unusable_provider_refuses_in_host_mode_too(self):
+        r = self.upgrade_clean(env={"PHASEKIT_CONTRACTS_DIR": str(self.tmp / "nope")})
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertIn("not a directory", r.stderr)
+        self.assertEqual(self.porcelain(), "")
+
+    def test_the_mirror_constants_match_container_setup(self):
+        mod = load_enrich()
+        setup = (REPO_ROOT / "scripts" / "container-setup.sh").read_text()
+        self.assertIn(f'CONTRACTS_CONTAINER_DIR="{mod.CONTRACTS_CONTAINER_DIR}"', setup)
+        self.assertIn(f"-e HOME={mod.RUNNER_HOME})", setup)
+        contracts = (REPO_ROOT / "scripts" / "phasekit-contracts.py").read_text()
+        self.assertIn(f'"{mod.CONTRACTS_CONTAINER_DIR}"', contracts)
 
 
 class TheExitCodesArePinned(unittest.TestCase):

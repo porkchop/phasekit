@@ -99,10 +99,10 @@
     {
       "name": "PHASEKIT_FORWARD_ENV",
       "kind": "consumed",
-      "read_by": ["scripts/container-setup.sh", "scripts/run-until-done.sh"],
+      "read_by": ["scripts/container-setup.sh", "scripts/run-until-done.sh", "scripts/enrich-project.py"],
       "default": "",
       "container_forwarded": true,
-      "semantics": "Comma-separated NAMES of project-specific environment keys a supervisor has placed in container-setup.sh's process env (v0.14.3) — the one door for non-PHASEKIT_ keys such as the backend URL a client bakes at build time. container-setup.sh adds `-e NAME=<value>` for every listed name that is set, skips unset names silently and malformed names loudly, refuses the names the script itself sets for the container (HOME, PATH, CLAUDE_CONFIG_DIR, IS_SANDBOX), forwards the list itself (the loop prints `Project env forwarded by the supervisor: …` at start), and prints a names-only witness (`container: forwarding project env: …`); values never touch a file or a log — a token written as NAME=value is reported by its name part only. Newlines count as separators. Unset: nothing beyond the fixed allowlist crosses the container wall. The Foundry orchestrator sets it from a project's declared env_file (its #562)."
+      "semantics": "Comma-separated NAMES of project-specific environment keys a supervisor has placed in container-setup.sh's process env (v0.14.3) — the one door for non-PHASEKIT_ keys such as the backend URL a client bakes at build time. container-setup.sh adds `-e NAME=<value>` for every listed name that is set, skips unset names silently and malformed names loudly, refuses the names the script itself sets for the container (HOME, PATH, CLAUDE_CONFIG_DIR, IS_SANDBOX), forwards the list itself (the loop prints `Project env forwarded by the supervisor: …` at start), and prints a names-only witness (`container: forwarding project env: …`); values never touch a file or a log — a token written as NAME=value is reported by its name part only. Newlines count as separators. Unset: nothing beyond the fixed allowlist crosses the container wall. The Foundry orchestrator sets it from a project's declared env_file (its #562). v0.16.2: `phasekit upgrade` (scripts/enrich-project.py) forwards the same keys by name to its container gate, refusing HOME, PATH, CLAUDE_CONFIG_DIR, IS_SANDBOX, PHASEKIT_CONTRACTS_DIR, GIT_USER_NAME and GIT_USER_EMAIL; the gate's own git config and session values follow them, so a forwarded key never overrides them."
     },
     {
       "name": "PHASEKIT_VERIFY_CMD",
@@ -147,19 +147,19 @@
     {
       "name": "PHASEKIT_CONTRACTS_MOUNT",
       "kind": "consumed",
-      "read_by": ["scripts/container-setup.sh"],
+      "read_by": ["scripts/container-setup.sh", "scripts/enrich-project.py"],
       "default": "unset — no contracts provider (the normal standalone case)",
       "container_forwarded": true,
-      "semantics": "HOST path to a provider's contracts tree (index.json + one directory per slug). Bind-mounted read-only at /contracts inside the container, announced inward as PHASEKIT_CONTRACTS_DIR=/contracts. Set-but-unusable (not a directory, or no readable index.json) is a hard exit 1, never a silent drop."
+      "semantics": "HOST path to a provider's contracts tree (index.json + one directory per slug). Bind-mounted read-only at /contracts inside the container, announced inward as PHASEKIT_CONTRACTS_DIR=/contracts. Set-but-unusable (not a directory, or no readable index.json) is a hard exit 1, never a silent drop. v0.16.2: `phasekit upgrade` mounts the same tree the same way for its gate (a set-but-unusable one refuses the upgrade, exit 4); the host-mode gate sees it as PHASEKIT_CONTRACTS_DIR."
     },
     {
       "name": "PHASEKIT_CONTRACTS_DIR",
       "kind": "both",
-      "read_by": ["scripts/phasekit-contracts.py"],
-      "set_by": ["scripts/container-setup.sh"],
+      "read_by": ["scripts/phasekit-contracts.py", "scripts/enrich-project.py"],
+      "set_by": ["scripts/container-setup.sh", "scripts/enrich-project.py"],
       "default": "/contracts",
       "container_forwarded": true,
-      "semantics": "Where the provider's contracts tree is readable, consumed by the contracts checker. Set by container-setup.sh when PHASEKIT_CONTRACTS_MOUNT is given; a standalone user sets it by hand to run the gate outside a container."
+      "semantics": "Where the provider's contracts tree is readable, consumed by the contracts checker. Set by container-setup.sh when PHASEKIT_CONTRACTS_MOUNT is given; a standalone user sets it by hand to run the gate outside a container. v0.16.2: when set on the upgrading host (and PHASEKIT_CONTRACTS_MOUNT is not), `phasekit upgrade` bind-mounts it read-only at /contracts for its container gate and sets this to /contracts there; never forwarded by PHASEKIT_FORWARD_ENV."
     },
     {
       "name": "PHASEKIT_NO_UPDATE_CHECK",
@@ -231,7 +231,7 @@
       "read_by": ["scripts/enrich-project.py"],
       "default": "scaffold-runner",
       "container_forwarded": false,
-      "semantics": "v0.16.0. The runner image the upgrade gate uses in auto and container modes; the project is mounted read-write at /workspace with a throwaway HOME and git safe.directory set."
+      "semantics": "v0.16.0. The runner image the upgrade gate uses in auto and container modes; the project is mounted read-write at /workspace with git safe.directory set. v0.16.2: a session's environment — HOME=/home/node for uid 0 or 1000 (a throwaway HOME otherwise), CLAUDE_CONFIG_DIR, IS_SANDBOX=1 as root, a global git identity (GIT_USER_NAME/GIT_USER_EMAIL, else the repo's, else 'phasekit upgrade'), and the contracts provider read-only at /contracts."
     },
     {
       "name": "CLAUDE_MODE",
@@ -309,18 +309,18 @@
     {
       "name": "GIT_USER_NAME",
       "kind": "consumed",
-      "read_by": ["scripts/container-setup.sh"],
+      "read_by": ["scripts/container-setup.sh", "scripts/enrich-project.py"],
       "default": "unset — image-baked identity (Scaffold Runner)",
       "container_forwarded": true,
-      "semantics": "Git author name inside the container."
+      "semantics": "Git author name inside the container. v0.16.2: also the upgrade gate's global identity when set."
     },
     {
       "name": "GIT_USER_EMAIL",
       "kind": "consumed",
-      "read_by": ["scripts/container-setup.sh"],
+      "read_by": ["scripts/container-setup.sh", "scripts/enrich-project.py"],
       "default": "unset — image-baked identity (scaffold-runner@localhost)",
       "container_forwarded": true,
-      "semantics": "Git author email inside the container."
+      "semantics": "Git author email inside the container. v0.16.2: also the upgrade gate's global identity when set."
     },
     {
       "name": "GH_TOKEN",
@@ -410,7 +410,7 @@
     {
       "name": "IS_SANDBOX",
       "kind": "exported",
-      "set_by": ["scripts/container-setup.sh"],
+      "set_by": ["scripts/container-setup.sh", "scripts/enrich-project.py"],
       "default": "unset",
       "container_forwarded": true,
       "semantics": "Set to 1 for the container only when running as UID 0, because Claude Code refuses --permission-mode bypassPermissions as root without it."
@@ -418,7 +418,7 @@
     {
       "name": "CLAUDE_CONFIG_DIR",
       "kind": "exported",
-      "set_by": ["scripts/container-setup.sh"],
+      "set_by": ["scripts/container-setup.sh", "scripts/enrich-project.py"],
       "default": "/home/node/.claude (in-container)",
       "container_forwarded": true,
       "semantics": "Unconditionally set for the container so the claude CLI finds the volume-persisted credentials regardless of the effective user."

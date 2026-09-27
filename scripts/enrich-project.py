@@ -33,6 +33,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1328,9 +1329,26 @@ def _upgrade_locked(target, profile, dry_run, yes, interactive, keep_local, take
 # still the stub) is skipped: there was nothing to verify. The gate runs under
 # `bash -eo pipefail -c`, as the loop runs it; it is read-only over the tree
 # (the v0.14.10 `verify-gate-read-only` convention), and a footprint makes it
-# red and is restored. The cross-project contracts check is not part of it: it
-# needs a supervisor-staged provider mount, and the next session's first
-# commit runs it anyway.
+# red and is restored.
+#
+# A SESSION'S ENVIRONMENT, not a bare container (v0.16.2, row 1137). The gate
+# is refused on anything a session would not see, so the container mirrors
+# what scripts/container-setup.sh gives a session that a suite can observe:
+# HOME=/home/node (the image's baked .gitconfig and Playwright cache) for the
+# users that can write it, a global git identity written the way
+# .devcontainer/entrypoint.sh writes GIT_USER_NAME/GIT_USER_EMAIL, and a
+# contracts provider (PHASEKIT_CONTRACTS_MOUNT, else PHASEKIT_CONTRACTS_DIR on
+# the upgrading host) bind-mounted read-only at /contracts. The identity goes
+# into the GLOBAL config, never GIT_AUTHOR_*/GIT_COMMITTER_* env: env outranks
+# a test's own `git config user.name` in its scratch repo, which a session
+# never does. The host branch adds the same identity only when the host has
+# none. Not mirrored, deliberately: the firewall and dropped capabilities (the
+# entrypoint is bypassed — it needs sudo and NET_ADMIN, and a gate that can
+# reach more network is never refused for it), the Claude credential volume
+# (a gate gets no credentials), and the ssh agent / tokens (a gate pushes
+# nothing). Measured on foundry-orchestrator 2026-09-27: 15 tests red on its
+# landed main for want of an identity and a provider, so the upgrade was
+# refused on a green tree.
 #
 # SURVIVING A KILL. Before anything is written, the exact pre-upgrade bytes of
 # every path the upgrade may touch are copied OUTSIDE the tree, beside a
@@ -1349,6 +1367,25 @@ UPGRADE_GATE_TAIL_LINES = 40
 EXIT_UPGRADE_GATE_RED = 4
 EXIT_UPGRADE_UNCOMMITTED = 5
 UNVERIFIED_SUFFIX = " (unverified: --no-verify)"
+# The session's mirror (v0.16.2). CONTRACTS_CONTAINER_DIR must match
+# container-setup.sh's CONTRACTS_CONTAINER_DIR and phasekit-contracts.py's
+# DEFAULT_MOUNT_DIR; RUNNER_HOME is where container-setup.sh pins HOME for a
+# --user override.
+CONTRACTS_CONTAINER_DIR = "/contracts"
+RUNNER_HOME = "/home/node"
+RUNNER_HOME_USERS = ("0", "root", "1000", "node")  # root, and the image's `node` user, own it
+RUNNER_THROWAWAY_HOME = "/tmp/phasekit-upgrade-home"
+GATE_GIT_NAME_DEFAULT = "phasekit upgrade"
+GATE_GIT_EMAIL_DEFAULT = "phasekit-upgrade@localhost"
+RUNNER_START_FAILED_RC = 125  # docker run's own "could not start" (not an exit of this script): infra
+# Written before the gate, as .devcontainer/entrypoint.sh writes a session's
+# identity; a failure here is the runner's, not the project's.
+GATE_SETUP_FAILED_MARK = "phasekit upgrade: the gate's session setup failed"
+GATE_IDENTITY_PREAMBLE = (
+    'mkdir -p "$HOME" && git config --global user.name "$GIT_USER_NAME" '
+    '&& git config --global user.email "$GIT_USER_EMAIL" '
+    f'|| {{ echo "{GATE_SETUP_FAILED_MARK} (could not write the git identity under $HOME)" >&2; '
+    f'exit {RUNNER_START_FAILED_RC}; }}')
 PENDING_SCHEMA = 1
 
 
@@ -1460,16 +1497,109 @@ def _forward_env_args():
     raw = (os.environ.get("PHASEKIT_FORWARD_ENV") or "").replace("\n", ",")
     for name in (n.strip() for n in raw.split(",")):
         if (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name or "")
-                and name not in ("HOME", "PATH", "CLAUDE_CONFIG_DIR", "IS_SANDBOX")
+                and name not in ("HOME", "PATH", "CLAUDE_CONFIG_DIR", "IS_SANDBOX",
+                                 "PHASEKIT_CONTRACTS_DIR", "GIT_USER_NAME", "GIT_USER_EMAIL")
                 and os.environ.get(name)):
             args += ["-e", name]
     return args
 
 
-def _mount_arg(target):
+def _mount_arg(target, dst="/workspace", readonly=False):
     """--mount value; CSV-quoted so a path with ':' or ',' is still one field."""
     src = str(target).replace('"', '""')
-    return f'type=bind,"src={src}",dst=/workspace'
+    return f'type=bind,"src={src}",dst={dst}' + (",readonly" if readonly else "")
+
+
+def _git_config_get(key, cwd, env=None):
+    """The effective value git reports for `key` from `cwd`, or None."""
+    try:
+        r = subprocess.run(["git", "config", "--get", key], cwd=str(cwd), env=env,
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    value = (r.stdout or "").strip()
+    return value if r.returncode == 0 and value else None
+
+
+def _gate_git_identity(target):
+    """(name, email) the gate's global git config carries: GIT_USER_NAME /
+    GIT_USER_EMAIL when set (container-setup.sh's knobs), else what the target
+    repo resolves (its own config, then the upgrading user's), else a fixed
+    phasekit-upgrade identity."""
+    out = []
+    for env_name, key, default in (("GIT_USER_NAME", "user.name", GATE_GIT_NAME_DEFAULT),
+                                   ("GIT_USER_EMAIL", "user.email", GATE_GIT_EMAIL_DEFAULT)):
+        value = (os.environ.get(env_name) or "").strip()
+        out.append(value or _git_config_get(key, target) or default)
+    return tuple(out)
+
+
+def _contracts_source():
+    """(env var, host path) of the contracts provider to mirror, or (None, None).
+    PHASEKIT_CONTRACTS_MOUNT is container-setup.sh's name for it; a host that
+    exported PHASEKIT_CONTRACTS_DIR (the checker's own name, as a provider or a
+    standalone user sets it) means the same tree."""
+    for var in ("PHASEKIT_CONTRACTS_MOUNT", "PHASEKIT_CONTRACTS_DIR"):
+        value = (os.environ.get(var) or "").strip()
+        if value:  # absolute once: the check, the host gate (cwd=target) and the mount agree
+            return var, os.path.abspath(os.path.expanduser(value))
+    return None, None
+
+
+def _contracts_unusable(var, path):
+    """container-setup.sh's refusal for a provider it cannot mount, or None."""
+    if not os.path.isdir(path):
+        return f"{var} is set to '{path}' but that is not a directory"
+    if not os.access(os.path.join(path, "index.json"), os.R_OK):
+        return (f"{var} '{path}' has no readable index.json (a provider with no "
+                "dependencies still ships one with zero entries)")
+    return None
+
+
+def _runner_home(user):
+    """container-setup.sh pins HOME=/home/node for a --user override; the gate
+    does the same for the users that can write it, and a throwaway HOME for
+    any other uid (the image's /home/node is not theirs)."""
+    return RUNNER_HOME if user.split(":", 1)[0] in RUNNER_HOME_USERS else RUNNER_THROWAWAY_HOME
+
+
+def _host_gate_env(target, scratch):
+    """The host branch's environment: the upgrader's own, plus a global-scope
+    identity only where the host has none (a temp GIT_CONFIG_GLOBAL that
+    includes the real global files first), and PHASEKIT_CONTRACTS_DIR from
+    PHASEKIT_CONTRACTS_MOUNT when only the mount name was given."""
+    env = dict(os.environ)
+    var, path = _contracts_source()
+    if var == "PHASEKIT_CONTRACTS_MOUNT":  # the same tree the container would mount
+        env["PHASEKIT_CONTRACTS_DIR"] = path
+    # What a repo with no identity of its own would see: system + global.
+    # The ceiling keeps a TMPDIR inside some work tree from lending its identity.
+    probe_env = {**env, "GIT_CEILING_DIRECTORIES": str(Path(scratch).parent)}
+    missing = [key for key in ("user.name", "user.email")
+               if _git_config_get(key, scratch, probe_env) is None]
+    if not missing:
+        return env
+    name, email = _gate_git_identity(target)
+    cfg = Path(scratch) / "gitconfig"
+    cfg.touch()
+    if (env.get("GIT_CONFIG_GLOBAL") or "").strip():
+        # absolute: an include resolves relative to the including file (review r1)
+        originals = [os.path.abspath(os.path.expanduser(env["GIT_CONFIG_GLOBAL"]))]
+    else:
+        xdg = env.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+        originals = [os.path.join(xdg, "git", "config"), os.path.expanduser("~/.gitconfig")]
+    try:
+        for original in originals:
+            subprocess.run(["git", "config", "--file", str(cfg), "--add", "include.path",
+                            original], check=True, capture_output=True, timeout=30)
+        for key in missing:
+            subprocess.run(["git", "config", "--file", str(cfg), key,
+                            name if key == "user.name" else email],
+                           check=True, capture_output=True, timeout=30)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return env  # the gate then runs as the host is, which is no worse than before
+    env["GIT_CONFIG_GLOBAL"] = str(cfg)
+    return env
 
 
 def _tail(text, lines=UPGRADE_GATE_TAIL_LINES):
@@ -1481,6 +1611,32 @@ def run_upgrade_gate(target, mode, killers=None):
     UpgradeInterrupted. Returns {status: passed|failed|infra, where, label,
     detail, tail}. The gate's footprint (anything it changed outside ignored
     paths) is restored and turns the verdict red."""
+    try:
+        scratch = _gate_scratch(target)
+    except OSError as exc:
+        return {"status": "infra", "where": mode, "label": None,
+                "detail": f"no usable temporary directory for the gate ({type(exc).__name__})",
+                "tail": ""}
+    try:
+        return _run_upgrade_gate(target, mode, killers, scratch)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _gate_scratch(target):
+    """A scratch dir OUTSIDE the target: phasekit's own files there would read
+    as the gate's footprint (a TMPDIR inside the tree, review r2). Falls back
+    to the upgrading user's state dir."""
+    target = Path(target).resolve()
+    tmp = Path(tempfile.gettempdir()).resolve()
+    if tmp == target or target in tmp.parents:
+        base = _pending_dir(target).parent.parent / "gate-scratch"
+        base.mkdir(parents=True, exist_ok=True)
+        return tempfile.mkdtemp(prefix="phasekit-upgrade-gate-", dir=str(base))
+    return tempfile.mkdtemp(prefix="phasekit-upgrade-gate-")
+
+
+def _run_upgrade_gate(target, mode, killers, scratch):
     target = Path(target).resolve()
     killers = killers if killers is not None else []
     label, command = resolve_upgrade_gate(target)
@@ -1501,6 +1657,15 @@ def run_upgrade_gate(target, mode, killers=None):
                               "image (bash scripts/container-setup.sh build), or set "
                               f"{UPGRADE_VERIFY_ENV}=host where running it bare is safe",
                     "tail": ""}
+    contracts_var, contracts_path = _contracts_source()
+    if contracts_var:  # host or container: a session would refuse it either way
+        unusable = _contracts_unusable(contracts_var, contracts_path)
+        if unusable:
+            return {"status": "infra", "where": where, "label": label,
+                    "detail": f"{unusable}; a session would refuse the same mount "
+                              "(scripts/container-setup.sh). Pass a readable contracts tree, "
+                              "or leave it unset",
+                    "tail": ""}
     try:
         timeout = int(os.environ.get(UPGRADE_VERIFY_TIMEOUT_ENV)
                       or UPGRADE_VERIFY_TIMEOUT_DEFAULT)
@@ -1520,21 +1685,38 @@ def run_upgrade_gate(target, mode, killers=None):
     if where == "container":
         name = (f"phasekit-upgrade-gate-{os.getpid()}-"
                 f"{int(datetime.now(timezone.utc).timestamp() * 1000)}")
+        user = _runner_user()
+        git_name, git_email = _gate_git_identity(target)
+        session = ["-e", f"HOME={_runner_home(user)}",
+                   "-e", f"CLAUDE_CONFIG_DIR={RUNNER_HOME}/.claude",
+                   "-e", f"GIT_USER_NAME={git_name}",
+                   "-e", f"GIT_USER_EMAIL={git_email}"]
+        if user == "0:0":
+            session += ["-e", "IS_SANDBOX=1"]
+        if contracts_var:
+            session += ["--mount", _mount_arg(Path(contracts_path).resolve(),
+                                              CONTRACTS_CONTAINER_DIR, readonly=True),
+                        "-e", f"PHASEKIT_CONTRACTS_DIR={CONTRACTS_CONTAINER_DIR}"]
+        # Forwarded project keys first: docker's last -e wins, and the names
+        # above belong to this script (the forward list also refuses them).
         argv = ["docker", "run", "--rm", "--name", name, "--entrypoint", "bash",
                 "--mount", _mount_arg(target), "-w", "/workspace",
-                "--user", _runner_user(),
-                "-e", "HOME=/tmp/phasekit-upgrade-home",
+                "--user", user,
+                *_forward_env_args(),
                 "-e", "GIT_CONFIG_COUNT=1",
                 "-e", "GIT_CONFIG_KEY_0=safe.directory",
                 "-e", "GIT_CONFIG_VALUE_0=*",
-                *_forward_env_args(),
-                image, "-eo", "pipefail", "-c", command]
+                *session,
+                image, "-eo", "pipefail", "-c",
+                GATE_IDENTITY_PREAMBLE + "\n" + command]
         cwd = None
+        env = None
     else:
         argv = ["bash", "-eo", "pipefail", "-c", command]
         cwd = str(target)
+        env = _host_gate_env(target, scratch)
     try:
-        proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True,
                                 start_new_session=True)
     except OSError as exc:
@@ -1589,8 +1771,13 @@ def run_upgrade_gate(target, mode, killers=None):
                 "detail": f"cannot observe the tree after the gate ({exc})", "tail": _tail(out)}
     if timed_out:
         verdict = {"status": "failed", "detail": f"timed out after {timeout}s"}
-    elif name and proc.returncode == 125:
-        verdict = {"status": "infra", "detail": "the runner could not start (docker exit 125)"}
+    elif name and proc.returncode == RUNNER_START_FAILED_RC and GATE_SETUP_FAILED_MARK in (out or ""):
+        verdict = {"status": "infra",
+                   "detail": "the gate's session setup failed in the runner (its git identity "
+                             "could not be written; see the tail)"}
+    elif name and proc.returncode == RUNNER_START_FAILED_RC:
+        verdict = {"status": "infra",
+                   "detail": f"the runner could not start (docker exit {RUNNER_START_FAILED_RC})"}
     elif proc.returncode != 0:
         verdict = {"status": "failed", "detail": f"exit {proc.returncode}"}
     elif footprint:
