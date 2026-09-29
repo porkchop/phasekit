@@ -125,8 +125,37 @@ if [ -f "$ROOT/BAD" ]; then exit 1; fi
 exit 0
 """
 
+# v0.18.0 (design §3.3): the matrix learns a PROJECT's consistency check —
+# xmeo's shape at small scale. A tracked deploy claim whose digest must match
+# a tracked evidence file, and a completion record that must name the
+# supervisor's iteration; the session re-arms BOTH for its own digest before
+# the kill. Until v0.17.0 the watchdog restored the claim to HEAD and kept
+# the evidence at the new digest: the resume's gate went red (run 999/1002:
+# 40 × "expected <HEAD digest> to be <session digest>") and a model repaired
+# the tree by hand.
+VERIFY_CONSISTENCY = """#!/usr/bin/env bash
+PHASEKIT_VERIFY_CONFIGURED=1
+echo run >> "${STUB_DIR:?}/verify-calls"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -f "$ROOT/BAD" ]; then exit 1; fi
+claim="$(jq -r '.digest' "$ROOT/artifacts/ready-to-deploy.json" 2>/dev/null)"
+evidence="$(jq -r '.digest' "$ROOT/artifacts/evidence/transcript.json" 2>/dev/null)"
+if [ "$claim" != "$evidence" ]; then echo "expected $claim to be $evidence"; exit 1; fi
+if [ -f "$ROOT/artifacts/project-complete.json" ]; then
+  rec="$(jq -r '.iteration // empty' "$ROOT/artifacts/project-complete.json")"
+  mark="$(jq -r '.iteration' "$ROOT/artifacts/iteration-mode.json")"
+  if [ -n "$rec" ] && [ "$rec" != "$mark" ]; then echo "record names iteration $rec, the marker $mark"; exit 1; fi
+fi
+exit 0
+"""
+
 # The model's approval-class output. FINAL_KIND: no | flag | both.
+# GATE=consistency: the session re-arms the claim and its evidence first.
 APPROVE_SCENARIO = r"""
+if [ "${GATE:-logging}" = consistency ]; then
+  jq -n --arg d "d$CALL_N" '{deploy_ready: true, digest: $d}' > artifacts/ready-to-deploy.json
+  jq -n --arg d "d$CALL_N" '{digest: $d}' > artifacts/evidence/transcript.json
+fi
 echo "work by call $CALL_N" >> src.txt
 jq -n --arg fk "${FINAL_KIND:-no}" '{
   phase: "phase-1", approved: true, summary: "built it",
@@ -138,7 +167,8 @@ jq -n --arg fk "${FINAL_KIND:-no}" '{
   ]
 }' > artifacts/phase-approval.json
 if [ "${FINAL_KIND:-no}" = both ]; then
-  jq -n '{done: true, summary: "complete", suggested_commit_message: "Project complete: v0 shipped"}' > artifacts/project-complete.json
+  jq -n --arg g "${GATE:-logging}" '{done: true, summary: "complete", suggested_commit_message: "Project complete: v0 shipped"}
+    + (if $g == "consistency" then {iteration: 7} else {} end)' > artifacts/project-complete.json
 fi
 """
 
@@ -152,18 +182,24 @@ class Repo:
     """A scratch repo on `main` with the shipped loop, a stub model, and a
     logging verify gate. squash=True runs branch-per-iteration."""
 
-    def __init__(self, squash):
+    def __init__(self, squash, gate="logging"):
         self.tmp = Path(tempfile.mkdtemp(prefix="pk-boundary-"))
         self.repo = self.tmp / "repo"
         self.stub = self.tmp / "stub"
         self.squash = squash
+        self.gate = gate
         (self.repo / "scripts").mkdir(parents=True)
         (self.repo / "artifacts").mkdir()
         (self.repo / "docs").mkdir()
         self.stub.mkdir()
         shutil.copy(LOOP_SCRIPT, self.repo / "scripts" / "run-until-done.sh")
         self.write("scripts/run-phase.sh", STUB_RUN_PHASE, executable=True)
-        self.write("scripts/phasekit-verify.sh", VERIFY_LOGGING, executable=True)
+        self.write("scripts/phasekit-verify.sh",
+                   VERIFY_CONSISTENCY if gate == "consistency" else VERIFY_LOGGING, executable=True)
+        if gate == "consistency":
+            self.write("artifacts/ready-to-deploy.json", '{"deploy_ready": true, "digest": "d0"}\n')
+            self.write("artifacts/evidence/transcript.json", '{"digest": "d0"}\n')
+            self.write("artifacts/iteration-mode.json", '{"mode": "standard", "iteration": 7}\n')
         self.write("CONTINUE_PROMPT.txt", "prompt\n")
         self.write("docs/PHASES.md", "# Phases\n")
         self.write("src.txt", "base\n")
@@ -217,13 +253,14 @@ class Repo:
                     "PHASEKIT_VERIFY_BUDGET_SECONDS", "PHASEKIT_SQUASH_TARGET",
                     "PHASEKIT_WORK_BRANCH", "PHASEKIT_BOUNDARY_KILL_PROBE",
                     "PHASEKIT_WRAPUP_LEAD_SECONDS", "PHASEKIT_LASTRESORT_LEAD_SECONDS",
-                    "FINAL_KIND"):
+                    "FINAL_KIND", "GATE"):
             run_env.pop(var, None)
         run_env.update({
             "PHASEKIT_NO_UPDATE_CHECK": "1",
             "PHASEKIT_ITER_RETRY": "0",
             "STUB_DIR": str(self.stub),
             "GIT_CONFIG_NOSYSTEM": "1",
+            "GATE": self.gate,
         })
         if self.squash:
             run_env["PHASEKIT_SQUASH_TARGET"] = "main"
@@ -254,6 +291,11 @@ class Repo:
 
     def porcelain(self):
         return [ln for ln in self.git("status", "--porcelain").splitlines() if ln]
+
+    def porcelain_all(self):
+        # untracked files one by one (v0.18.0: a refused approval is `??`,
+        # and a fully-untracked artifacts/ would otherwise collapse)
+        return [ln for ln in self.git("status", "--porcelain", "--untracked-files=all").splitlines() if ln]
 
     def trailer_commits(self, ref="main"):
         out = self.git("log", "--format=%H%x00%B%x01", f"{self.base}..{ref}")
@@ -292,7 +334,7 @@ class Repo:
 # The explicit model of what the sequence owes after a kill at step k
 # ---------------------------------------------------------------------------
 
-def expected_step(mode, k, red, verified_tree, needs_completion_commit):
+def expected_step(mode, k, red, verified_tree, needs_completion_commit, claim_kept_out=False):
     """k = the last step whose ACTION completed before the kill (0..7).
     red = the resume's verify gate is red. verified_tree = the tree the
     resume must land already passed a gate (a memo exists), so no
@@ -311,12 +353,12 @@ def expected_step(mode, k, red, verified_tree, needs_completion_commit):
     return RESTED
 
 
-def expected_verify_runs_green(entry, mode, k, needs_completion_commit):
+def expected_verify_runs_green(entry, mode, k, needs_completion_commit, gate="logging"):
     """How many times the RESUME's gate should actually run when green."""
     squash = mode == "squash"
     if entry in ("stranded-fresh", "wrapup", "pacing") or k < 2:
         return 1                    # ONE phase commit carries the (synthesized) completion; the squash inside re-uses verified=1
-    if entry in ("catchup", "watchdog"):
+    if entry in ("catchup", "watchdog", "watchdog-late"):
         if squash:
             return 1                # an unverified tree: the completion commit OR the catch-up squash verifies it once
         return 1 if needs_completion_commit else 0
@@ -327,9 +369,9 @@ def expected_verify_runs_green(entry, mode, k, needs_completion_commit):
 # Case construction: leave the tree exactly as the kill would
 # ---------------------------------------------------------------------------
 
-def build_case(entry, mode, final_kind, k, probe_phase, red):
+def build_case(entry, mode, final_kind, k, probe_phase, red, gate="logging"):
     """Run (or construct) the killed session; return (repo, kill_step)."""
-    repo = Repo(squash=(mode == "squash"))
+    repo = Repo(squash=(mode == "squash"), gate=gate)
     env1 = {"FINAL_KIND": final_kind}
     if entry == "iteration":
         repo.scenario(APPROVE_SCENARIO)
@@ -342,26 +384,36 @@ def build_case(entry, mode, final_kind, k, probe_phase, red):
     if entry == "stranded-fresh":
         # No session ran: the artifacts and work sit uncommitted, no record.
         subprocess.run(["bash", "-c", APPROVE_SCENARIO], cwd=repo.repo, check=True,
-                       env={**os.environ, "CALL_N": "1", "FINAL_KIND": final_kind})
+                       env={**os.environ, "CALL_N": "1", "FINAL_KIND": final_kind, "GATE": gate})
         return repo, 1
     if entry == "catchup":
         # Committed on the branch by hand (a strand commit, a hotfix): the
         # target lacks it and no record exists.
         subprocess.run(["bash", "-c", APPROVE_SCENARIO], cwd=repo.repo, check=True,
-                       env={**os.environ, "CALL_N": "1", "FINAL_KIND": final_kind})
+                       env={**os.environ, "CALL_N": "1", "FINAL_KIND": final_kind, "GATE": gate})
         repo.git("add", "-A")
         repo.git("commit", "-qm", "wip: landed by hand, never squashed")
         return repo, 3 if final_kind != "no" else 2
-    if entry == "watchdog":
+    if entry in ("watchdog", "watchdog-late"):
         # The deadline watchdog's last-resort commit fires while the model is
         # still in its turn; the supervisor's kill follows. Real kill.
         now = int(time.time())
         # The turn waits for the watchdog's commit to land (bounded), then the
         # supervisor's kill arrives — the production order (commit at T-60s,
         # kill at T), made deterministic under a loaded test host.
+        # watchdog-late (v0.18.0): the post-last-resort-commit WINDOW — the
+        # session is still alive after the wip landed and writes its
+        # completion record then; the kill follows.
+        late = ""
+        if entry == "watchdog-late":
+            late = ("rm -f artifacts/project-complete.json\n"
+                    "jq -n --arg g \"${GATE:-logging}\" '{done: true, summary: \"complete\", "
+                    "suggested_commit_message: \"Project complete: v0 shipped\"} + "
+                    "(if $g == \"consistency\" then {iteration: 7} else {} end)' > artifacts/project-complete.json\n")
         repo.scenario(APPROVE_SCENARIO + (
             'for _ in $(seq 1 125); do grep -q "last-resort commit landed" '
             '"$ROOT_DIR/artifacts/logs/deadline-watchdog.log" 2>/dev/null && break; sleep 0.2; done\n'
+            + late +
             'kill -KILL "$PHASEKIT_TEST_LOOP_PID"\nsleep 5\n'))
         env1.update({
             "PHASEKIT_SESSION_DEADLINE": str(now + 62),
@@ -384,7 +436,9 @@ def build_case(entry, mode, final_kind, k, probe_phase, red):
             # helper the forked watchdog cannot see (defined after the arm
             # site; run 682) shows up here, whatever the static pin thinks.
             raise AssertionError(f"the forked watchdog could not see a helper:\n{log.read_text()}")
-        return repo, 3
+        # v0.18.0 (review round 4): the approval never rides the kill wip —
+        # it is stranded on disk and lands verify-gated at the resume.
+        return repo, 1
     if entry in ("wrapup", "pacing"):
         # v0.14.2 shape: the approval's commit is RED at the boundary, the
         # session then wraps up (soft stop / pacing) with a red gate — the
@@ -414,8 +468,8 @@ def build_case(entry, mode, final_kind, k, probe_phase, red):
 
 
 def run_case(case):
-    entry, mode, final_kind, k, probe_phase, red = case
-    repo, kill_step = build_case(entry, mode, final_kind, k, probe_phase, red)
+    entry, mode, final_kind, k, probe_phase, red, gate = case
+    repo, kill_step = build_case(entry, mode, final_kind, k, probe_phase, red, gate)
     try:
         completion_landed = repo.tracked("artifacts/project-complete.json", "HEAD")
         rec_after_kill = repo.record()
@@ -460,11 +514,19 @@ def snapshot(repo):
         verify_failed=repo.artifact("phase-verify-failed.json").exists(),
         blocked=repo.artifact("phase-blocked.json").exists(),
         completion_on_disk=repo.artifact("project-complete.json").exists(),
-        approval_never_landed=any(ln.endswith("artifacts/phase-approval.json") for ln in repo.porcelain()),
+        approval_never_landed=any(ln.endswith("artifacts/phase-approval.json") for ln in repo.porcelain_all()),
         reachable={sha: repo.reachable(sha) for sha in
                    list(((repo.record() or {}).get("sha_at_step") or {}).values())
                    + list((((repo.record() or {}).get("previous") or {}).get("sha_at_step") or {}).values())},
         boundary_state_visible=any("boundary-state" in ln for ln in repo.porcelain()),
+        # v0.18.0: a verdict artifact is never staged-then-deleted / -modified
+        verdict_ad=[ln for ln in repo.git("status", "--porcelain").splitlines()
+                    if ln[:2] in ("AD", "MD") and ("phase-approval" in ln or "project-complete" in ln)],
+        # v0.18.0: an unverified commit never carries a changed claim
+        wip_claims=[sha for sha in repo.git("log", "--all", "--format=%H%x09%s").splitlines()
+                    if "\twip: last-resort deadline commit" in sha and repo.git("diff", "--name-only", sha.split("\t")[0] + "^",
+                                                        sha.split("\t")[0], "--",
+                                                        "artifacts/ready-to-deploy.json", check=False)],
     )
 
 
@@ -472,26 +534,31 @@ def all_cases():
     modes = ("squash", "plain")
     finals = ("no", "flag", "both")
     reds = (False, True)
+    gates = ("logging", "consistency")   # v0.18.0: a project's consistency check
     cases = []
-    for mode, fk, red in itertools.product(modes, finals, reds):
+    for mode, fk, red, gate in itertools.product(modes, finals, reds, gates):
         for k in range(1, RESTED + 1):
             for phase in ("pre", "post"):
-                cases.append(("iteration", mode, fk, k, phase, red))
-        for entry in ("stranded-fresh", "catchup", "watchdog", "wrapup", "pacing"):
+                cases.append(("iteration", mode, fk, k, phase, red, gate))
+        for entry in ("stranded-fresh", "catchup", "watchdog", "watchdog-late", "wrapup", "pacing"):
             if entry == "catchup" and mode == "plain" and fk != "no":
                 # A completion record committed by hand in plain mode IS a
                 # resting complete project; the loop's re-run semantics there
                 # (the supervisor never dispatches into it) are unchanged and
                 # not a boundary the sequence owes anything to.
                 continue
-            cases.append((entry, mode, fk, 0, "-", red))
+            if entry == "watchdog-late" and fk == "no":
+                # The window's case is a completion record written after the
+                # wip; a non-final late write is continuation work, the model's.
+                continue
+            cases.append((entry, mode, fk, 0, "-", red, gate))
     return cases
 
 
 def case_name(case):
-    entry, mode, fk, k, phase, red = case
+    entry, mode, fk, k, phase, red, gate = case
     where = f"kill@{k}:{phase}" if entry == "iteration" else "-"
-    return f"{entry}/{mode}/final={fk}/{where}/{'red' if red else 'green'}"
+    return f"{entry}/{mode}/final={fk}/{where}/{'red' if red else 'green'}/{gate}"
 
 
 class KillPointMatrix(unittest.TestCase):
@@ -514,7 +581,7 @@ class KillPointMatrix(unittest.TestCase):
                     cls.results[c] = e
 
     def _assert_case(self, case, res):
-        entry, mode, fk, k, phase, red = case
+        entry, mode, fk, k, phase, red, gate = case
         if isinstance(res, Exception):
             raise AssertionError(f"case construction failed: {res}\n" +
                                  "".join(traceback.format_exception(res)))
@@ -535,15 +602,17 @@ class KillPointMatrix(unittest.TestCase):
         # the iteration entry once the commit (step 2) ran in session 1.
         verified_tree = entry == "iteration" and kill_step >= 2
         needs_completion_commit = final and not res["completion_landed"]
-        exp = expected_step(mode, kill_step, red, verified_tree, needs_completion_commit)
+        exp = expected_step(mode, kill_step, red, verified_tree, needs_completion_commit,
+                            claim_kept_out=(gate == "consistency" and entry in ("watchdog", "watchdog-late")))
         if not res["resumed"]:
             exp = RESTED
 
         # (a) the record reaches step 7, or stops honestly.
         self.assertEqual(landed["step"], exp, f"record step {landed['step']} ({landed.get('step_name')}) != expected {exp}\n{res['out']}")
         self.assertEqual(landed.get("step_name"), STEP_NAMES[landed["step"]])
-        self.assertEqual(landed.get("phase"), "phase-1")
-        self.assertEqual(landed.get("final"), final)
+        if exp > 0:
+            self.assertEqual(landed.get("phase"), "phase-1")
+            self.assertEqual(landed.get("final"), final)
         # (e) monotonic across the kill.
         self.assertGreaterEqual(landed["step"], res["step_at_kill"])
         # (f) every recorded sha is reachable from HEAD or the target.
@@ -551,6 +620,10 @@ class KillPointMatrix(unittest.TestCase):
             self.assertTrue(ok, f"sha_at_step {sha} unreachable")
         # the record itself never shows in git status (hidden transient)
         self.assertFalse(st["boundary_state_visible"])
+        # v0.18.0 (§3.3): never `AD`/`MD` on a verdict artifact; an unverified
+        # commit never carries a changed claim.
+        self.assertEqual(st["verdict_ad"], [], res["out"])
+        self.assertEqual(st["wip_claims"], [], "a wip commit changed ready-to-deploy.json")
         # (g) a witness line.
         if res["resumed"]:
             self.assertTrue(any(w in res["out"] for w in WITNESS_LINES), f"no witness line:\n{res['out']}")
@@ -594,7 +667,7 @@ class KillPointMatrix(unittest.TestCase):
             self.assertFalse(st["verify_failed"])
             # (h) the memo: a green resume never re-runs a tier this tree passed.
             if res["resumed"] and not red:
-                self.assertEqual(res["verify_runs"], expected_verify_runs_green(entry, mode, kill_step, needs_completion_commit),
+                self.assertEqual(res["verify_runs"], expected_verify_runs_green(entry, mode, kill_step, needs_completion_commit, gate),
                                  f"verify ran {res['verify_runs']}x\n{res['out']}")
         else:
             # Red at the resume: the refusing gate left its artifact, nothing
@@ -618,9 +691,11 @@ class KillPointMatrix(unittest.TestCase):
     def test_the_matrix_is_the_full_product(self):
         cases = all_cases()
         entries = {c[0] for c in cases}
-        self.assertEqual(entries, {"iteration", "stranded-fresh", "catchup", "watchdog", "wrapup", "pacing"})
+        self.assertEqual(entries, {"iteration", "stranded-fresh", "catchup", "watchdog", "watchdog-late",
+                                   "wrapup", "pacing"})
         it = [c for c in cases if c[0] == "iteration"]
-        self.assertEqual(len(it), 2 * 3 * 2 * RESTED * 2)
+        self.assertEqual(len(it), 2 * 3 * 2 * RESTED * 2 * 2)
+        self.assertEqual({c[6] for c in cases}, {"logging", "consistency"})
         self.assertEqual({(c[3], c[4]) for c in it}, {(k, p) for k in range(1, 8) for p in ("pre", "post")})
         self.assertEqual({c[1] for c in cases}, {"squash", "plain"})
         self.assertEqual({c[2] for c in cases}, {"no", "flag", "both"})
@@ -1451,7 +1526,7 @@ class TerminalRuleBounds(unittest.TestCase):
                 vf = json.loads(repo.artifact("phase-verify-failed.json").read_text())
                 self.assertEqual(vf["gate_footprint"], ["measure.txt"], vf)
                 self.assertEqual(vf["attempts"], 2, "each pass's red spends one attempt")
-                self.assertTrue(any(ln.endswith("artifacts/phase-approval.json") for ln in repo.porcelain()),
+                self.assertTrue(any(ln.endswith("artifacts/phase-approval.json") for ln in repo.porcelain_all()),
                                 "the approval stays on disk, uncommitted")
 
     def _seed_complete(self, repo, record, marker=None):
@@ -1574,7 +1649,7 @@ class GateFootprint(unittest.TestCase):
                 self.assertIn("artifacts/logs/", vf["gate_footprint_recipe"])
                 self.assertIn("the gate WROTE TO THE TREE", out1)
                 self.assertIn("measure.txt", out1)
-                self.assertTrue(any(ln.endswith("artifacts/phase-approval.json") for ln in repo.porcelain()),
+                self.assertTrue(any(ln.endswith("artifacts/phase-approval.json") for ln in repo.porcelain_all()),
                                 "the approval stays on disk, uncommitted")
                 self.assertEqual(repo.commits_touching("artifacts/project-complete.json", "main"), [])
                 self.assertEqual(repo.verify_calls(), 1, out1)
@@ -1612,7 +1687,7 @@ class GateFootprint(unittest.TestCase):
         self.assertEqual(vf["gate_footprint"], ["evidence.json"], vf)
         self.assertEqual(vf["exit_code"], 0, vf)
         self.assertIn("evidence.json", out)
-        self.assertTrue(any(ln.endswith("artifacts/phase-approval.json") for ln in repo.porcelain()))
+        self.assertTrue(any(ln.endswith("artifacts/phase-approval.json") for ln in repo.porcelain_all()))
         self.assertEqual(repo.trailer_commits("main"), [], "nothing reached the target")
 
     def test_cell3_a_read_only_gate_has_no_footprint_key_green_or_red(self):
@@ -2108,6 +2183,11 @@ class StructuralPins(unittest.TestCase):
             self.assertNotRegex(SOURCE, rf"'[^'\n]*\${reserved}\b", f"no jq filter may read ${reserved}")
         # the one multi-line filter that once read it (the red capture's object literal)
         self.assertNotIn("label: $label", SOURCE)
+        # v0.18.0: nor may a jq FUNCTION be named after a keyword (a `def
+        # label:` is a syntax error on every jq — caught while building the
+        # record stamp, where it silently skipped every stamp).
+        for kw in ("label", "if", "then", "else", "reduce", "foreach", "def", "import", "include"):
+            self.assertNotRegex(SOURCE, rf"\bdef\s+{kw}\s*[:(]", f"a jq def named after the keyword {kw}")
         diff = _extract_block(r"^gate_footprint_diff\(\) \{", r"^\}")
         self.assertIn('"$key" == artifacts/logs/*', diff, "the loop's scratch is never a footprint")
         for fn in ("record_verify_failure", "gate_pending_record", "verify_memo_record", "verify_memo_record_red"):
@@ -2164,13 +2244,15 @@ class StructuralPins(unittest.TestCase):
 
     def test_the_wrapup_commit_keys_the_deferrals_it_sweeps(self):
         fn = _extract_block(r"^wrapup_commit\(\) \{", r"^\}")
-        self.assertLess(fn.index("normalize_deferral_keys"), fn.index("git add -A"))
+        self.assertLess(fn.index("prepare_verdicts_for_landing"), fn.index("git add -A"))
+        prep = _extract_block(r"^prepare_verdicts_for_landing\(\) \{", r"^\}")
+        self.assertIn("normalize_deferral_keys", prep)
 
     def test_the_red_memo_is_honoured_only_at_loop_start(self):
         fn = _extract_block(r"^run_verify_gate\(\) \{", r"^\}")
         self.assertIn('"${BOUNDARY_WALK_CONTEXT:-}" == "stranded"', fn)
-        land = _extract_block(r"^land_boundary\(\) \{", r"^\}")
-        self.assertEqual(land.count('BOUNDARY_WALK_CONTEXT=""'), 3, "every return resets the walk context")
+        land = _extract_block(r"^_land_boundary\(\) \{", r"^\}")
+        self.assertEqual(land.count('BOUNDARY_WALK_CONTEXT=""'), 5, "every return resets the walk context (v0.18.0: + the kept-out claim's)")
         self.assertNotIn("trap ", land)
 
     def test_the_synthesized_completion_has_no_wall_clock_field(self):
@@ -2180,7 +2262,7 @@ class StructuralPins(unittest.TestCase):
 
     def test_only_land_boundary_advances_the_record(self):
         calls = [m.start() for m in re.finditer(r"^\s+boundary_advance ", SOURCE, re.M)]
-        fn_start = SOURCE.index("land_boundary() {")
+        fn_start = SOURCE.index("\n_land_boundary() {")
         fn_end = SOURCE.index("\n}\n", fn_start)
         self.assertTrue(calls, "boundary_advance is never called")
         for pos in calls:
@@ -2233,9 +2315,11 @@ class StructuralPins(unittest.TestCase):
         self.assertLess(fn.index('echo "  Verify passed."'), fn.index("verify_memo_record"))
 
     def test_commit_from_artifact_normalizes_deferral_keys_before_staging(self):
-        fn = _extract_block(r"^commit_from_artifact\(\) \{", r"^\}")
-        self.assertLess(fn.index("normalize_deferral_keys"), fn.index('git add -f "$file"'))
-        self.assertLess(fn.index("normalize_deferral_keys"), fn.index("run_verify_gate"))
+        fn = _extract_block(r"^_commit_from_artifact\(\) \{", r"^\}")
+        self.assertLess(fn.index("prepare_verdicts_for_landing"), fn.index('stage_landing_tree "$file"'))
+        self.assertLess(fn.index("prepare_verdicts_for_landing"), fn.index("run_verify_gate"))
+        stage = _extract_block(r"^stage_landing_tree\(\) \{", r"^\}")
+        self.assertIn('git add -f "$1"', stage)
 
     def test_the_final_unrecorded_discriminator_requires_no_completion_touch_since_the_approval(self):
         fn = _extract_block(r"^approval_final_unrecorded\(\) \{", r"^\}")
@@ -2249,14 +2333,19 @@ class StructuralPins(unittest.TestCase):
         self.assertIn('flock -w 5 9', fn)
         self.assertIn('"$ARTIFACTS_DIR/logs/.boundary-state.$BASHPID.tmp"', fn)
         norm = _extract_block(r"^normalize_deferral_keys\(\) \{", r"^\}")
-        self.assertIn('"$ARTIFACTS_DIR/logs/.deferrals.$BASHPID.tmp"', norm)
+        self.assertIn('_rewrite_json_keeping_mtime "$file" "$out"', norm)
+        rewrite = _extract_block(r"^_rewrite_json_keeping_mtime\(\) \{", r"^\}")
+        self.assertIn('"$ARTIFACTS_DIR/logs/.rewrite.$BASHPID.tmp"', rewrite)
+        self.assertIn('touch -r "$file" "$tmp"', rewrite, "a loop rewrite keeps the record's mtime (v0.18.0)")
         self.assertNotIn('"$file.tmp"', norm)
         self.assertNotIn("REFUSED", norm)
 
     def test_commit_from_artifact_normalizes_both_artifacts_but_only_unlanded_ones(self):
-        fn = _extract_block(r"^commit_from_artifact\(\) \{", r"^\}")
-        self.assertIn("for _art in phase-approval.json project-complete.json; do", fn)
-        self.assertIn('if artifact_never_landed "$ARTIFACTS_DIR/$_art"; then normalize_deferral_keys', fn)
+        fn = _extract_block(r"^_commit_from_artifact\(\) \{", r"^\}")
+        self.assertIn("prepare_verdicts_for_landing", fn)
+        prep = _extract_block(r"^prepare_verdicts_for_landing\(\) \{", r"^\}")
+        self.assertIn("for _art in phase-approval.json project-complete.json; do", prep)
+        self.assertIn('artifact_never_landed "$ARTIFACTS_DIR/$_art" || continue', prep)
         wd = _extract_block(r"^deadline_lastresort_commit\(\) \{", r"^\}")
         self.assertIn("normalize_deferral_keys", wd)
 
@@ -2273,7 +2362,16 @@ class StructuralPins(unittest.TestCase):
         self.assertIn('--argjson iteration "$(supervising_iteration_json)"', fn)
         reader = _extract_block(r"^supervising_iteration_json\(\) \{", r"^\}")
         self.assertIn('"$ARTIFACTS_DIR/iteration-mode.json"', reader)
-        self.assertEqual(SOURCE.count("iteration-mode.json\""), 1, "exactly one code read of the marker")
+        self.assertEqual(SOURCE.count('"$ARTIFACTS_DIR/iteration-mode.json"'), 1, "exactly one code read of the marker on disk")
+        # v0.18.0: the one other read is the iteration BASE, from the marker's
+        # committed history (the commit that introduced this iteration's copy).
+        # Every other code line naming the file is a message, not a read.
+        base = _extract_block(r"^iteration_base_sha\(\) \{", r"^\}")
+        self.assertIn('git show "$c:artifacts/iteration-mode.json"', base)
+        outside = [ln for ln in SOURCE.replace(base, "").replace(reader, "").splitlines()
+                   if "iteration-mode.json" in ln and not ln.lstrip().startswith("#")
+                   and "echo" not in ln]
+        self.assertEqual(outside, [], "a read of the marker outside its two readers")
         # (no branch-name regex here — review MINOR 4: the load-bearing guard
         # against deriving the label from the branch is the end-to-end pin
         # asserting iteration == 129 while branch == "iter/1-test")
@@ -2282,10 +2380,11 @@ class StructuralPins(unittest.TestCase):
     def test_the_sequence_keeps_every_gate(self):
         """Nothing loosens: the gates the kickoff names are still called from
         the commit path the sequence uses."""
-        fn = _extract_block(r"^commit_from_artifact\(\) \{", r"^\}")
+        fn = _extract_block(r"^_commit_from_artifact\(\) \{", r"^\}")
         for gate in ("run_verify_gate", "staged_touches_security_pair", "post_verify_commit_gates",
-                     "unstage_transient_adds"):
+                     "stage_landing_tree"):
             self.assertIn(gate, fn)
+        self.assertIn("unstage_transient_adds", _extract_block(r"^stage_landing_tree\(\) \{", r"^\}"))
         wd = _extract_block(r"^deadline_lastresort_commit\(\) \{", r"^\}")
         self.assertIn("_disarm_deploy_artifact ready-to-deploy.json", wd)
 

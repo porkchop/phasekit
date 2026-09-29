@@ -53,6 +53,19 @@ def _extract_block(start_re, end_re):
 FUNCTIONS = _extract_block(r"^# --- Branch-per-iteration \+ squash-to-target",
                            r"^staged_touches_security_pair\(\) \{")
 
+
+def _function(name):
+    return _extract_block(rf"^{name}\(\) \{{", r"^\}") + "\n}"
+
+
+# v0.18.0: the squash names its facts (composed subject, Phasekit-* trailers)
+# through the iteration-facts block — the shipped definitions, never stubs.
+FUNCTIONS += "\n" + "\n".join(_function(n) for n in (
+    "artifact_never_landed", "boundary_get", "supervising_iteration_json",
+    "normalize_iteration_label", "supervising_iteration_label", "normalize_phase_id",
+    "this_iterations_approval_phase", "verdict_phase_id", "iteration_base_sha",
+    "phasekit_trailers", "compose_commit_message"))
+
 # The loop's transient vocabulary, extracted rather than restated (v0.14.4:
 # the guard consults it to tell a baton/transient from real content).
 def _transient_array():
@@ -490,8 +503,10 @@ class Pending(Fixture):
         r = self.bash("ensure_squashed_or_block 0")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue((self.artifacts / "logs" / "verify-calls").exists())
-        self.assertTrue(self.git("log", "-1", "--format=%s", "main")
-                        .startswith("Phase 1 (APPROVED): landed via a strand commit"))
+        # v0.18.0: the subject prefix is generated from the record (standalone:
+        # `phase <P>: <prose>`); the model's own prefix is replaced, not doubled.
+        self.assertEqual(self.git("log", "-1", "--format=%s", "main"),
+                         "phase 1: landed via a strand commit")
 
     def test_catch_up_with_red_verify_defers_without_blocking(self):
         self.write_artifact("phase-approval.json", "Phase 1 (APPROVED)")
@@ -518,7 +533,7 @@ class Pending(Fixture):
         r = self.bash("ensure_squashed_or_block 1 completion")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.head_branch(), "main")
-        self.assertTrue(self.git("log", "-1", "--format=%s", "main").startswith("Project complete: v0 shipped"))
+        self.assertEqual(self.git("log", "-1", "--format=%s", "main"), "phase 1: Project complete: v0 shipped")
         self.assertEqual(self.git("diff", "--stat", "main", self.branch), "")
         self.assertIn(self.branch, self.git("branch", "--list", self.branch))
         self.assertEqual(self.git("status", "--porcelain"), "")
@@ -534,14 +549,14 @@ class Pending(Fixture):
 
 class StructuralPins(unittest.TestCase):
     def test_commit_path_squashes_approval_class_commits_before_push(self):
-        block = _extract_block(r"^commit_from_artifact\(\) \{", r"^\}")
+        block = _extract_block(r"^_commit_from_artifact\(\) \{", r"^\}")
         i = block.index('git commit -m "$msg"')
         j = block.index('squash_applies_to "$file"')
         k = block.index("auto_push_if_enabled")
         self.assertTrue(i < j < k)
-        self.assertIn('if ! squash_to_target "$msg" 1; then', block)
+        self.assertIn('if ! squash_to_target "$msg" 1 "$(phasekit_trailers squash "$file")"; then', block)
         # MINOR-10: a refused squash still pushes the branch commit under AUTO_PUSH
-        refuse = block.index('if ! squash_to_target "$msg" 1; then')
+        refuse = block.index('if ! squash_to_target "$msg" 1 ')
         self.assertIn("auto_push_if_enabled", block[refuse:block.index("return 1", refuse)])
 
     def test_work_branch_is_ensured_before_stranded_recovery_and_catch_up_after(self):
@@ -551,7 +566,7 @@ class StructuralPins(unittest.TestCase):
         branch is ensured before any loop-made commit, and the recovery runs
         before the first iteration."""
         head = SOURCE.index("if ! ensure_work_branch; then")
-        stranded = SOURCE.index('if artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then')
+        stranded = SOURCE.index('if completion_record_claims && artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then')
         catch_up = SOURCE.index('land_boundary "$recover_from" stranded 1', stranded)
         loop = SOURCE.index('while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do')
         self.assertTrue(head < stranded < catch_up < loop)

@@ -355,12 +355,16 @@ class LoopFunctionalTest(LoopHarness):
         committed = self._git("show", "--name-only", "--format=", "HEAD").split()
         self.assertIn("src.txt", committed)
         self.assertNotIn("artifacts/ready-to-deploy.json", committed)
-        # The unverified deploy claim is disarmed exactly as on the kill path;
+        # The unverified deploy claim is kept OUT exactly as on the kill path
+        # (v0.18.0: unstaged, never deleted — it stays on disk for the next
+        # verify-gated landing, which judges it with the rest of the tree);
         # the approval stays on disk UNCOMMITTED (a stranded artifact for the
         # next session's verify-gated recovery), so the wip is a plain
         # checkpoint, never an approval-class record.
         self.assertNotIn("artifacts/phase-approval.json", committed)
-        self.assertFalse(os.path.exists(os.path.join(self.repo, "artifacts", "ready-to-deploy.json")))
+        self.assertTrue(os.path.exists(os.path.join(self.repo, "artifacts", "ready-to-deploy.json")))
+        self.assertIn("?? artifacts/ready-to-deploy.json",
+                      self._git("status", "--porcelain", "--untracked-files=all").splitlines())
         self.assertTrue(os.path.exists(os.path.join(self.repo, "artifacts", "phase-approval.json")))
         # Committed work = no stall row; what remains dirty is only artifacts/.
         dirty = [l for l in self._git("status", "--porcelain").splitlines()
@@ -604,7 +608,7 @@ class LoopV061FunctionalTest(LoopHarness):
         r = self._run_loop(None)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         msgs = self._messages()
-        self.assertIn("phase-2: re-verified", msgs)
+        self.assertIn("phase 2: re-verified", msgs)  # v0.18.0: the prefix is generated from the record
         self.assertIn("final: done", msgs)
         self.assertNotIn("phase-2: red", msgs)  # the red-verify approval never drives a commit
         self.assertEqual(msgs.count("wip: last-resort"), 1)  # no duplicate wip
@@ -678,7 +682,7 @@ class LoopV061FunctionalTest(LoopHarness):
         r = self._run_loop(None, env=env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotIn("has not reached", r.stdout)  # no catch-up squash at session start
-        self.assertIn("phase-2: re-verified", self._git("log", target, "--format=%s"))
+        self.assertIn("phase 2: re-verified", self._git("log", target, "--format=%s"))
         self.assertNotIn("wip: last-resort", self._git("log", target, "--format=%s"))
 
     def test_an_untracked_baton_is_removed_when_the_iteration_concludes(self) -> None:
@@ -949,8 +953,10 @@ class LoopV065StructuralTest(unittest.TestCase):
         self.assertIn("spec-change.json", hidden)
 
     def test_both_commit_paths_unstage_transients(self) -> None:
-        commit_fn = self.text.split("commit_from_artifact() {", 1)[1].split("\n}", 1)[0]
-        self.assertIn("unstage_transient_adds", commit_fn)
+        commit_fn = self.text.split("\n_commit_from_artifact() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("stage_landing_tree", commit_fn)  # v0.18.0: the one staging step
+        stage_fn = self.text.split("stage_landing_tree() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("unstage_transient_adds", stage_fn)
         wrapup_fn = self.text.split("wrapup_commit() {", 1)[1].split("\n}", 1)[0]
         self.assertIn("unstage_transient_adds", wrapup_fn)
 

@@ -49,3 +49,5 @@ a git forge, or pasted into an LLM.
 
 - The pre-commit gate checks internal links + references only (no prose
   lint, no spellcheck — deliberate). Keep it green.
+- Any check over these docs reads the tree, never git history (docs/QUALITY_GATES.md
+  "Hermetic tests").

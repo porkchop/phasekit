@@ -61,7 +61,7 @@ class CompletionCommitOrderTest(unittest.TestCase):
         do_fn = self.text.split("boundary_do() {", 1)[1].split("\n}", 1)[0]
         self.assertIn('[[ "$any_age" != 1 ]]', do_fn)
         self.assertIn("BOUNDARY_APPROVAL_RIDES_COMPLETION=1", do_fn)
-        land_fn = self.text.split("land_boundary() {", 1)[1].split("\n}", 1)[0]
+        land_fn = self.text.split("\n_land_boundary() {", 1)[1].split("\n}", 1)[0]
         self.assertIn('*) COMPLETION_COMMIT_IN_PROGRESS="$prior_ccip"', land_fn)
         self.assertIn('return "$rc" ;;', land_fn)
 
@@ -105,7 +105,7 @@ class CompletionCommitOrderTest(unittest.TestCase):
         self.assertLess(do_fn_start + helper_calls[0], sites[0],
                         "step 2 (the helper) precedes step 3 (the completion commit)")
         # and the walk itself is ascending: step N's action runs before N+1's.
-        land_fn = self.text.split("land_boundary() {", 1)[1].split("\n}", 1)[0]
+        land_fn = self.text.split("\n_land_boundary() {", 1)[1].split("\n}", 1)[0]
         self.assertIn("for (( step=1; step<=BOUNDARY_STEP_RESTED; step++ )); do", land_fn)
 
 

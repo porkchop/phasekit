@@ -28,6 +28,7 @@ Run from the repo root: `python3 -m unittest tests.test_deadline_watchdog`
 
 import json
 import os
+import pathlib
 import re
 import subprocess
 import tempfile
@@ -56,6 +57,28 @@ def _extract(pattern_start, pattern_end):
 
 
 LEAD_FN = _extract(r"^compute_wrapup_lead\(\) \{", r"^\}")
+
+
+def _extract_between(start_re, end_re):
+    lines = SOURCE.splitlines()
+    out, taking = [], False
+    for line in lines:
+        if not taking and re.match(start_re, line):
+            taking = True
+        if taking:
+            if re.match(end_re, line):
+                return "\n".join(out)
+            out.append(line)
+    raise AssertionError(f"could not extract {start_re!r} from the loop")
+
+
+# v0.18.0: the lead is measured — the cost-model block the formula reads
+# (resolved per test, so a loop without one fails these tests, not the module).
+def _cost_block():
+    try:
+        return _extract_between(r"^# --- cost model \(v0\.18\.0\)", r"^# --- Deadline watchdog")
+    except AssertionError:
+        return ""
 COMMIT_FN = _extract(r"^deadline_lastresort_commit\(\) \{", r"^\}")
 DISARM_FN = _extract(r"^_disarm_deploy_artifact\(\) \{", r"^\}")
 UNSTAGE_FN = _extract(r"^unstage_transient_adds\(\) \{", r"^\}")
@@ -89,34 +112,85 @@ def _bash(script, cwd=None, env=None):
 
 
 class ComputeWrapupLead(unittest.TestCase):
-    def _lead(self, span, override=None):
-        env = {}
+    """v0.18.0 (design §2.2, fork F1): one formula, one home, measured.
+
+        T_y = G_full + W + 60 s        L = T_y + M (+ R in light mode)
+        L clamped to [300 s, 25% of the span]; above the cap the lead stays
+        at the cap (push-back, never wider); T_y never exceeds L.
+
+    The priors stand in for an empty ledger; the design's worked table is
+    reproduced from measured gate times. Red on v0.17.0: the lead there is
+    15% of the span clamped to [300, 900] and knows no ledger."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="pk-lead-")
+        self.artifacts = Path(self.tmp) / "artifacts"
+        (self.artifacts / "logs").mkdir(parents=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _ledger(self, **samples):
+        (self.artifacts / "logs" / "cost-ledger.json").write_text(json.dumps(
+            {"schema": 1, "samples": {k: v for k, v in samples.items()}}))
+
+    def _plan(self, span, mode="standard", override=None, lastresort=None):
+        env = {"ITERATION_MODE": mode}
         if override is not None:
             env["PHASEKIT_WRAPUP_LEAD_SECONDS"] = str(override)
-        r = _bash(f"{LEAD_FN}\ncompute_wrapup_lead {span}", env=env)
+        if lastresort is not None:
+            env["PHASEKIT_LASTRESORT_LEAD_SECONDS"] = str(lastresort)
+        r = _bash(f'ARTIFACTS_DIR="{self.artifacts}"\nITERATION_MODE="{mode}"\n{_cost_block()}\n{LEAD_FN}\n'
+                  f"compute_wrapup_lead {span}", env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
-        return int(r.stdout.strip())
+        lead, ty, uncapped, cap = (int(x) for x in r.stdout.split())
+        return lead, ty, uncapped, cap
 
-    def test_a_70_minute_session_gets_a_630s_lead(self):
-        self.assertEqual(self._lead(4200), 630)
+    def test_the_lead_derives_from_the_cost_ledger_within_floor_and_cap(self):
+        # The design's worked numbers (§2.2), from measured full-tier P90s.
+        self._ledger(g_full=[726, 780, 838, 800, 840])
+        # orchestrator standard, 110 min: T_y 960, L uncapped 1920 > cap 1650.
+        self.assertEqual(self._plan(6600), (1650, 960, 1920, 1650))
+        # orchestrator light: + R (G_full + 300) = 3060 uncapped, still the cap.
+        self.assertEqual(self._plan(6600, mode="light"), (1650, 960, 3060, 1650))
+        self._ledger(g_full=[129, 200, 260, 240])
+        # xmeo standard, 85 min: T_y 380, L 760 — inside the cap, in force.
+        self.assertEqual(self._plan(5100), (760, 380, 760, 1275))
+        # xmeo light: 1320 uncapped, the cap (1275) in force.
+        self.assertEqual(self._plan(5100, mode="light"), (1275, 380, 1320, 1275))
 
-    def test_the_floor_is_300(self):
-        # 30 minutes: 15% = 270 -> clamped up to 300.
-        self.assertEqual(self._lead(1800), 300)
+    def test_the_priors_stand_in_for_an_empty_ledger(self):
+        # G_full 300, W 60, M = 420: T_y 420, L 840 (70 minutes: cap 1050).
+        self.assertEqual(self._plan(4200), (840, 420, 840, 1050))
 
-    def test_the_ceiling_is_900(self):
-        # 4 hours: 15% = 2160 -> clamped down to 900.
-        self.assertEqual(self._lead(14400), 900)
+    def test_the_floor_is_300_and_the_cap_is_a_quarter_of_the_span(self):
+        self._ledger(g_full=[10], w=[5], m=[10])
+        lead, ty, uncapped, cap = self._plan(7200)
+        self.assertEqual((lead, uncapped, cap), (300, 85, 1800))
+        self.assertEqual(ty, 75)
 
-    def test_a_tiny_session_gets_half_its_span_not_the_floor(self):
-        # 8 minutes: floor(300) would leave 180s of work; half the span wins.
-        self.assertEqual(self._lead(480), 240)
+    def test_a_session_under_twenty_minutes_gets_half_its_span_at_most(self):
+        # 25% of 480 s is under the 300 s floor: half the span stands in.
+        self.assertEqual(self._plan(480)[0], 240)
 
-    def test_the_env_override_wins_verbatim(self):
-        self.assertEqual(self._lead(4200, override=120), 120)
+    def test_take_control_never_precedes_the_nudge(self):
+        # A measured T_y beyond the capped lead is pulled back to the lead.
+        self._ledger(g_full=[3000])
+        lead, ty, _, _ = self._plan(6600)
+        self.assertEqual(lead, 1650)
+        self.assertEqual(ty, lead - 60, "60 s with the nudge before control is taken")
 
-    def test_override_zero_disables(self):
-        self.assertEqual(self._lead(4200, override=0), 0)
+    def test_a_take_control_inside_the_last_resort_lead_is_dropped(self):
+        self.assertEqual(self._plan(4200, override=50)[1], 0)
+
+    def test_the_env_override_wins_verbatim_and_caps_take_control(self):
+        lead, ty, _, _ = self._plan(4200, override=120, lastresort=0)
+        self.assertEqual((lead, ty), (120, 80), "the model keeps a window with the nudge")
+
+    def test_override_zero_disables_both_stages(self):
+        lead, ty, _, _ = self._plan(4200, override=0)
+        self.assertEqual((lead, ty), (0, 0))
 
 
 class LastResortCommit(unittest.TestCase):
@@ -167,6 +241,10 @@ class LastResortCommit(unittest.TestCase):
                 UNSTAGE_FN,
                 COMMIT_FN,
                 DISARM_FN,
+                # v0.18.0 trailers: stubbed here (this prelude is the narrow
+                # v0.13.x set); LastResortCommitAsTheForkSeesIt runs the real ones.
+                'phasekit_trailers() { echo "Phasekit-Kind: $1"; }',
+                "_wip_phase_source() { :; }",
                 "deadline_lastresort_commit",
             ]
         )
@@ -204,20 +282,48 @@ class LastResortCommit(unittest.TestCase):
         ]
         self.assertEqual(residue, [])
 
-    def test_a_mid_build_ready_to_deploy_is_restored_to_head(self):
+    def test_the_deploy_claim_is_never_rewritten_only_kept_out_of_unverified_commits(self):
+        # v0.18.0 (design §3.1, link [E]): the dying session re-armed the
+        # claim AND its evidence for the new iteration. Until v0.17.0 the
+        # watchdog restored the claim to HEAD and left the evidence at the
+        # new digest — the committed tree contradicted the project's own
+        # consistency check (xmeo run 999: 40 digest failures at the next
+        # start). Now the claim is unstaged: the wip carries HEAD's claim,
+        # the worktree keeps the session's, byte for byte, mtime untouched.
+        # Red on v0.17.0: the worktree claim is HEAD's ("old").
         rtd = self.artifacts / "ready-to-deploy.json"
-        rtd.write_text('{"deploy_ready": false, "iteration": "old"}\n')
+        rtd.write_text('{"deploy_ready": true, "digest": "old"}\n')
+        (self.artifacts / "evidence.json").write_text('{"digest": "old"}\n')
         (self.root / "src.txt").write_text("v1\n")
         self._commit_all("base")
-        # The dying session armed a fresh, unverified release...
-        rtd.write_text('{"deploy_ready": true, "iteration": "doomed"}\n')
+        rtd.write_text('{"deploy_ready": true, "digest": "new"}\n')
+        (self.artifacts / "evidence.json").write_text('{"digest": "new"}\n')
+        (self.root / "src.txt").write_text("v2\n")
+        import time as _t
+        stamp = _t.time() - 5
+        os.utime(rtd, (stamp, stamp))
+        r = self._run_lastresort()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("last-resort", self._git("log", "-1", "--format=%s"))
+        # the unverified commit never carries a changed claim ...
+        self.assertIn('"old"', self._git("show", "HEAD:artifacts/ready-to-deploy.json"))
+        self.assertEqual(self._git("diff", "HEAD~1", "HEAD", "--", "artifacts/ready-to-deploy.json"), "")
+        # ... and the session's claim is left exactly as written
+        self.assertEqual(rtd.read_text(), '{"deploy_ready": true, "digest": "new"}\n')
+        self.assertAlmostEqual(rtd.stat().st_mtime, stamp, delta=1)
+        self.assertIn(" M artifacts/ready-to-deploy.json", self._git("status", "--porcelain").splitlines())
+
+    def test_a_torn_tracked_claim_comes_back_from_head(self):
+        rtd = self.artifacts / "ready-to-deploy.json"
+        rtd.write_text('{"deploy_ready": false}\n')
+        (self.root / "src.txt").write_text("v1\n")
+        self._commit_all("base")
+        rtd.write_text('{"deploy_rea')
         (self.root / "src.txt").write_text("v2\n")
         r = self._run_lastresort()
         self.assertEqual(r.returncode, 0, r.stderr)
-        # ...and the watchdog put HEAD's version back, in the tree and in the
-        # commit.
-        self.assertIn("old", rtd.read_text())
-        self.assertNotIn("doomed", self._git("show", "HEAD:artifacts/ready-to-deploy.json"))
+        self.assertEqual(rtd.read_text(), '{"deploy_ready": false}\n')
+        self.assertNotIn("ready-to-deploy", self._git("status", "--porcelain"))
 
     # v0.14.7 (orchestrator #658, iteration 122): "restore to HEAD" of a path
     # HEAD does not carry was `rm -f` — the watchdog deleted the completion
@@ -264,25 +370,28 @@ class LastResortCommit(unittest.TestCase):
                 self.assertIn("last-resort", self._git("log", "-1", "--format=%s"))
                 self.assertNotIn("project-complete", self._git("ls-tree", "-r", "--name-only", "HEAD"))
 
-    def test_an_untracked_ready_to_deploy_is_still_deleted_not_committed(self):
-        # The deploy CLAIM keeps the v0.13.0 rule: no landing step owns it, so
-        # an unverified first-ever claim must not survive to a later commit's
-        # `git add -A` (v0.14.2 wrap-up review; pinned end-to-end in
-        # test_run_until_done_v060's fall-through test).
+    def test_an_untracked_ready_to_deploy_is_kept_on_disk_never_committed(self):
+        # v0.18.0: the same rule for the claim as for the record — unstaged,
+        # never deleted. An unverified first-ever claim never rides the wip;
+        # the next verify-gated landing judges it with the rest of the tree
+        # (pinned end-to-end in test_run_until_done_v060's fall-through test).
         (self.root / "src.txt").write_text("v1\n")
         self._commit_all("base")
         (self.artifacts / "ready-to-deploy.json").write_text('{"deploy_ready": true, "iteration": "first-ever"}\n')
         (self.root / "src.txt").write_text("v2\n")
         r = self._run_lastresort()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertFalse((self.artifacts / "ready-to-deploy.json").exists())
+        self.assertTrue((self.artifacts / "ready-to-deploy.json").exists())
+        self.assertIn("?? artifacts/ready-to-deploy.json",
+                      self._git("status", "--porcelain", "--untracked-files=all"))
         self.assertIn("last-resort", self._git("log", "-1", "--format=%s"))
         self.assertNotIn(
             "ready-to-deploy", self._git("ls-tree", "-r", "--name-only", "HEAD")
         )
 
-    def test_a_tracked_dirty_project_complete_is_still_restored_to_head(self):
-        # The v0.13.x behaviour for a path HEAD carries is unchanged.
+    def test_a_tracked_dirty_project_complete_is_kept_out_not_restored(self):
+        # v0.18.0: one rule for both files — the wip carries HEAD's record,
+        # the worktree keeps the session's.
         rec = self.artifacts / "project-complete.json"
         rec.write_text('{"done": true, "iteration": "iteration-121"}\n')
         (self.root / "src.txt").write_text("v1\n")
@@ -291,7 +400,7 @@ class LastResortCommit(unittest.TestCase):
         (self.root / "src.txt").write_text("v2\n")
         r = self._run_lastresort()
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("iteration-121", rec.read_text())
+        self.assertIn("iteration-122-unverified", rec.read_text())
         self.assertNotIn("unverified", self._git("show", "HEAD:artifacts/project-complete.json"))
 
     def test_transient_signals_are_not_swept_into_the_commit(self):
@@ -390,6 +499,9 @@ class ReviewFindings0131(unittest.TestCase):
         # `git add -A` line within the loop body.
         add_at = COMMIT_FN.index("git add -A")
         self.assertIn("_disarm_deploy_artifact ready-to-deploy.json", COMMIT_FN[add_at:])
+        # v0.18.0: the keep-out is an unstage — no checkout of the path, no rm
+        # of a parseable file.
+        self.assertIn('git reset -q -- "$p"', DISARM_FN)
 
     def test_phase2_stands_down_when_wrapup_is_in_progress(self):
         # Finding 1: mutual exclusion via the marker, checked before the
@@ -644,11 +756,40 @@ class LastResortCommitAsTheForkSeesIt(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("command not found", r.stderr)
         self.assertIn("last-resort", LastResortCommit._git(self, "log", "-1", "--format=%s"))
-        committed = json.loads(LastResortCommit._git(self, "show", "HEAD:artifacts/phase-approval.json"))
-        self.assertEqual(committed["deferrals"][0]["key"], "polish-the-lobby-animation-timing-later")
-        self.assertEqual(committed["deferrals"][0]["key_derived"], "slug")
+        # v0.18.0 (review round 4): the approval never rides the kill wip; it
+        # stays on disk, keyed, for the next start's verify-gated landing.
+        self.assertNotIn("phase-approval", LastResortCommit._git(self, "ls-tree", "-r", "--name-only", "HEAD"))
         on_disk = json.loads((self.artifacts / "phase-approval.json").read_text())
         self.assertEqual(on_disk["deferrals"][0]["key"], "polish-the-lobby-animation-timing-later")
+
+    def test_the_kill_path_stands_down_while_the_loops_own_landing_is_in_flight(self):
+        # v0.18.0, review rounds 5-7: no second committer during a landing —
+        # a kill leaves its verdicts on disk for the next start instead.
+        (self.root / "src.txt").write_text("v1\n")
+        LastResortCommit._commit_all(self, "base")
+        (self.root / "src.txt").write_text("v2\n")
+        (self.artifacts / "logs").mkdir(exist_ok=True)
+        (self.artifacts / "logs" / ".landing-in-flight").touch()
+        before = LastResortCommit._git(self, "rev-parse", "HEAD")
+        r = self._run_as_fork()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("standing down", r.stdout)
+        self.assertEqual(LastResortCommit._git(self, "rev-parse", "HEAD"), before)
+
+    def test_the_kill_path_never_commits_the_security_pair(self):
+        # review round 7 (open since v0.13.0): a --no-verify wip is a path too.
+        (self.root / "src.txt").write_text("v1\n")
+        wf = self.root / ".github" / "workflows"
+        wf.mkdir(parents=True)
+        (wf / "ci.yml").write_text("safe: true\n")
+        LastResortCommit._commit_all(self, "base")
+        (wf / "ci.yml").write_text("safe: false # model edit\n")
+        (self.root / "src.txt").write_text("v2\n")
+        r = self._run_as_fork()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("last-resort", LastResortCommit._git(self, "log", "-1", "--format=%s"))
+        self.assertIn("safe: true", LastResortCommit._git(self, "show", "HEAD:.github/workflows/ci.yml"))
+        self.assertIn("safe: false", (wf / "ci.yml").read_text(), "kept on disk, never committed")
 
     def test_the_kill_path_stands_down_on_a_complete_iteration(self):
         # v0.14.9: the completion landed (record final, step 6 — the rest
@@ -700,6 +841,323 @@ class LastResortCommitAsTheForkSeesIt(unittest.TestCase):
             "project-complete", LastResortCommit._git(self, "ls-tree", "-r", "--name-only", "HEAD"))
         self.assertIn("?? artifacts/project-complete.json",
                       LastResortCommit._git(self, "status", "--porcelain", "--untracked-files=all"))
+
+
+# ---------------------------------------------------------------------------
+# v0.18.0: the loop takes control back (design §2.2, fork F3)
+# ---------------------------------------------------------------------------
+#
+# Link [C] of the chain: the sentinel reached only a model that yielded, and
+# 31 of 31 timeouts since 2026-09-14 never observed it. At the take-control
+# point the watchdog now ends a turn that has not yielded (SIGTERM to the
+# claude process run-phase.sh names in artifacts/logs/claude.pid; probed in
+# scaffold-runner before it was built) and the loop lands what stands,
+# verify-gated. The stub below is shaped like the real thing: run-phase.sh
+# writes the pidfile and execs a "claude" that does some work and then never
+# yields. Red on v0.17.0: nothing ends the turn, the loop never gets control
+# back, and the session runs into its bound (the harness timeout).
+
+import importlib.util as _ilu  # noqa: E402
+
+_hspec = _ilu.spec_from_file_location("pk_boundary_harness_wd", Path(__file__).resolve().parent / "test_boundary_state.py")
+_H = _ilu.module_from_spec(_hspec)
+_hspec.loader.exec_module(_H)
+
+TAKE_CONTROL_RUN_PHASE = """#!/usr/bin/env bash
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+mkdir -p artifacts/logs
+PIDFILE="artifacts/logs/claude.pid"
+trap 'rm -f "$PIDFILE"' EXIT
+( echo "$BASHPID ${PHASEKIT_ITER:-manual}" > "$PIDFILE"; exec bash "$STUB_DIR/claude" ) 2>&1 | cat
+"""
+
+STUB_CLAUDE = """#!/usr/bin/env bash
+n=$(( $(cat "$STUB_DIR/calls" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$STUB_DIR/calls"
+echo "work the turn did before the deadline" >> src.txt
+# never yields: a long wait (its child detached from the loop's pipes; this
+# process stays the "claude" the pidfile names, as the real one does)
+sleep 120 >/dev/null 2>&1 </dev/null &
+echo $! > "$STUB_DIR/sleeper.pid"
+wait $!
+"""
+
+
+class TakeControl(unittest.TestCase):
+    def setUp(self):
+        self.repo = _H.Repo(squash=False)
+        self.addCleanup(self.repo.cleanup)
+        self.repo.write("scripts/run-phase.sh", TAKE_CONTROL_RUN_PHASE, executable=True)
+        (self.repo.stub / "claude").write_text(STUB_CLAUDE)
+        self.repo.git("add", "-A")
+        self.repo.git("commit", "-qm", "stub")
+        self.addCleanup(self._reap)
+
+    def _reap(self):
+        for pf in (self.repo.artifact("logs/claude.pid"), self.repo.stub / "sleeper.pid"):
+            if pf.exists():
+                try:
+                    os.kill(int(pf.read_text().split()[0]), 9)
+                except (OSError, ValueError):
+                    pass
+
+    def _run(self):
+        import time as _t
+        env = {
+            "PHASEKIT_SESSION_DEADLINE": str(int(_t.time()) + 25),
+            "PHASEKIT_WRAPUP_LEAD_SECONDS": "18",     # sentinel at T-18s, take-control at T-12s
+            "PHASEKIT_LASTRESORT_LEAD_SECONDS": "0",
+            "PHASEKIT_PACING_FLOOR_SECONDS": "1",
+            "PHASEKIT_ITER_RETRY": "1",               # a CLI retry WOULD be available
+            "MAX_ITERATIONS": "3",
+        }
+        return self.repo.run(env=env, timeout=45)
+
+    def test_a_turn_that_has_not_yielded_is_ended_at_take_control_and_the_loop_wraps_up_verified(self):
+        r = self._run()
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn("deadline watchdog: took control", out)
+        self.assertIn("Run wrapped up cleanly (take-control)", out)
+        self.assertIn("session wrap-up", self.repo.git("log", "-1", "--format=%s"))
+        self.assertIn("work the turn did", self.repo.git("show", "HEAD:src.txt"))
+        self.assertGreaterEqual(self.repo.verify_calls(), 1, "the wrap-up is verify-gated")
+        self.assertEqual(self.repo.porcelain(), [], "the turn's work landed; nothing is stranded")
+        wd = self.repo.artifact("logs/deadline-watchdog.log").read_text()
+        self.assertIn("took control at T-12s", wd, "a third of a short lead stays the model's (review round 2)")
+        ledger = json.loads(self.repo.artifact("logs/cost-ledger.json").read_text())
+        self.assertEqual(ledger["sessions"][-1]["exit"], "took-control")
+
+    def test_a_deadline_yield_is_not_retried_as_a_cli_failure(self):
+        r = self._run()
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        self.assertEqual(self.repo.calls(), 1, "the ended turn is not re-invoked\n" + out)
+        self.assertNotIn("retrying in continue mode", out)
+        self.assertNotIn("asking once for a verdict", out)
+
+
+STUB_CLAUDE_SILENT_THEN_STUCK = """#!/usr/bin/env bash
+n=$(( $(cat "$STUB_DIR/calls" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$STUB_DIR/calls"
+echo "work of call $n" >> src.txt
+if [ "$n" -ge 2 ]; then
+  sleep 120 >/dev/null 2>&1 </dev/null &
+  echo $! > "$STUB_DIR/sleeper.pid"
+  wait $!
+fi
+"""
+
+
+class TakeControlDuringTheVerdictRequest(TakeControl):
+    """Review round 2 (MAJOR): the turn ended at take-control was the
+    no-verdict retry's; the run ended exit 1 with a dirty tree."""
+
+    def setUp(self):
+        super().setUp()
+        (self.repo.stub / "claude").write_text(STUB_CLAUDE_SILENT_THEN_STUCK)
+
+    def test_a_turn_that_has_not_yielded_is_ended_at_take_control_and_the_loop_wraps_up_verified(self):
+        r = self._run()
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn("the verdict request's turn was ended", out)
+        self.assertEqual(self.repo.porcelain(), [], out)
+
+    def test_a_deadline_yield_is_not_retried_as_a_cli_failure(self):
+        r = self._run()
+        self.assertEqual(self.repo.calls(), 2, r.stdout + r.stderr)
+
+
+STUB_CLAUDE_LIGHT = r"""#!/usr/bin/env bash
+n=$(( $(cat "$STUB_DIR/calls" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$STUB_DIR/calls"
+if [ "$PHASEKIT_ITER" = light-review ]; then
+  sleep 1
+  echo '{"done": true, "summary": "light task done (reviewed)"}' > artifacts/project-complete.json
+  exit 0
+fi
+echo "work of the light build" >> src.txt
+echo '{"done": true, "summary": "light task done"}' > artifacts/project-complete.json
+sleep 120 >/dev/null 2>&1 </dev/null &
+echo $! > "$STUB_DIR/sleeper.pid"
+wait $!
+"""
+
+
+class TakeControlThenAFinishedReview(TakeControl):
+    """Review round 2 (MAJOR): after the BUILD turn was ended, a light review
+    that finished on its own was never landed (a sticky flag)."""
+
+    def setUp(self):
+        super().setUp()
+        (self.repo.stub / "claude").write_text(STUB_CLAUDE_LIGHT)
+
+    def _run(self):
+        import time as _t
+        return self.repo.run(env={
+            "PHASEKIT_SESSION_DEADLINE": str(int(_t.time()) + 40),
+            "PHASEKIT_WRAPUP_LEAD_SECONDS": "30",
+            "PHASEKIT_LASTRESORT_LEAD_SECONDS": "0",
+            "PHASEKIT_PACING_FLOOR_SECONDS": "1",
+            "PHASEKIT_ITERATION_MODE": "light",
+            "MAX_ITERATIONS": "3",
+        }, timeout=60)
+
+    def test_a_turn_that_has_not_yielded_is_ended_at_take_control_and_the_loop_wraps_up_verified(self):
+        r = self._run()
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn("took control", out)
+        self.assertIn("Run finished successfully.", out)
+        self.assertTrue(self.repo.tracked("artifacts/project-complete.json", "HEAD"), out)
+        self.assertIn("reviewed", self.repo.git("show", "HEAD:artifacts/project-complete.json"))
+
+    def test_a_deadline_yield_is_not_retried_as_a_cli_failure(self):
+        r = self._run()
+        self.assertEqual(self.repo.calls(), 2, r.stdout + r.stderr)   # the build turn + its review
+
+
+STUB_CLAUDE_REVIEW_STUCK = r"""#!/usr/bin/env bash
+n=$(( $(cat "$STUB_DIR/calls" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$STUB_DIR/calls"
+if [ "$PHASEKIT_ITER" = light-review ]; then
+  sleep 120 >/dev/null 2>&1 </dev/null &
+  echo $! > "$STUB_DIR/sleeper.pid"
+  wait $!
+  exit 0
+fi
+echo "work of the light build" >> src.txt
+jq -n '{done: true, summary: "light task done", closes: ["OLD-1"],
+        deferrals: [{item: "later", reason: "r", suggested_task: "t", key: "NEW-1"}]}' > artifacts/project-complete.json
+"""
+
+
+class TakeControlOfTheLightReview(TakeControl):
+    """Review round 3 (MAJOR): an ENDED review never lands the completion,
+    leaves no completion record at exit 0, and leaks none of its derived
+    state (the ledger, the evidence) into the wrap-up."""
+
+    def setUp(self):
+        super().setUp()
+        (self.repo.stub / "claude").write_text(STUB_CLAUDE_REVIEW_STUCK)
+
+    def _run(self):
+        import time as _t
+        return self.repo.run(env={
+            "PHASEKIT_SESSION_DEADLINE": str(int(_t.time()) + 25),
+            "PHASEKIT_WRAPUP_LEAD_SECONDS": "18",
+            "PHASEKIT_LASTRESORT_LEAD_SECONDS": "0",
+            "PHASEKIT_PACING_FLOOR_SECONDS": "1",
+            "PHASEKIT_ITERATION_MODE": "light",
+            "MAX_ITERATIONS": "3",
+        }, timeout=60)
+
+    def test_a_turn_that_has_not_yielded_is_ended_at_take_control_and_the_loop_wraps_up_verified(self):
+        r = self._run()
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn("the light review's turn was ended before it finished", out)
+        self.assertIn("session wrap-up", self.repo.git("log", "-1", "--format=%s"))
+        self.assertIn("work of the light build", self.repo.git("show", "HEAD:src.txt"))
+        tracked = self.repo.git("ls-tree", "-r", "--name-only", "HEAD").splitlines()
+        self.assertNotIn("artifacts/project-complete.json", tracked)
+        self.assertNotIn("artifacts/deferrals.json", tracked, "no derived state from an unlanded record")
+        self.assertFalse(self.repo.artifact("project-complete.json").exists(), "no completion on disk at exit 0")
+
+    def test_a_deadline_yield_is_not_retried_as_a_cli_failure(self):
+        r = self._run()
+        self.assertEqual(self.repo.calls(), 2, r.stdout + r.stderr)
+
+
+class TakeControlThenARedLanding(TakeControlThenAFinishedReview):
+    """Review round 9 (MAJOR): after a take-control the landing went red and
+    the wrap-up gated the same work again with no turn between — a second
+    breaker attempt (light mode: phase-blocked.json with zero repair turns)."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo.write("scripts/phasekit-verify.sh", _H.VERIFY_LOGGING, executable=True)
+        self.repo.write("BAD", "red\n")
+        self.repo.git("add", "-A")
+        self.repo.git("commit", "-qm", "a red gate")
+
+    def test_a_turn_that_has_not_yielded_is_ended_at_take_control_and_the_loop_wraps_up_verified(self):
+        r = self._run()
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        self.assertEqual(self.repo.verify_calls(), 1, out)
+        self.assertIn("not re-running it; the red stands", out)
+        self.assertFalse(self.repo.artifact("phase-blocked.json").exists(), out)
+        self.assertIn("UNVERIFIED", out)
+
+    def test_a_deadline_yield_is_not_retried_as_a_cli_failure(self):
+        r = self._run()
+        self.assertEqual(self.repo.calls(), 2, r.stdout + r.stderr)
+
+
+class TakeControlThenARedContractsGate(TakeControlThenAFinishedReview):
+    """Review round 10 (MAJOR): the contracts gate's red returned before the
+    loop recorded the red, so the wrap-up after a take-control re-gated the
+    same tree with no turn between (breaker 2: phase-blocked.json)."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo.write("scripts/phasekit-verify.sh", _H.VERIFY_LOGGING, executable=True)
+        # A declared contracts.yaml with no checker: the gate refuses (v0.7.1).
+        self.repo.write("contracts.yaml", "depends_on: []\n")
+        self.repo.git("rm", "-q", "--cached", "--ignore-unmatch", "scripts/phasekit-contracts.py")
+        for c in pathlib.Path(self.repo.repo).glob("scripts/phasekit-contracts.py"):
+            c.unlink()
+        self.repo.git("add", "-A")
+        self.repo.git("commit", "-qm", "declare contracts")
+
+    def test_a_turn_that_has_not_yielded_is_ended_at_take_control_and_the_loop_wraps_up_verified(self):
+        r = self._run()
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn("not re-running it; the red stands", out)
+        self.assertFalse(self.repo.artifact("phase-blocked.json").exists(), out)
+
+    def test_a_deadline_yield_is_not_retried_as_a_cli_failure(self):
+        r = self._run()
+        self.assertEqual(self.repo.calls(), 2, r.stdout + r.stderr)
+
+
+class CostLine(unittest.TestCase):
+    def test_light_mode_keeps_a_window_before_the_build_turn_is_ended(self):
+        # Review round 2 (MAJOR): the build turn was ended the same second the
+        # sentinel armed whenever the cap bound.
+        repo = _H.Repo(squash=False)
+        self.addCleanup(repo.cleanup)
+        repo.write("scripts/phasekit-verify.sh", _H.VERIFY_LOGGING, executable=True)
+        import time as _t
+        r = repo.run(env={"PHASEKIT_SESSION_DEADLINE": str(int(_t.time()) + 3600), "MAX_ITERATIONS": "1",
+                          "PHASEKIT_ITERATION_MODE": "light"})
+        armed = [ln for ln in r.stdout.splitlines() if ln.startswith("deadline watchdog: armed")][0]
+        lead = int(re.search(r"sentinel at T-(\d+)s", armed).group(1))
+        build = int(re.search(r"build turn T-(\d+)s", armed).group(1))
+        self.assertLessEqual(build, lead - 60, armed)
+
+    def test_every_armed_session_prints_the_cost_line_and_the_take_control_point(self):
+        repo = _H.Repo(squash=False)
+        self.addCleanup(repo.cleanup)
+        import time as _t
+        r = repo.run(env={"PHASEKIT_SESSION_DEADLINE": str(int(_t.time()) + 7200), "MAX_ITERATIONS": "1"})
+        out = r.stdout
+        armed = [ln for ln in out.splitlines() if ln.startswith("deadline watchdog: armed")]
+        self.assertEqual(len(armed), 1, out)
+        self.assertRegex(armed[0], r"sentinel at T-\d+s, last-resort commit at T-60s \(span \d+s\), take control at T-\d+s")
+        cost = [ln for ln in out.splitlines() if ln.startswith("phasekit-cost: {")]
+        self.assertEqual(len(cost), 1, out)
+        line = json.loads(cost[0][len("phasekit-cost: "):])
+        for key in ("bound_s", "lead_s", "take_control_s", "lead_uncapped_s", "lead_cap_s",
+                    "at_cap", "heavy", "heavy_in_previous_4", "p90_s", "samples"):
+            self.assertIn(key, line)
+        self.assertEqual(line["lead_cap_s"], line["bound_s"] * 25 // 100)
+        self.assertFalse(line["heavy"], "priors are never evidence that a suite is too heavy")
 
 
 if __name__ == "__main__":

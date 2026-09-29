@@ -114,6 +114,46 @@ class HookFixture(unittest.TestCase):
         result = self.run_hook()
         self.assertEqual(result.returncode, NUDGE)
 
+    # -- per agent (v0.18.0) ---------------------------------------------------
+
+    def run_payload(self, payload, **overrides):
+        return subprocess.run(["bash", str(HOOK)], input=json.dumps(payload), capture_output=True,
+                              text=True, timeout=30, env=self.env(**overrides))
+
+    def test_a_subagent_cannot_spend_the_main_agents_nudge(self):
+        # xmeo run 999: a code-review subagent received the nudge, called it
+        # "a stale hook artifact", and the once-marker then kept the MAIN
+        # agent from ever hearing it. The harness names a subagent's calls
+        # (agent_id in the payload; probed in scaffold-runner, 2026-09-28).
+        # Red on v0.17.0: one marker for every agent.
+        self.sentinel.touch()
+        sub = self.run_payload({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                "agent_id": "a792fdc7043f0daaf", "agent_type": "general-purpose"})
+        self.assertEqual(sub.returncode, NUDGE)
+        main = self.run_payload({"hook_event_name": "PreToolUse", "tool_name": "Bash"})
+        self.assertEqual(main.returncode, NUDGE, "the main agent still hears its own nudge")
+        again = self.run_payload({"hook_event_name": "PreToolUse", "tool_name": "Bash"})
+        self.assertEqual(again.returncode, QUIET, "the refusal stays once per agent")
+        self.assertTrue((self.artifacts / ".wrapup-nudge-sent").exists(), "the main agent's marker")
+        self.assertTrue((self.artifacts / "logs" / ".wrapup-nudge-sent.a792fdc7043f0daaf").exists())
+
+    def test_post_tool_use_repeats_at_most_once_a_minute_pre_tool_use_never(self):
+        self.sentinel.touch()
+        post = {"hook_event_name": "PostToolUse", "tool_name": "Bash"}
+        self.assertEqual(self.run_payload(post).returncode, NUDGE)
+        self.assertEqual(self.run_payload(post).returncode, QUIET, "not within the minute")
+        last = self.artifacts / "logs" / ".wrapup-nudge-last.main"
+        past = time.time() - 61
+        os.utime(last, (past, past))
+        self.assertEqual(self.run_payload({"hook_event_name": "PreToolUse"}).returncode, QUIET)
+        self.assertEqual(self.run_payload(post).returncode, NUDGE, "a minute later, feedback again")
+
+    def test_the_nudge_names_the_close_out_order(self):
+        self.sentinel.touch()
+        result = self.run_hook()
+        self.assertIn("phasekit.sh verify", result.stderr)
+        self.assertLess(result.stderr.index("Write your verdict"), result.stderr.index("phasekit.sh verify"))
+
     def test_custom_sentinel_path_is_honoured(self):
         custom = self.tmp / "elsewhere"
         custom.touch()
@@ -187,6 +227,9 @@ class RegistrationSync(unittest.TestCase):
         marker_rm = source.index('rm -f "$ARTIFACTS_DIR/.wrapup-nudge-sent"')
         self.assertLess(abs(marker_rm - counter_rm), 600,
                         "the two hook budgets should share one clearing site")
+        # v0.18.0: the per-subagent markers and repeat clocks, same site
+        agents_rm = source.index('rm -f "$ARTIFACTS_DIR"/logs/.wrapup-nudge-*')
+        self.assertLess(abs(agents_rm - marker_rm), 300)
 
 
 if __name__ == "__main__":

@@ -77,6 +77,12 @@ fixed-timestep loop, seedable randomness, and a unit-tested core.
 - Rendering and input are verified in a real browser at phase boundaries
   (qa-playwright), not in the pre-commit gate.
 
+- Tests are hermetic: a test reads the tree and declared fixtures, never git
+  history (no `git log`/`rev-list`/`show <rev>:`/`blame` of this repository).
+  A fact about a past phase is an evidence file — phasekit commits
+  `artifacts/iterations/<N>/<phase>.json` at every phase close — or a golden
+  file (docs/QUALITY_GATES.md "Hermetic tests").
+
 ## Quality bar
 
 - The pre-commit gate (`scripts/phasekit-verify.sh`) runs unit tests, the

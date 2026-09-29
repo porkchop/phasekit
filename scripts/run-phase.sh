@@ -77,7 +77,15 @@ if [[ -n "${ANTHROPIC_MODEL:-}" ]]; then
   CLAUDE_FLAGS+=(--model "$ANTHROPIC_MODEL")
 fi
 
-claude "${CLAUDE_FLAGS[@]}" -p "$PROMPT_CONTENT" 2>&1 \
+# The model process's pid, for the loop's deadline watchdog (v0.18.0): at the
+# take-control point it ends a turn that has not yielded (SIGTERM to exactly
+# this process — `exec` makes the subshell's pid claude's). "<pid> <role>",
+# role = PHASEKIT_ITER (a pass number, or light-review). Removed when the
+# turn ends; the watchdog also checks the pid is alive and is claude.
+PIDFILE="$LOG_DIR/claude.pid"
+trap 'rm -f "$PIDFILE"' EXIT
+( echo "$BASHPID ${PHASEKIT_ITER:-manual}" > "$PIDFILE"
+  exec claude "${CLAUDE_FLAGS[@]}" -p "$PROMPT_CONTENT" ) 2>&1 \
   | tee "$RAW_LOG" \
   | "${FORMAT_CMD[@]}" \
   | tee "$LOG_FILE"

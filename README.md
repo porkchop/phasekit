@@ -83,6 +83,8 @@ phasekit upgrade --yes          # apply scaffold updates
 phasekit upgrade --keep-local docs/X.md   # preserve specific project edits
 phasekit channel [name]         # show/set self-update channel (stable|edge|<ref>)
 phasekit self-update            # move the phasekit install along its channel
+phasekit verify                 # run this project's gate exactly as the loop's commit will (a green run is reused)
+phasekit scope [--phase P]      # what this iteration (or one phase) changed, from its base and evidence
 ```
 
 Anything the engine supports is still available in raw-flag form (forwarded verbatim), which also lets you target a project by path from anywhere:

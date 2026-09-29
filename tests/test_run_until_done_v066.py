@@ -50,7 +50,7 @@ class LoopV066StructuralTest(unittest.TestCase):
 
     def test_post_verify_gates_shared_by_both_commit_paths(self) -> None:
         self.assertIn("post_verify_commit_gates() {", self.text)
-        self.assertIn("post_verify_commit_gates iteration", self._fn("commit_from_artifact"))
+        self.assertIn("post_verify_commit_gates iteration", self._fn("_commit_from_artifact"))
         self.assertIn("post_verify_commit_gates wrapup", self._fn("wrapup_commit"))
 
     def test_learnings_scan_single_source(self) -> None:
@@ -63,7 +63,7 @@ class LoopV066StructuralTest(unittest.TestCase):
         self.assertIn("staged_touches_security_pair() {", self.text)
         pair_re = r"^\.claude/settings\.json$|^\.github/workflows/"
         self.assertEqual(self.text.count(pair_re), 1)
-        self.assertIn("staged_touches_security_pair", self._fn("commit_from_artifact"))
+        self.assertIn("staged_touches_security_pair", self._fn("_commit_from_artifact"))
         self.assertIn("staged_touches_security_pair", self._fn("wrapup_commit"))
 
     def test_heal_restaged_after_add_a(self) -> None:

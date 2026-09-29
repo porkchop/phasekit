@@ -11,6 +11,10 @@
 #   phasekit channel [name]       show or set the self-update channel (stable|edge|<ref>)
 #   phasekit self-update          move this phasekit clone along its channel
 #   phasekit roadmap next|done|init  the OPTIONAL docs/ROADMAP.md (see scripts/phasekit-roadmap.py)
+#   phasekit verify [--tier fast|full]  run THIS project's gate exactly as the loop's
+#                                 commit gate will; a green verdict is reused by it
+#   phasekit scope [--iteration N] [--phase P] [--json]
+#                                 what this iteration (or one phase) changed
 #
 # Anything else is forwarded verbatim to the engine, so the raw flag form
 # still works for any flag enrich-project.py supports:
@@ -121,6 +125,19 @@ case "$verb" in
     ;;
   self-update)
     self_update
+    ;;
+  verify|scope)
+    # Model-facing (v0.18.0): run by the PROJECT's own loop code — the copy of
+    # scripts/run-until-done.sh in the repository the command is run from —
+    # so the gate, the staging and the facts are that project's, exactly as
+    # its loop runs them.
+    shift
+    project_root="$(git rev-parse --show-toplevel 2>/dev/null)" || project_root=""
+    if [[ -z "$project_root" || ! -f "$project_root/scripts/run-until-done.sh" ]]; then
+      echo "phasekit $verb: run it inside a phasekit project (no scripts/run-until-done.sh at ${project_root:-this directory})" >&2
+      exit 2
+    fi
+    exec bash "$project_root/scripts/run-until-done.sh" "$verb" "$@"
     ;;
   roadmap)
     shift

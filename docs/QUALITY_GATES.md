@@ -160,6 +160,31 @@ iteration's change-request) that a session decides not to implement is a
   deserves its own iteration. Deferring *silently* is not: absence of the
   field claims "everything in scope shipped."
 
+### The deferral ledger (v0.18.0)
+
+A verdict record describes **this iteration only** — never copy a previous
+record forward, never rebuild one from an archive:
+
+- `deferrals` lists the entries **opened** in this iteration (or phase);
+- `closes` lists the **keys** of open entries this iteration closed.
+
+The loop keeps the open set in `artifacts/deferrals.json` (committed,
+tool-maintained, never hand-edited): at every approval-class landing it
+upserts the record's entries by key and removes the `closes` keys, and it
+writes the full open set into the committed completion record's `deferrals`
+— so a supervisor reads exactly the set copy-forward used to produce. An
+entry copied forward out of habit does no harm: merged by key, it is
+"unchanged", not new. The ledger's first composition seeds itself from the
+last committed completion record. To close a deferral, name its key in
+`closes`; dropping an entry from `deferrals` does not close it.
+
+The loop also stamps the facts it owns into the record at landing —
+`iteration` (the supervisor's; a record naming another iteration is
+corrected, and says so), `base` (the commit the iteration started from) and,
+on a completion record, `final_phase` and `recorded_by` when absent — and
+generates the commit subject's `iteration N phase P:` prefix from the record
+(write only the prose; a stale prefix is corrected, never refused).
+
 ## Verification sprint gate
 Before starting a phase that builds on a completed user-visible or end-to-end foundation, run a full verification of the cumulative system to confirm prior work still functions:
 - run the complete test suite (unit, integration, and browser/E2E when applicable)
@@ -400,7 +425,7 @@ whether their tests *discriminate* (as opposed to merely execute) can enable the
 `scripts/mutation-run.py`. It is a scalpel for phases that add guards, filters,
 detectors or fail-open paths — not a per-iteration ritual.
 
-### Verify budget (v0.6.4)
+### Verify budget (v0.6.4; measured since v0.18.0)
 
 The gate's speed is part of its correctness. Verify runs before *every* phase commit — often several times per session — so its wall time multiplies directly into session productivity: a suite that quietly grows past its budget turns build sessions into no-commit sessions (the motivating case burned three consecutive sessions on a suite that had grown to ~83s).
 
@@ -412,9 +437,23 @@ The gate's speed is part of its correctness. Verify runs before *every* phase co
   - **Completion runs full:** when `artifacts/project-complete.json` exists, verify runs the complete suite — a project never reaches "done" on the fast tier alone. (Quality decision 2026-08-13: fast tier per-commit; full suite at the sprint AND at completion.)
 - Splitting governs **when** tests run, never **whether**. A test that no gate ever runs has been deleted, not split.
 
-The loop watches for this drift mechanically: when verify exceeds the ceiling on 2+ runs in one session, it prints a one-line advisory pointing here. The advisory is fail-open — it never blocks a commit and never edits the project's gate (the v0.5.0 keep-local guarantee: phasekit never rewrites a configured `scripts/phasekit-verify.sh`).
+The loop watches for this drift mechanically. Under a supervisor's session bound (v0.18.0) the check is **measured**: the loop keeps a cost ledger (`artifacts/logs/cost-ledger.json`) of every gate run per tier, and once per session it prints an advisory when the full tier's P90 exceeds **12.5% of the session bound** — the landing no longer fits its session (fork F4; the supervisor turns two such sessions out of five into one delegated work request to split the suite, never a wider lead and never a longer bound). Standalone, the fixed ceiling above applies: verify over it on 2+ runs in one session prints the advisory. Either way the advisory is fail-open — it never blocks a commit and never edits the project's gate (the v0.5.0 keep-local guarantee: phasekit never rewrites a configured `scripts/phasekit-verify.sh`).
+
+**Run the full tier once (v0.18.0).** Close-out used to run the full suite up to three times — the model's own run, the light review's, the commit gate's. `bash scripts/phasekit.sh verify` runs the gate **exactly as the commit gate will** (same verdict preparation, same staging, the contracts gate, the footprint, the memo) and records the verify memo for the exact tree; a turn that then ends with nothing changed has its commit **reuse** that green verdict. The order: memory writes first, then the verdict/record, then `phasekit verify`, then end the turn. The tier is the doctrine's — full exactly when `artifacts/project-complete.json` exists — so in light mode the builder runs it before writing the record (fast) and the reviewer after (full). A red `phasekit verify` spends no breaker attempt. Running `scripts/phasekit-verify.sh` directly still works; it is simply not reused.
 
 **The verify memo (v0.14.5).** A green gate records the exact tree it ran on (`git write-tree`), the tier (full when `artifacts/project-complete.json` exists, fast otherwise) and the command, in `artifacts/boundary-state.json`. A later gate on the *same* tree with the same command — the squash caught up at a boundary, the completion commit after an approval commit — reuses the verdict instead of re-running (two consecutive sessions once spent their whole bound re-running a tier the tree had already passed). A new tree always runs; a fast-tier memo never satisfies a full-tier gate; a changed command never matches; the cross-project contracts gate always runs; a memo older than `PHASEKIT_VERIFY_MEMO_TTL_SECONDS` (default one day) is not honoured. A RED verdict is memoised the same way, and honoured only by the loop-start recovery (no gate has run since it was recorded; at most one model turn is spent before the in-loop retry runs the gate for real), so an approval a red wrap-up stranded is answered at zero cost and spends no breaker attempt; every gate after a model turn runs and counts, so the breaker still bounds a session and a fix made outside the tree is seen. The boundary of this trust: the memo sees the tracked tree only; a gate whose verdict depends on ignored files, the container image or unpinned dependencies can change verdict on the same tree, which is what the TTL bounds. Splitting still governs *when* tests run, never *whether*.
+
+### Hermetic tests (v0.18.0)
+
+**A test reads the current tree and declared fixtures, never git history.** No `git log`, `rev-list`, `show <rev>:`, `blame` or `diff <rev>` of the project's own repository from a test; a fact about the past is an **evidence file** — the one phasekit writes at every phase close, `artifacts/iterations/<N>/<phase>.json` (what the phase changed since the previous close: path, status and the sha256 of the content at close), or a golden file the project commits itself.
+
+Why: a test that finds "the phase 177 commit" by subject silently compares against the wrong tree the day a subject is wrong — xmeo's 55 scope suites did, after a copy-forward record committed iteration 88's work under iteration 87's subject. History is not an input a test declares; the tree is.
+
+- "Phase 177 must leave `demo/` unmoved": compare the tree's bytes against the evidence file's `changed` (or its absence from it), not against `git show <phase commit>:demo/…`.
+- "What did this iteration change" for a *session* (not a test): `bash scripts/phasekit.sh scope [--phase P] [--json]` — it reads git so tests do not have to.
+- A test that builds its OWN scratch repository and runs git inside it is hermetic; the rule is about the project's history.
+
+The rule is adopted, not enforced (Bazel enforces it by hiding `.git`; enforcement here would refuse, and a refusal is a stall). After the gate, the loop prints once per session: `ADVISORY: N test files appear to read git history (…first 5…)` — never a red gate, never a row.
 
 ### Stack profiles seed a real gate (v0.5.0)
 

@@ -62,15 +62,15 @@
       "read_by": ["scripts/run-until-done.sh"],
       "default": "180",
       "container_forwarded": false,
-      "semantics": "Minimum remaining-time threshold for deadline pacing; no new iteration starts when less than max(this, 1.2 x average pass duration) remains before PHASEKIT_SESSION_DEADLINE. Non-numeric values fall back to the default."
+      "semantics": "Minimum remaining-time threshold for deadline pacing; no new iteration starts when less than max(this, 1.2 x average pass duration this session, the cost ledger's pass P90) remains before PHASEKIT_SESSION_DEADLINE — the two estimates apply once a pass has completed (a session is never refused its first pass). The one copy of the 180 s default: a supervisor that needs it reads it here. Non-numeric values fall back to the default."
     },
     {
       "name": "PHASEKIT_WRAPUP_LEAD_SECONDS",
       "kind": "consumed",
       "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh"],
-      "default": "unset — computed as 15% of the session span, clamped to [300, 900]; a span too short for that lead gets half its span",
+      "default": "unset — measured (v0.18.0): L = T_y + M (+ R in light mode), T_y = G_full + W + 60 s, every term the P90 of the cost ledger (artifacts/logs/cost-ledger.json; priors G_full 300 s, G_fast 60 s, W 60 s, M = G_full + 120 s, R = G_full + 300 s on an empty ledger), clamped to [300 s, 25% of the span]; where 25% is under 300 s (a span under 20 minutes) half the span stands in",
       "container_forwarded": true,
-      "semantics": "Seconds before PHASEKIT_SESSION_DEADLINE at which the loop's own deadline watchdog self-arms the wrap-up sentinel (v0.13.0) — the supervisor's touch stays idempotent with it. 0 disables self-arming (supervisor-only). Ignored when no deadline is set."
+      "semantics": "Seconds before PHASEKIT_SESSION_DEADLINE at which the loop's own deadline watchdog self-arms the wrap-up sentinel (v0.13.0) — the supervisor's touch stays idempotent with it. When set it REPLACES the measured lead verbatim, and the take-control lead is capped by it; 0 disables both self-arming and take-control (supervisor-only). A published knob for standalone use — a supervisor reads the lead in force from the `deadline watchdog: armed` line instead of setting it. Ignored when no deadline is set."
     },
     {
       "name": "PHASEKIT_LASTRESORT_LEAD_SECONDS",
@@ -78,7 +78,7 @@
       "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh"],
       "default": "60",
       "container_forwarded": true,
-      "semantics": "Seconds before PHASEKIT_SESSION_DEADLINE at which the deadline watchdog makes the last-resort strand commit (v0.13.0): if the tree is dirty it restores ready-to-deploy.json and project-complete.json to HEAD where HEAD carries them (an unverified mid-build artifact must never arm a deploy seam off a strand; an untracked ready-to-deploy.json is deleted; v0.14.7: an untracked project-complete.json is left on disk unstaged — never deleted, never committed by the strand — for the next loop start's verify-gated landing), refreshes the dead-man baton, and commits --no-verify with transients unstaged. 0 disables. Ignored when no deadline is set."
+      "semantics": "Seconds before PHASEKIT_SESSION_DEADLINE at which the deadline watchdog makes the last-resort strand commit (v0.13.0): if the tree is dirty it keeps ready-to-deploy.json and project-complete.json OUT of the commit — v0.18.0: unstaged, never rewritten, never deleted (the commit carries HEAD's copies; the session's stay on disk for the next loop start's verify-gated landing; a torn copy is deleted, or restored to HEAD where HEAD tracks it) — refreshes the dead-man baton, and commits --no-verify with transients unstaged and Phasekit-* trailers (Phasekit-Kind: wip). A take-control lead at or inside this one is dropped (the last-resort commit is the next stage anyway). 0 disables. Ignored when no deadline is set."
     },
     {
       "name": "PHASEKIT_SQUASH_TARGET",
@@ -118,7 +118,7 @@
       "read_by": ["scripts/run-until-done.sh"],
       "default": "60",
       "container_forwarded": false,
-      "semantics": "Seconds above which one verify run counts as over budget; after two such runs the loop prints a one-time fail-open advisory suggesting a fast tier. Non-numeric values fall back to the default."
+      "semantics": "STANDALONE only since v0.18.0 (no PHASEKIT_SESSION_DEADLINE): seconds above which one verify run counts as over budget; after two such runs the loop prints a one-time fail-open advisory suggesting a fast tier. Under a session bound the advisory is measured instead — once per session when the full tier's P90 in the cost ledger exceeds 12.5% of the bound. Non-numeric values fall back to the default."
     },
     {
       "name": "VERIFY_SKIP",
@@ -390,6 +390,15 @@
       "semantics": "Path of the loop's iteration-start marker file (a mktemp path, touched before every claude invocation); the Stop hook only counts verdict artifacts newer than it."
     },
     {
+      "name": "PHASEKIT_ENV_KEY",
+      "kind": "exported",
+      "read_by": ["scripts/run-until-done.sh"],
+      "set_by": ["scripts/run-until-done.sh"],
+      "default": "a random per-session value the loop generates and exports before any turn",
+      "container_forwarded": false,
+      "semantics": "v0.18.0, internal: the key of the loop's hashed environment snapshot (artifacts/logs/.loop-env, names and keyed value hashes, never values), which a model's `phasekit verify` compares its own environment with before its verdict may be reused by the commit gate. Never set it; never forward it."
+    },
+    {
       "name": "PHASEKIT_ITER",
       "kind": "both",
       "read_by": ["scripts/run-phase.sh"],
@@ -462,12 +471,12 @@
       "path": "artifacts/phase-approval.json",
       "writers": ["session"],
       "consumers": ["scripts/run-until-done.sh", "scripts/enrich-project.py", ".claude/hooks/compact-reanchor.sh", "supervisor"],
-      "lifecycle": "durable — committed with the phase, deliberately never deleted by iteration cleanup",
+      "lifecycle": "durable — committed with the phase, deliberately never deleted by iteration cleanup; v0.18.0: stamped by the loop at landing like project-complete.json (`iteration` written or corrected, `base`); its `deferrals` (entries opened) and `closes` (keys closed) are applied to artifacts/deferrals.json but the approval itself keeps them as written; its landing writes the phase-close evidence artifacts/iterations/<N>/<phase>.json into the same commit; a refused landing leaves it unstaged, never staged",
       "verdict": true,
       "transient_signal": false,
       "hidden": false,
-      "when": "Written by the Claude session at the end of a phase to approve it; the loop commits it (freshness-gated against the iteration-start marker). v0.14.5: an optional 'final_phase': true names it the project's last approval — the loop then records artifacts/project-complete.json itself (derived: summary + deferrals carried, provenance named) when the session has not written one, so 'approved but unrecorded' cannot survive a kill. Every 'deferrals' entry is committed with a stable 'key' (explicit, else the cited AC#n, else a slug of the item's first words — never a hash); a keyless entry with no item text stays keyless with a WARN and is dropped by the supervisor's reader. v0.14.7: an optional 'iteration' (the fleet convention: the string 'iteration-<N>' the supervisor's change request names) is carried verbatim into the project-complete.json the loop synthesizes from a final approval; the loop never invents one.",
-      "keys": ["phase", "approved", "summary", "suggested_commit_message", "deferrals", "final_phase", "iteration"]
+      "when": "Written by the Claude session at the end of a phase to approve it; the loop commits it (freshness-gated against the iteration-start marker). v0.14.5: an optional 'final_phase': true names it the project's last approval — the loop then records artifacts/project-complete.json itself (derived: summary + deferrals carried, provenance named) when the session has not written one, so 'approved but unrecorded' cannot survive a kill. Every 'deferrals' entry is committed with a stable 'key' (explicit, else the cited AC#n, else a slug of the item's first words — never a hash); an entry the loop cannot key (no key, no AC number, no ASCII words in the item) stays keyless with a WARN — it stays in its record as written but cannot enter the v0.18.0 deferral ledger. v0.14.7: an optional 'iteration' (the fleet convention: the string 'iteration-<N>' the supervisor's change request names) is carried into the project-complete.json the loop synthesizes from a final approval. v0.18.0: the loop STAMPS 'iteration' from the supervisor's artifacts/iteration-mode.json — written when absent, corrected when the record names another iteration (never in a standalone run, where the approval's own value stands).",
+      "keys": ["phase", "approved", "summary", "suggested_commit_message", "deferrals", "final_phase", "iteration", "base", "closes"]
     },
     {
       "name": "phase-update.json",
@@ -486,12 +495,12 @@
       "path": "artifacts/project-complete.json",
       "writers": ["session", "scripts/run-until-done.sh"],
       "consumers": ["scripts/run-until-done.sh", "scripts/enrich-project.py", "supervisor"],
-      "lifecycle": "durable — committed as the project's completion record; deleted at each iteration start until real. v0.14.5: the loop itself writes it (recorded_by names the step) when the landed approval carries final_phase: true and the session left none. v0.14.7: that synthesized record carries 'iteration' verbatim from the approval (null when the approval names none — the key is always present), so a supervisor can resolve which iteration it closes; and the deadline watchdog's last-resort commit never deletes a session-authored copy HEAD does not carry — it stays on disk, uncommitted, for the next loop start's verify-gated landing — kept only when it parses as a JSON object (a torn file from an interrupted writer is deleted as before); an untracked ready-to-deploy.json is still deleted: a deploy claim no landing step owns",
+      "lifecycle": "durable — committed as the project's completion record; deleted at each iteration start until real. v0.14.5: the loop itself writes it (recorded_by names the step) when the landed approval carries final_phase: true and the session left none. v0.14.7: that synthesized record carries 'iteration' verbatim from the approval (null when the approval names none — the key is always present), so a supervisor can resolve which iteration it closes; and the deadline watchdog's last-resort commit never deletes a session-authored copy HEAD does not carry — it stays on disk, uncommitted, for the next loop start's verify-gated landing — kept only when it parses as a JSON object (a torn file from an interrupted writer is deleted as before); an untracked ready-to-deploy.json is still deleted: a deploy claim no landing step owns. v0.18.0: the loop STAMPS it at landing (never refusing — fork F5): `iteration` (the supervisor's, written when absent and corrected when the record names another), `base` (the commit the iteration started from), `final_phase` (this iteration's approval phase, when absent) and `recorded_by` (when absent); its `deferrals` are COMPOSED — the session lists only the entries it opened (`deferrals`) and the keys it closed (`closes`), the loop applies both to artifacts/deferrals.json and writes the full open set back here, so a reader sees the same set copy-forward produced. A completion whose landing is REFUSED (red gate, a refusing commit gate) is carried: unstaged, kept on disk (`??` or ` M`, never `AD`), claiming nothing until the session re-writes it; the next iteration's cleanup leaves it for the repair turn to edit",
       "verdict": true,
       "transient_signal": false,
       "hidden": false,
       "when": "Written by the session when every phase is approved and acceptance criteria are met; in light mode it must survive an adversarial final review to count. Its presence after the final commit is the loop's exit-0 signal.",
-      "keys": ["summary", "suggested_commit_message", "deferrals", "done", "final_phase", "iteration", "recorded_by", "ts"]
+      "keys": ["summary", "suggested_commit_message", "deferrals", "done", "final_phase", "iteration", "recorded_by", "ts", "base", "closes"]
     },
     {
       "name": "phase-blocked.json",
@@ -534,7 +543,7 @@
       "path": "artifacts/ready-to-deploy.json",
       "writers": ["session"],
       "consumers": ["supervisor"],
-      "lifecycle": "durable — committed inside the iteration's work",
+      "lifecycle": "durable — committed inside the iteration's work; v0.18.0: never rewritten or deleted by an UNVERIFIED commit path (the watchdog's last-resort commit, the wrap-up fall-through, the gate-pending index commit) — it is unstaged, so the wip carries HEAD's copy and the worktree keeps the session's, which the next verify-gated landing stages with the rest of its coherent tree (a torn copy is deleted, or restored to HEAD where HEAD tracks it). A claim HEAD does not carry byte-for-byte is not a verified claim; a supervisor publishes only one HEAD carries",
       "verdict": false,
       "transient_signal": false,
       "hidden": false,
@@ -623,7 +632,7 @@
       "transient_signal": false,
       "hidden": false,
       "internal": true,
-      "when": "claude-iter-N[-retryM].jsonl (raw stream-json + stderr) and .log (rendered via phasekit-log-fmt.sh) per claude invocation.",
+      "when": "claude-iter-N[-retryM].jsonl (raw stream-json + stderr) and .log (rendered via phasekit-log-fmt.sh) per claude invocation. v0.18.0: also cost-ledger.json (the per-project cost model: the last 20 samples per measure — g_full, g_fast, w, m, r, pass — and the last 20 sessions with bound, lead, take-control, at_cap, heavy, exit yielded|took-control|killed; persists across sessions, read by the loop only — a supervisor reads the `phasekit-cost:` line), .deadline-yield (written when the watchdog takes control of a turn; the loop reads it; cleared at loop start), .loop-env (the loop's environment as names and truncated value hashes, never values, for `phasekit verify`'s reuse check; removed at exit), .carried-completion (the carry marker of a completion record whose landing was refused), claude.pid (\"<pid> <role>\" of the model turn in flight, written by run-phase.sh and removed when the turn ends — the deadline watchdog's take-control target), the per-subagent nudge markers and repeat clocks (.wrapup-nudge-*), and lock/tmp files of the loop's records.",
       "keys": []
     },
     {
@@ -649,12 +658,12 @@
         ".claude/hooks/wrapup-nudge.sh",
         "scripts/run-until-done.sh"
       ],
-      "lifecycle": "internal once-per-iteration marker (empty file); freshness against the iteration marker decides, and iteration cleanup deletes it beside .stop-hook-blocks; hidden from git status",
+      "lifecycle": "internal marker (empty file) of the MAIN agent's first wrap-up nudge this iteration — its mtime is when the nudge was delivered (the cost model's M); v0.18.0: a subagent's marker is artifacts/logs/.wrapup-nudge-sent.<agent_id> (the harness names subagents in the hook payload), so a subagent never spends the main agent's nudge; freshness against the iteration marker decides, and iteration cleanup deletes them all beside .stop-hook-blocks; hidden from git status",
       "verdict": false,
       "transient_signal": true,
       "hidden": true,
       "internal": true,
-      "when": "The wrapup-nudge hook's once-per-iteration bookkeeping. Do not rely on it.",
+      "when": "The wrapup-nudge hook's per-agent, once-per-iteration bookkeeping (PreToolUse refuses once per agent; PostToolUse repeats at most once per 60 s per agent). Do not rely on it.",
       "keys": []
     },
     {
@@ -725,6 +734,30 @@
       "keys": ["iteration"]
     },
     {
+      "name": "deferrals.json",
+      "path": "artifacts/deferrals.json",
+      "writers": ["scripts/run-until-done.sh"],
+      "consumers": ["scripts/run-until-done.sh", "supervisor"],
+      "lifecycle": "v0.18.0: the OPEN deferrals, committed and tool-maintained (the changesets shape): at every approval-class landing the loop upserts the record's `deferrals` by key and removes its `closes` keys, and writes the full open set into the committed completion record. Seeded once from the last committed completion record. Never hand-edited; deterministic (no clock)",
+      "verdict": false,
+      "transient_signal": false,
+      "hidden": false,
+      "when": "Present once a v0.18.0 loop has landed an approval-class record. A supervisor may read `open` directly; the completion record's `deferrals` carry the same set.",
+      "keys": ["schema", "note", "open", "closed"]
+    },
+    {
+      "name": "iterations",
+      "path": "artifacts/iterations/<N>/<phase>.json",
+      "writers": ["scripts/run-until-done.sh", "supervisor"],
+      "consumers": ["session", "supervisor"],
+      "lifecycle": "v0.18.0: phase-close EVIDENCE, committed inside the landing it describes: at every approval landing of a supervised iteration the loop writes artifacts/iterations/<N>/<phase>.json (complete.json for a completion commit) — {schema, iteration, phase, base, since, changed: [{path, status, sha256}], note}, `changed` being what the phase changed since `since` (the target tip in branch-per-iteration, else the iteration's previous phase/completion commit, else the base) with the sha256 of each staged file. A test reads it instead of git history. The directory's top level is the supervisor's (Foundry archives `pre-iteration-<N>-project-complete.json` there); phasekit writes only the <N>/ subdirectories",
+      "verdict": false,
+      "transient_signal": false,
+      "hidden": false,
+      "when": "Written by the loop, never by a session; supervised iterations only (a standalone run has no iteration to file it under).",
+      "keys": ["schema", "iteration", "phase", "base", "since", "changed", "note"]
+    },
+    {
       "name": "boundary-state.json",
       "path": "artifacts/boundary-state.json",
       "writers": ["scripts/run-until-done.sh"],
@@ -734,8 +767,8 @@
       "transient_signal": true,
       "hidden": true,
       "internal": false,
-      "when": "A supervisor READS it instead of inferring 'done' from file presence and mtimes: step 7 with final true = the project's completion landed and HEAD rests; step 7 with final false = a phase boundary landed; step < 7 = the previous session ended mid-sequence (killed_after names the step the deadline watchdog observed at the kill, killed_mode 'kill' or 'wrapup'). sha_at_step maps '2','3','5','7' to the work-branch commit and '4' to the target tip that proved the step; verify_memo is the last GREEN gate {tree_sha (git write-tree), tier fast|full, label, command, passed_at} the loop reuses for the same tree; deploy records whether ready-to-deploy.json was present (and its mtime) when the boundary armed — the mtime rule stays the supervisor's; previous is the boundary that ended before the current idle record began (its final step, phase, final flag and shas), so 'what last landed' survives the next pass's reset. Steps 4-5 are proven trivially without PHASEKIT_SQUASH_TARGET. v0.14.8 (schema 2): `pass` is this session's index inside the MAX_ITERATIONS loop (1, 2, …; 0 when loop-start recovery opened the record before the first pass); `iteration` is the SUPERVISING iteration's label (number or string) copied verbatim from artifacts/iteration-mode.json's `iteration` when the supervisor declared one, else null — phasekit never derives it from the branch name. A schema-1 record (v0.14.5–v0.14.7) has no `pass`, and its `iteration` IS the pass counter (every live record read 1): a consumer distinguishes the two by `schema` and, for schema 1, derives the iteration from `branch` instead. `previous` carries the archived boundary's own keys INCLUDING its `schema` — a schema-1 boundary a v0.14.7 session left is archived as it was, and stays there (a new pass replaces `previous` only when the boundary it ends advanced past step 0), so a schema-1 `previous` can sit under a schema-2 record until the next boundary lands. A consumer branches on the `schema` of the block it reads (top-level or `previous`), never on the top-level value alone. v0.14.10: `verify_red` also carries `gate_footprint` (the paths, or null) so a red-by-footprint replays as the same red; `gate_pending` {before: [base64 of each `git status --porcelain` record ('XY<TAB>path', raw bytes) taken before the gate command], command, label, at} exists only while a verify gate command is running or its footprint is not yet restored — a record found with it at loop start means the previous session died inside its gate, and the loop settles that footprint (restore + red) before any turn, then removes the key. A supervisor never acts on it.",
-      "keys": ["schema", "pass", "iteration", "branch", "target", "mode", "phase", "final", "step", "step_name", "step_at", "began_at", "sha_at_step", "verify_memo", "deploy", "killed_after", "killed_mode", "killed_at", "context", "recovered_at", "discarded_at", "discarded_reason", "previous", "verify_red", "gate_pending"]
+      "when": "A supervisor READS it instead of inferring 'done' from file presence and mtimes: step 7 with final true = the project's completion landed and HEAD rests; step 7 with final false = a phase boundary landed; step < 7 = the previous session ended mid-sequence (killed_after names the step the deadline watchdog observed at the kill, killed_mode 'kill' or 'wrapup'). sha_at_step maps '2','3','5','7' to the work-branch commit and '4' to the target tip that proved the step; verify_memo is the last GREEN gate {tree_sha (git write-tree), tier fast|full, label, command, passed_at} the loop reuses for the same tree; deploy records whether ready-to-deploy.json was present (and its mtime) when the boundary armed — the mtime rule stays the supervisor's; previous is the boundary that ended before the current idle record began (its final step, phase, final flag and shas), so 'what last landed' survives the next pass's reset. Steps 4-5 are proven trivially without PHASEKIT_SQUASH_TARGET. v0.14.8 (schema 2): `pass` is this session's index inside the MAX_ITERATIONS loop (1, 2, …; 0 when loop-start recovery opened the record before the first pass); `iteration` is the SUPERVISING iteration's label (number or string) copied verbatim from artifacts/iteration-mode.json's `iteration` when the supervisor declared one, else null — phasekit never derives it from the branch name. A schema-1 record (v0.14.5–v0.14.7) has no `pass`, and its `iteration` IS the pass counter (every live record read 1): a consumer distinguishes the two by `schema` and, for schema 1, derives the iteration from `branch` instead. `previous` carries the archived boundary's own keys INCLUDING its `schema` — a schema-1 boundary a v0.14.7 session left is archived as it was, and stays there (a new pass replaces `previous` only when the boundary it ends advanced past step 0), so a schema-1 `previous` can sit under a schema-2 record until the next boundary lands. A consumer branches on the `schema` of the block it reads (top-level or `previous`), never on the top-level value alone. v0.14.10: `verify_red` also carries `gate_footprint` (the paths, or null) so a red-by-footprint replays as the same red; `gate_pending` {before: [base64 of each `git status --porcelain` record ('XY<TAB>path', raw bytes) taken before the gate command], command, label, at} exists only while a verify gate command is running or its footprint is not yet restored — a record found with it at loop start means the previous session died inside its gate, and the loop settles that footprint (restore + red) before any turn, then removes the key. A supervisor never acts on it. v0.18.0: `work_base` {branch, sha} is the target tip the loop created the work branch from — the iteration base when no supervisor names an iteration.",
+      "keys": ["schema", "pass", "iteration", "branch", "target", "mode", "phase", "final", "step", "step_name", "step_at", "began_at", "sha_at_step", "verify_memo", "deploy", "killed_after", "killed_mode", "killed_at", "context", "recovered_at", "discarded_at", "discarded_reason", "previous", "verify_red", "gate_pending", "work_base"]
     }
   ],
   "conventions": [
@@ -751,7 +784,7 @@
       "marker": "deferrals",
       "declared_in": ["docs/QUALITY_GATES.md", "CONTINUE_PROMPT.txt"],
       "consumers": ["session", "supervisor"],
-      "semantics": "Verdict artifacts (phase-approval.json, project-complete.json) may carry a top-level 'deferrals' array of {item, reason, suggested_task} objects plus an optional 'key', one entry per in-scope acceptance item the session deliberately did not implement. 'item' MUST name the AC number when the deferral maps to a criterion. 'key' is the stable dedupe identifier: it defaults to that AC number (e.g. 'AC#3') when 'item' cites one, and MUST be supplied explicitly (kebab-case) otherwise; entries with the same key across artifact rewrites or successive approvals are the SAME deferral and are never refiled. v0.14.5: the loop writes the key into the committed artifact itself (explicit, else AC#n, else a slug of the item's first words; a derived one carries key_derived: ac|slug), so a supervisor never mints a hash; an entry with neither key nor item text stays keyless with a WARN and is dropped by the reader. The supervisor files one queue task per new key so deferred scope cannot lose its slot — and those tasks land HELD (ops lane or approval-gated), never pre-approved: a session's own deferral entry is not self-granted authorization for follow-up work. Absence of the field claims everything in scope shipped; a deferral recorded only in prose is a violation of the deferred-scope gate — this field is the sole machine-readable home. v0.14.12 — severity: Each entry may carry `severity`, one of exactly `BLOCKER | MAJOR | MINOR`. Any other word is not a grade: a consumer treats it as absent and files nothing for it; the session that wrote it has recorded no grade. Absent means MINOR; an explicit null is read as absent (the loop is silent on it; a consumer may warn once and grades it MINOR — no row is lost either way). Matching is case-insensitive with surrounding whitespace ignored (`major` and ` MAJOR ` are MAJOR; the canonical spelling is upper-case). The loop WARNs once per artifact naming the key and the word and never rewrites a session's grade (no red); the sibling key severity_enum is the machine-readable form a supervisor pins against, in filing order (BLOCKER and MAJOR file a queue row; MINOR stays in the ledger — the supervisor's floor, not phasekit's).",
+      "semantics": "Verdict artifacts (phase-approval.json, project-complete.json) may carry a top-level 'deferrals' array of {item, reason, suggested_task} objects plus an optional 'key', one entry per in-scope acceptance item the session deliberately did not implement. 'item' MUST name the AC number when the deferral maps to a criterion. 'key' is the stable dedupe identifier: it defaults to that AC number (e.g. 'AC#3') when 'item' cites one, and MUST be supplied explicitly (kebab-case) otherwise; entries with the same key across artifact rewrites or successive approvals are the SAME deferral and are never refiled. v0.14.5: the loop writes the key into the committed artifact itself (explicit, else AC#n, else a slug of the item's first words; a derived one carries key_derived: ac|slug), so a supervisor never mints a hash; an entry the loop cannot key (no key, no AC number, no ASCII words in the item) stays keyless with a WARN — kept in its own record, never in the v0.18.0 deferral ledger. The supervisor files one queue task per new key so deferred scope cannot lose its slot — and those tasks land HELD (ops lane or approval-gated), never pre-approved: a session's own deferral entry is not self-granted authorization for follow-up work. Absence of the field claims everything in scope shipped; a deferral recorded only in prose is a violation of the deferred-scope gate — this field is the sole machine-readable home. v0.14.12 — severity: Each entry may carry `severity`, one of exactly `BLOCKER | MAJOR | MINOR`. Any other word is not a grade: a consumer treats it as absent and files nothing for it; the session that wrote it has recorded no grade. Absent means MINOR; an explicit null is read as absent (the loop is silent on it; a consumer may warn once and grades it MINOR — no row is lost either way). Matching is case-insensitive with surrounding whitespace ignored (`major` and ` MAJOR ` are MAJOR; the canonical spelling is upper-case). The loop WARNs once per artifact naming the key and the word and never rewrites a session's grade (no red); the sibling key severity_enum is the machine-readable form a supervisor pins against, in filing order (BLOCKER and MAJOR file a queue row; MINOR stays in the ledger — the supervisor's floor, not phasekit's).",
       "severity_enum": ["BLOCKER", "MAJOR", "MINOR"]
     },
     {
@@ -781,6 +814,48 @@
       "declared_in": ["scripts/phasekit-roadmap.py"],
       "consumers": ["supervisor"],
       "semantics": "v0.15.0. An OPTIONAL `docs/ROADMAP.md`; absent (ENOENT) is a valid state and nothing in the loop, the gates, the container, CONTINUE_PROMPT.txt or docs/QUALITY_GATES.md reads, requires or mentions it. Only three things in the file mean anything: the first line beginning `Direction:` (up to 3 spaces of indent; the current theme, free text; empty means none), and checkbox entries `- [ ] R<n> <title> — <scope> (needs: R<m>, …)` / `- [x] …` (bullet `-`, `*` or `+`, up to 3 spaces of indent) under the level-2 headings `## Next`, `## Later` and `## Done` (case-insensitive, a trailing colon tolerated, up to 3 spaces of indent; a level-3+ heading keeps its section, any other level-1/2 heading ends it). An entry's BODY is the non-blank lines after it indented deeper than its bullet, stopping at a blank line, a heading, a fence or HTML-comment opener, a `Direction:` line or another R<n> entry; id-less checkboxes in the body are the entry's own sub-tasks — not entries, not warned. A body line that looks like roadmap structure is never read silently: a wrapped `(needs:` or a checkbox at ANY indent (tabs included) whose text starts with an R<n>-shaped token is warned and EXCLUDES the owning entry (and `done` refuses it) until the user unwraps or outdents it. Everything else is ignored: prose, other headings and what sits under them, fenced code blocks (CommonMark: a fence closes only on the same character at no shorter length with nothing after it; a backtick info string containing a backtick is inline code, not a fence), HTML comments, and indented code. A leading UTF-8 BOM is tolerated. Ids are `R<n>`, bridges `R<n>.<k>`, with no leading zeros, APPEND-ONLY: never renumbered, reused or deleted; to replace an entry keep its line and write the marker right after the id, EXACTLY, followed by the replacement id and a colon-space (`- [ ] R2 SUPERSEDED by R5: old title`) — a near miss (another case, no colon) is excluded and warned, never read as live; a `needs:` naming a superseded id is satisfied by the end of its supersession chain. `(needs: …)` must be the LAST thing on an unchecked entry's line and appear once. An entry is done when it is checked, wherever it sits. ELIGIBLE = under `## Next`, unchecked, not superseded, its id on exactly one entry line within the three sections (an R<n> checkbox under any other heading is ignored and warned, and does not count), every `needs:` done; `## Later` is never eligible. `scripts/phasekit-roadmap.py next` is the one reader: JSON {schema 1, file, absent, direction, eligible [{id, title, scope, needs}], blocked [{…, waiting_on}], exhausted, counts {next, later, done}, warnings [{line, message}]}. What it skips is reported, never silent: a checkbox with no valid id outside an entry's body, an id on more than one line (EVERY copy excluded), a misplaced or malformed `needs:`, a `needs:` naming an id not in the file, a near-miss or dangling supersession, a supersession cycle, a needs cycle (followed THROUGH supersession and reported once per group of mutually-waiting entries, every member named), an R<n> checkbox outside the three sections, and a fence or HTML comment that never closes (which would otherwise swallow the rest of the file). `done R<n> --iteration LABEL` is the one writer: it keeps the entry's line VERBATIM except that the mark flips to `x` and ` — iteration LABEL (YYYY-MM-DD)` is appended (trailing whitespace trimmed), moves the entry's body with it, and inserts it directly after the last existing `## Done` entry's body (or under the heading); it changes no other line except to add a missing final newline to the line before the insertion point, or to append a blank line and `## Done` at the end of the file when that section is absent. It holds an advisory lock on the file's directory across read-modify-write, writes atomically through a symlink to its target via a temp file named `.phasekit-roadmap-write-<8 chars>.tmp` (only that exact shape is ever swept after a killed writer), refuses a read-only file, and keeps CRLF and a BOM. LABEL is one line with no control or line-separator characters. Re-marking a done entry is a no-op. A supervisor moves entries only through it."
+    },
+    {
+      "name": "loop-commit-trailers",
+      "marker": "Phasekit-Iteration",
+      "declared_in": ["scripts/run-until-done.sh", "docs/EXECUTION_MODES.md"],
+      "consumers": ["supervisor", "session"],
+      "semantics": "v0.18.0. Every loop-authored commit ends in one trailer block (the Gerrit Change-Id shape: machine keys stable across rewording; subjects are for humans): `Phasekit-Iteration: <N>` (the supervisor's iteration label from artifacts/iteration-mode.json, a leading 'iteration' word stripped; absent in a standalone run), `Phasekit-Phase: <P>` (the phase the commit closes or, on a checkpoint, names — a leading 'phase' word stripped; absent when underivable), and `Phasekit-Kind: <kind>`, one of phase | completion | update | squash | merge-back | wrapup | wip | heal | claim (a deploy claim an unverified wip kept out, landed verify-gated at the next start). A squash keeps its `phasekit-squash: <branch>@<sha>` line first in the same block. A supervisor's intake commit carries `Phasekit-Iteration: <N>` and `Phasekit-Kind: intake`, which the loop reads as the iteration's base. Readers use `git log --format='%(trailers:key=Phasekit-Iteration,valueonly)'`, never the subject. A missing fact has no trailer (fork F5: its absence is honest, never a refusal)."
+    },
+    {
+      "name": "commit-subject-prefix",
+      "marker": "iteration N phase P:",
+      "declared_in": ["scripts/run-until-done.sh", "CONTINUE_PROMPT.txt"],
+      "consumers": ["session", "supervisor"],
+      "semantics": "v0.18.0 (commitizen, not commitlint: generated, never linted or refused). The subject of an approval-class commit (phase, completion, and its squash) is `iteration <N> phase <P>: <prose>` (standalone: `phase <P>: <prose>`), N from the supervisor, P from the verdict, the prose from `suggested_commit_message` (else the record's summary) minus any facts prefix the session wrote (text before the first ': ' that starts with 'iteration' or 'phase' and a number). A session prefix that DISAGREES with the record is corrected and its prose replaced by the record's `iteration_label` or `summary` (a stale prefix means stale prose), printing `commit subject corrected: '<old>' → '<new>' (the record says so)`. When P cannot be derived the subject stays as written (a WARN when supervised) except that a disagreeing iteration is still corrected."
+    },
+    {
+      "name": "deferral-ledger",
+      "marker": "closes",
+      "declared_in": ["docs/QUALITY_GATES.md", "CONTINUE_PROMPT.txt"],
+      "consumers": ["session", "supervisor"],
+      "semantics": "v0.18.0 (the changesets shape). A verdict record describes THIS iteration only: `deferrals` lists the entries it opened, `closes` the keys it closed. At every approval-class landing the loop upserts the entries by key into artifacts/deferrals.json (the open set; an entry copied forward out of habit is 'unchanged', never new) and removes the closed keys; a COMPLETION record's committed `deferrals` is then the full open set, so every reader of the record reads what copy-forward produced. The ledger's first composition seeds it from the last committed completion record (the check: on that first landing its key set equals that record's). Keys follow approval-deferrals (explicit, else AC#n, else a slug); a keyless entry cannot enter the ledger."
+    },
+    {
+      "name": "phase-close-evidence",
+      "marker": "artifacts/iterations/<N>/<phase>.json",
+      "declared_in": ["docs/QUALITY_GATES.md", "scripts/run-until-done.sh"],
+      "consumers": ["session", "supervisor"],
+      "semantics": "v0.18.0. What an iteration or a phase changed is answered by phasekit, never rebuilt from `git rev-list --grep=<subject>`: the model-facing `phasekit scope [--iteration N] [--phase P] [--json]` (base, HEAD, the phase commits by trailer, the changed paths with status — it may read git), and the evidence file every approval landing commits (artifacts, `iterations`), which a test reads as a golden from the tree (hermetic-tests)."
+    },
+    {
+      "name": "hermetic-tests",
+      "marker": "Hermetic tests",
+      "declared_in": ["docs/QUALITY_GATES.md"],
+      "consumers": ["session", "supervisor"],
+      "semantics": "v0.18.0. A test reads the current tree and declared fixtures, never git history (no git log / rev-list / show <rev>: / blame / diff <rev> from a test); a fact about the past is an evidence file. The rule is adopted, not enforced (enforcement would refuse, and refusing is a stall): after the gate the loop prints, once per session, `ADVISORY: N test files appear to read git history (…first 5…) … see docs/QUALITY_GATES.md \"Hermetic tests\"` — never a red gate, never a row."
+    },
+    {
+      "name": "session-cost-lines",
+      "marker": "phasekit-cost:",
+      "declared_in": ["scripts/run-until-done.sh", "docs/EXECUTION_MODES.md"],
+      "consumers": ["supervisor"],
+      "semantics": "v0.18.0. Lines the loop prints to its stdout (the supervisor's session log) — the single source of the session-efficiency numbers; a supervisor never computes them a second time. (1) At arm: `deadline watchdog: armed — sentinel at T-<L>s, last-resort commit at T-<LR>s (span <S>s), take control at T-<Ty>s[ (build turn T-<Tb>s)]` — the lead in force; a supervisor arms no lead of its own. (2) `phasekit-cost: <one-line JSON>` {schema: 1, mode, bound_s, lead_s, take_control_s, lead_uncapped_s, lead_cap_s, at_cap, heavy, heavy_in_previous_4, p90_s: {g_full, g_fast, w, m, r, pass} (null = no sample; the lead then used a prior), samples: {measure: count}}. `heavy` = the full tier's measured P90 over 12.5% of the bound, or the uncapped lead over the cap (only once the full tier has a sample) — the fork-F4 fact; the supervisor's threshold is 2 of the last 5 sessions (heavy_in_previous_4 + this one). (3) `deadline watchdog: took control — …` when the watchdog ended a model turn at the take-control point (the watchdog's own log says `took control at T-<Ty>s`)."
     }
   ],
   "exit_codes": {
@@ -791,7 +866,7 @@
         "2": "stopped, external input required: phase-blocked.json present, a commit was blocked, or a light-mode run escalated",
         "3": "MAX_ITERATIONS reached without project completion (light mode also writes light-escalation.json with trigger iteration_cap)"
       },
-      "passthrough": "Any other code is the claude CLI's own exit, propagated verbatim after the PHASEKIT_ITER_RETRY budget is exhausted — including 124 from a supervisor-side timeout and 137 from SIGKILL. The loop assigns meaning only to 0/1/2/3."
+      "passthrough": "Any other code is the claude CLI's own exit, propagated verbatim after the PHASEKIT_ITER_RETRY budget is exhausted — including 124 from a supervisor-side timeout and 137 from SIGKILL. The loop assigns meaning only to 0/1/2/3. v0.18.0: the `verify` and `scope` subcommands (what `phasekit verify`/`phasekit scope` run) exit 0 green/answered, 1 red/unanswerable, 2 usage, 3 verify skipped (the tier's measured P90 is over 540 s) — they start no iteration. A turn the deadline watchdog ended at the take-control point (SIGTERM, claude exits 143) is not a CLI failure: no retry, and the run ends 0 after its verify-gated landing / wrap-up."
     },
     "scripts/run-phase.sh": {
       "codes": {
@@ -835,9 +910,9 @@
     "scripts/phasekit.sh": {
       "codes": {
         "0": "success (check-version is informational and returns 0 even when behind)",
-        "1": "usage or I/O failure (missing target, unreadable manifest, non-canonical checkout for channel/self-update)",
-        "2": "lock contention — another enrich-project.py holds the target's lock",
-        "3": "drift detected by the check verb (DRIFT / MISSING / TEMPLATE DRIFT)"
+        "1": "usage or I/O failure (missing target, unreadable manifest, non-canonical checkout for channel/self-update); v0.18.0 `verify`: the project's gate is RED; `scope`: nothing to answer (no base, no evidence and no commit for the phase)",
+        "2": "lock contention — another enrich-project.py holds the target's lock; v0.18.0 `verify`/`scope`: usage error, not run inside a phasekit project, or `verify --tier` naming the tier that does not run now",
+        "3": "drift detected by the check verb (DRIFT / MISSING / TEMPLATE DRIFT); v0.18.0 `verify`: skipped — the tier's measured P90 is longer than a tool call may run (the commit gate runs it)"
       },
       "passthrough": "The CLI execs scripts/enrich-project.py, so these are the engine's codes; a missing PHASEKIT_PYTHON interpreter surfaces as the shell's 126/127."
     },

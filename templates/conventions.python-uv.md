@@ -41,6 +41,12 @@
   the fast tier per commit (`-m "not slow"`), the full suite at the
   verification sprint and at completion.
 
+- Tests are hermetic: a test reads the tree and declared fixtures, never git
+  history (no `git log`/`rev-list`/`show <rev>:`/`blame` of this repository).
+  A fact about a past phase is an evidence file — phasekit commits
+  `artifacts/iterations/<N>/<phase>.json` at every phase close — or a golden
+  file (docs/QUALITY_GATES.md "Hermetic tests").
+
 ## Dependency policy
 
 - Prefer the stdlib. Every new runtime dependency needs a one-line
