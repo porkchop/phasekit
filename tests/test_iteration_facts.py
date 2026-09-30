@@ -822,5 +822,96 @@ class CarriedCompletionRecord(unittest.TestCase):
         self.assertEqual(repo.porcelain(), [], out)
 
 
+class ReviewRound11Minors(unittest.TestCase):
+    """v0.18.1 (queue row 1193): the four MINORs round 11 of the v0.18.0
+    review deferred. Each test is RED on v0.18.0."""
+
+    def _repo(self):
+        repo = Repo(squash=False)
+        self.addCleanup(repo.cleanup)
+        with_cli(repo)
+        return repo
+
+    def _ledger(self, repo, samples):
+        repo.write("artifacts/logs/cost-ledger.json", json.dumps({"schema": 1, "samples": samples}))
+
+    def _g_fast(self, repo):
+        return json.loads(repo.artifact("logs/cost-ledger.json").read_text())["samples"].get("g_fast", [])
+
+    # (1) `phasekit verify` on a locked index -------------------------------
+    def test_a_stale_index_lock_is_named_with_what_to_do_and_nothing_runs(self):
+        repo = self._repo()
+        lock = repo.repo / ".git" / "index.lock"
+        lock.write_text("")
+        r = subprocess.run(["bash", "-c", PV], cwd=repo.repo, capture_output=True, text=True, timeout=60,
+                           env={**__import__("os").environ, "STUB_DIR": str(repo.stub)})
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn(str(lock), r.stderr)
+        self.assertIn("rm -f", r.stderr)
+        self.assertIn("phasekit verify: not run", r.stderr)
+        self.assertEqual(repo.verify_calls(), 0)
+        self.assertTrue(lock.exists(), "a model's verify never removes a lock another git may hold")
+
+    # (2) which gate runs are cost samples ----------------------------------
+    def test_a_fast_failing_red_never_lowers_the_gate_estimate(self):
+        repo = self._repo()
+        self._ledger(repo, {"g_fast": [100, 100, 100, 100, 100]})
+        repo.write("BAD", "red\n")
+        repo.scenario(H.APPROVE_SCENARIO)
+        r = repo.run(env={"MAX_ITERATIONS": "1"})
+        self.assertGreaterEqual(repo.verify_calls(), 1, r.stdout + r.stderr)
+        self.assertEqual(self._g_fast(repo), [100, 100, 100, 100, 100], r.stdout + r.stderr)
+
+    def test_a_red_run_longer_than_the_estimate_raises_it(self):
+        repo = self._repo()
+        self._ledger(repo, {"g_fast": [0, 0, 0]})
+        repo.write("scripts/phasekit-verify.sh", H.VERIFY_LOGGING.replace(
+            'if [ -f "$ROOT/BAD" ]; then exit 1; fi', 'if [ -f "$ROOT/BAD" ]; then sleep 2; exit 1; fi'),
+            executable=True)
+        repo.git("add", "-A"); repo.git("commit", "-qm", "a slow red gate")
+        repo.write("BAD", "red\n")
+        repo.scenario(H.APPROVE_SCENARIO)
+        r = repo.run(env={"MAX_ITERATIONS": "1"})
+        g = self._g_fast(repo)
+        self.assertEqual(len(g), 4, f"{g}\n{r.stdout + r.stderr}")
+        self.assertGreaterEqual(g[-1], 2)
+
+    def test_a_green_run_is_always_a_sample(self):
+        repo = self._repo()
+        self._ledger(repo, {"g_fast": [100, 100, 100]})
+        repo.scenario(H.APPROVE_SCENARIO)
+        repo.run(env={"MAX_ITERATIONS": "1"})
+        self.assertEqual(len(self._g_fast(repo)), 4)
+
+    # (4) every green path clears LAST_GATE_RED ------------------------------
+    def _gate_fns(self):
+        return "\n".join(H._extract_block(rf"^{name}\(\) \{{", r"^\}") + "\n}"
+                         for name in ("run_contracts_gate", "_clear_verify_failed", "run_verify_gate"))
+
+    def _last_gate_red_after(self, root, env_line):
+        script = (f'set -euo pipefail\nROOT_DIR="{root}"\nARTIFACTS_DIR="$ROOT_DIR/artifacts"\n'
+                  + self._gate_fns() + "\nLAST_GATE_RED=1\n" + env_line
+                  + "\nrun_verify_gate >/dev/null 2>&1 || true\necho \"LGR=$LAST_GATE_RED\"\n")
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+        return r.stdout.strip() + r.stderr
+
+    def test_a_green_early_return_clears_the_last_gates_red(self):
+        import tempfile
+        root = tempfile.mkdtemp(prefix="pk-lgr-")
+        self.addCleanup(shutil.rmtree, root, True)
+        (Path(root) / "artifacts").mkdir()
+        self.assertEqual(self._last_gate_red_after(root, "VERIFY_SKIP=1"), "LGR=0")
+        self.assertEqual(self._last_gate_red_after(root, ""), "LGR=0", "no gate configured is green")
+        self.assertEqual(self._last_gate_red_after(root, "VERIFY_SKIP=1; VERIFY_INVOKER=model"), "LGR=1",
+                         "a model's own verify never speaks for the loop's gate")
+
+    def test_every_green_return_of_the_gate_runs_through_the_clear(self):
+        fn = H._extract_block(r"^run_verify_gate\(\) \{", r"^\}").splitlines()
+        returns = [i for i, ln in enumerate(fn) if ln.strip() == "return 0"]
+        self.assertTrue(returns)
+        for i in returns:
+            self.assertTrue(any("_clear_verify_failed" in ln for ln in fn[max(0, i - 4):i]), fn[i - 4:i + 1])
+
+
 if __name__ == "__main__":
     unittest.main()

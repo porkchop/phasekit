@@ -624,6 +624,11 @@ class KillPointMatrix(unittest.TestCase):
         # commit never carries a changed claim.
         self.assertEqual(st["verdict_ad"], [], res["out"])
         self.assertEqual(st["wip_claims"], [], "a wip commit changed ready-to-deploy.json")
+        # (i) v0.18.1: nothing in this matrix writes after the completion
+        # commit, so the post-completion settle never fires — a false
+        # positive would restore (discard from the tree) the session's own
+        # work. The post-completion cells live in tests/test_post_completion.py.
+        self.assertNotIn("written AFTER the completion commit", res["out"])
         # (g) a witness line.
         if res["resumed"]:
             self.assertTrue(any(w in res["out"] for w in WITNESS_LINES), f"no witness line:\n{res['out']}")
@@ -1481,6 +1486,10 @@ class CompletionIsTerminal(unittest.TestCase):
         self.assertEqual(rec["step"], RESTED, rec)
         self.assertEqual(res["state"]["porcelain"], [], out)
         self.assertNotIn("re-entering loop", out)
+        # v0.18.1: a clean landing has nothing written after its completion
+        # commit — the settle never fires, the record carries no residue.
+        self.assertNotIn("written AFTER the completion commit", out)
+        self.assertNotIn("post_completion", rec)
 
     def test_every_landing_entry_and_afterwards_path(self):
         self.assertTrue(self.results, "no cases ran")

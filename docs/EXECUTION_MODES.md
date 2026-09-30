@@ -326,6 +326,38 @@ fresh work branch and is never "this iteration" anyway. Step 7 with
 `final: false` is a phase boundary and the loop continues to the next phase
 exactly as before.
 
+**Nothing written after the completion commit rests (v0.18.1).** The completion
+is terminal, so nothing written after the commit that lands it is the
+iteration's work (foundry-orchestrator iteration 142: the model committed the
+record itself, then its turn — and the light review's after it — kept editing
+a tracked test file; the tree could not rest and a human settled it). Two
+halves: (a) every model turn runs under a **completion guard** — when a commit
+made during the turn lands a completion record that claims (a carried record a
+checkpoint swept in unchanged claims nothing) and the tree is clean (the commit
+carried the turn's work — a record-only commit is not the end: the model may
+commit the rest next), the loop ends the turn (the
+take-control SIGTERM, below; `completion guard: …` in the log) and the model
+gets no further tool call in it; in branch-per-iteration mode the light review,
+which precedes the final commit, does not run over a completion the build turn
+committed with the whole tree (over a record-only commit, and in plain mode, it
+runs as before, and its re-written record lands the work through the
+verify-gated completion commit). (b) the walk snapshots the tree at the
+completion commit (the guard's observation, or its own commit) and, at its
+start, at step 3
+(before the squash's gate) and again before the rest is proven, restores every
+path written AFTER it — tracked paths to the committed bytes, untracked ones
+removed — names them (`post_completion` in the record, stderr) and keeps their
+bytes under `artifacts/logs/post-completion/<stamp>/` (a path whose bytes
+cannot be kept is not restored). "After" is known by observation, never by a
+file's time: the loop snapshots the tree only when it knows the state — the
+guard when it sees the completion committed on a clean tree, the walk right
+after its own commit — so whatever appears after that (a write racing the
+signal, a process the turn left running) is after. A turn the loop dispatches
+(a repair pass, the review) drops the snapshot first and is never residue. A
+completion never seen clean (a record-only commit over older work) is not
+judged — its dirt is named by the step-7 line and left as is. It corrects and
+never refuses: a landing is never blocked by it.
+
 The generated test `tests/test_boundary_state.py` SIGKILLs a real session of
 the shipped loop at every step boundary (before and after the record
 advances), for every entry point, in both modes, for final and non-final
@@ -341,9 +373,9 @@ foundry-meta `designs/DESIGN-session-efficiency.md` (approved 2026-09-28). Sessi
 
 **The lead, one formula, one home.** `T_y = G_full + W + 60 s` (take-control), `L = T_y + M (+ R in light mode)` (the sentinel), clamped to [300 s, 25% of the span] — the cap is a doctrine boundary: above it the project gets push-back (the `heavy` fact), never a wider lead (fork F1); the loop never changes the session bound (fork F2). `deadline watchdog: armed — sentinel at T-Ls, last-resort commit at T-60s (span Ss), take control at T-Tys` is the line a supervisor reads the lead from.
 
-**The loop takes control back.** At T-T_y (light mode: the build turn at T-(T_y+R), so the review still fits) a model turn that has not yielded is ENDED — SIGTERM to the `claude` process whose pid `run-phase.sh` writes to `artifacts/logs/claude.pid` — after an `artifacts/logs/.deadline-yield` marker. The loop reads that as a wrap-up at an iteration boundary: no CLI retry, no verdict retry; a verdict the turn left lands through the usual verify-gated path, and the session wraps up (verify-gated; red falls through to the labelled wip). The session log says `deadline watchdog: took control`. Probed before it was built (scaffold-runner, claude 2.1.282): SIGTERM ends the turn in under a second, kills the running tool child with it, keeps every completed write, leaves no `index.lock`. The last-resort commit at T-60 s stays the SIGKILL stage.
+**The loop takes control back.** At T-T_y (light mode: the build turn at T-(T_y+R), so the review still fits) a model turn that has not yielded is ENDED — SIGTERM to the `claude` process whose pid `run-phase.sh` writes to `artifacts/logs/claude.pid` — after an `artifacts/logs/.deadline-yield` marker. The loop reads that as a wrap-up at an iteration boundary: no CLI retry, no verdict retry; a verdict the turn left lands through the usual verify-gated path, and the session wraps up (verify-gated; red falls through to the labelled wip). The session log says `deadline watchdog: took control`; if the watchdog could not write its marker, a turn that ended non-zero across its take-control instant is still read as taken (`took control (inferred …`, v0.18.1), never retried as a CLI failure. Probed before it was built (scaffold-runner, claude 2.1.282): SIGTERM ends the turn in under a second, kills the running tool child with it, keeps every completed write, leaves no `index.lock`. The last-resort commit at T-60 s stays the SIGKILL stage.
 
-**The model's verify counts.** `bash scripts/phasekit.sh verify` runs the gate exactly as the commit will (same preparation and staging, the contracts gate, the footprint, the memo). Close-out order: memory writes first, the verdict, `phasekit verify`, end the turn — the commit then reuses the green verdict for the exact tree instead of running the full tier again (light mode: the builder runs the fast tier before writing the record; the reviewer the full one).
+**The model's verify counts.** `bash scripts/phasekit.sh verify` runs the gate exactly as the commit will (same preparation and staging, the contracts gate, the footprint, the memo). On a locked index it runs nothing and exits 2, naming the `index.lock` and what to do (v0.18.1). Close-out order: memory writes first, the verdict, `phasekit verify`, end the turn — the commit then reuses the green verdict for the exact tree instead of running the full tier again (light mode: the builder runs the fast tier before writing the record; the reviewer the full one).
 
 **The nudge reaches the right agent.** The wrap-up nudge is once per iteration **per agent** (the hook payload names a subagent's calls; a subagent can no longer spend the main agent's nudge — xmeo run 999), and PostToolUse repeats it at most once per 60 s.
 

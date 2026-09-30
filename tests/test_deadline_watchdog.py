@@ -1126,6 +1126,33 @@ class TakeControlThenARedContractsGate(TakeControlThenAFinishedReview):
         self.assertEqual(self.repo.calls(), 2, r.stdout + r.stderr)
 
 
+class TakeControlWithAnUnwritableMarker(TakeControl):
+    """v0.18.1 (queue row 1193 (3), the v0.18.0 review's round-11 MINOR): the
+    watchdog could not write its take-control marker, and the SIGTERM's exit
+    code was read as a CLI failure — a retry. Now the loop reads the take-
+    control from its own plan, loudly. RED on v0.18.0 ("retrying in continue
+    mode", no inferred line)."""
+
+    def setUp(self):
+        super().setUp()
+        # Mid-turn, a directory appears where the marker file goes: every
+        # write of the marker fails (a full disk, an unwritable logs/).
+        self.assertIn('echo "work the turn did before the deadline" >> src.txt\n', STUB_CLAUDE)
+        (self.repo.stub / "claude").write_text(STUB_CLAUDE.replace(
+            'echo "work the turn did before the deadline" >> src.txt\n',
+            'echo "work the turn did before the deadline" >> src.txt\nmkdir -p artifacts/logs/.deadline-yield\n'))
+
+    def test_a_turn_that_has_not_yielded_is_ended_at_take_control_and_the_loop_wraps_up_verified(self):
+        r = self._run()
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn("deadline watchdog: took control (inferred", out)
+        self.assertIn("Run wrapped up cleanly (take-control)", out)
+        self.assertEqual(self.repo.porcelain(), [], out)
+        wd = self.repo.artifact("logs/deadline-watchdog.log").read_text()
+        self.assertIn("could not write artifacts/logs/.deadline-yield", wd)
+
+
 class CostLine(unittest.TestCase):
     def test_light_mode_keeps_a_window_before_the_build_turn_is_ended(self):
         # Review round 2 (MAJOR): the build turn was ended the same second the

@@ -846,8 +846,14 @@ _clear_verify_failed() {
   # A green gate clears the red capture — the LOOP's gate. A model's own
   # `phasekit verify` never does (v0.18.0, review round 1): the capture's
   # attempt count is the VERIFY_MAX_ATTEMPTS breaker's, and a model run is
-  # not the commit gate.
-  [[ "${VERIFY_INVOKER:-loop}" == model ]] || rm -f "$ARTIFACTS_DIR/phase-verify-failed.json"
+  # not the commit gate. v0.18.1 (row 1193 (4)): every green path of the
+  # loop's gate runs through here, so the last gate's red is cleared here
+  # too — a green early return (VERIFY_SKIP, no gate configured, the memo)
+  # once left LAST_GATE_RED standing for the wrap-up to read.
+  if [[ "${VERIFY_INVOKER:-loop}" != model ]]; then
+    rm -f "$ARTIFACTS_DIR/phase-verify-failed.json"
+    LAST_GATE_RED=0
+  fi
   return 0
 }
 
@@ -1008,11 +1014,24 @@ run_verify_gate() {
   fi
   rm -f "$fp_before" "$fp_after" "$fp_paths"
 
-  # v0.18.0: the gate's wall time is a cost-ledger sample for its tier (pass
-  # and fail alike — the drift being measured is suite growth), and part of
-  # the landing's time the W measure must not count twice.
+  # v0.18.0: the gate's wall time is a cost-ledger sample for its tier, and
+  # part of the landing's time the W measure must not count twice.
+  # v0.18.1 (row 1193 (2)) — which runs are samples. The measure feeds the
+  # landing budget (T_y = G_full + W + 60 s): what a GREEN gate costs,
+  # since only a green gate lands anything. A command that ran to the end
+  # (exit 0 — a footprint red included) is a sample. A red command stopped
+  # where it failed, so its time is a LOWER BOUND on the green run: it is
+  # evidence only when it exceeds the current estimate (a gate that hangs
+  # into its own timeout still raises the P90), never below it — a
+  # fast-failing lint once pulled the full tier's P90 down, shrinking the
+  # lead for the green run that follows. Pass and fail are still both
+  # measured; a red can only raise the estimate, never lower it.
   VERIFY_SECONDS_ACC=$(( ${VERIFY_SECONDS_ACC:-0} + verify_elapsed ))
-  if verify_memo_reusable; then cost_sample "g_$memo_tier" "$verify_elapsed"; fi
+  if verify_memo_reusable; then
+    if [[ "$verify_status" -eq 0 ]] || (( verify_elapsed > $(cost_value "g_$memo_tier") )); then
+      cost_sample "g_$memo_tier" "$verify_elapsed"
+    fi
+  fi
   if [[ "${VERIFY_INVOKER:-loop}" != model ]]; then hermetic_tests_advisory; fi
 
   # Verify-budget advisory. v0.18.0: under a session bound it is MEASURED —
@@ -1910,8 +1929,32 @@ carry_completion_record() {
   if ! completion_record_carried; then
     echo "run-until-done: the completion record's landing was refused — kept on disk, unstaged (never deleted); the repair turn edits it and re-writes it once the gate is green (v0.18.0)." >&2
   fi
+  # v0.18.1: the marker also names the carried bytes (their blob), so a
+  # commit that sweeps the carried record in unchanged is known to claim
+  # nothing (the completion guard) — the mtime still carries the rule.
+  git hash-object -- "$ARTIFACTS_DIR/project-complete.json" > "$ARTIFACTS_DIR/logs/.carried-completion" 2>/dev/null || true
   touch -r "$ARTIFACTS_DIR/project-complete.json" "$ARTIFACTS_DIR/logs/.carried-completion" 2>/dev/null || true
   return 0
+}
+
+committed_record_claims() {
+  # $1 = a completion record blob at HEAD (v0.18.1). Does that COMMITTED
+  # record claim completion? Not when it is the carried record swept into a
+  # commit unchanged (a model's checkpoint during its repair turn): the
+  # carry marker names those bytes — unless the session re-claimed them (the
+  # v0.18.0 rule: re-written, newer than the marker) and the tree's record
+  # is exactly what HEAD carries. A marker without a blob (written before
+  # v0.18.1) falls back to the on-disk rule.
+  local carried pc="$ARTIFACTS_DIR/project-complete.json"
+  [[ -f "$ARTIFACTS_DIR/logs/.carried-completion" ]] || return 0
+  carried="$(head -c 64 "$ARTIFACTS_DIR/logs/.carried-completion" 2>/dev/null | tr -d '[:space:]')" || carried=""
+  if [[ "$carried" =~ ^[0-9a-f]{40,64}$ ]]; then
+    [[ "$carried" != "$1" ]] && return 0
+    completion_record_claims || return 1
+    [[ "$(git hash-object -- "$pc" 2>/dev/null)" == "$1" ]]
+    return
+  fi
+  completion_record_claims
 }
 
 write_session_handoff() {
@@ -2292,9 +2335,12 @@ finish_complete() {
   # final boundary ends here, and so does a loop top that finds the
   # iteration already complete. Rest hygiene the walk could not prove is
   # NAMED (the dirty paths, HEAD off the target) and left exactly as it is:
-  # changes made after the completion commit's staging are the verify
-  # gate's, not a model's, and neither a next pass nor a wrap-up commit is
-  # the iteration's work. Nothing else runs.
+  # neither a next pass nor a wrap-up commit is the iteration's work.
+  # v0.18.1: a write made AFTER the completion commit never reaches here —
+  # the walk restored it (completion_residue_settle, steps 3 and 7); what
+  # can remain is dirt that predates the commit and that the commit did not
+  # carry (a model's own partial commit), or a path git could not
+  # restore. Nothing else runs.
   local why="${1:-}"
   if [[ -n "$why" ]]; then echo "$why"; fi
   # A zero-turn session re-entered the work branch only to look
@@ -2303,11 +2349,220 @@ finish_complete() {
   # exactly as it was found. Best-effort, like every rest.
   if squash_mode && [[ "$(current_branch)" != "$SQUASH_TARGET" ]]; then rest_on_target || true; fi
   if ! boundary_prove "$BOUNDARY_STEP_RESTED"; then
-    echo "boundary-state: the completion landed (record final, step $(boundary_step)) but the tree did not rest (step 7 unproven: HEAD on '$(current_branch)'; changes after the completion commit — not the verify gate's, whose footprint is caught at the gate since v0.14.10) — left as is, nothing else runs (v0.14.9):" >&2
+    echo "boundary-state: the completion landed (record final, step $(boundary_step)) but the tree did not rest (step 7 unproven: HEAD on '$(current_branch)'; changes the completion commit did not carry — older work, a deletion, or a later turn's own; a write made after it in the turn that committed it is restored since v0.18.1, the verify gate's footprint at the gate since v0.14.10) — left as is, nothing else runs (v0.14.9):" >&2
     git status --porcelain 2>/dev/null | sed 's/^/  /' >&2 || true
   fi
   echo "Run finished successfully."
   exit 0
+}
+
+# --- writes after the completion commit (v0.18.1, queue row 831) ------------
+# foundry-orchestrator iteration 142 (run 829, 2026-09-16): the model
+# committed the completion record itself, then its turn — and the light
+# review's turn after it — kept editing tracked files. The loop landed and
+# squashed the committed record, the tree could not rest ("changes after the
+# completion commit"), the supervisor spent two landing dispatches on a tree
+# only a human could settle, and a human did. The completion is terminal
+# (v0.14.9), so nothing written after it is the iteration's work. Two halves,
+# decided together (Aaron, 2026-09-30, fork (a)+(b)):
+#
+#   (a) the turn guard (run_once): while a model turn runs, the loop watches
+#       HEAD; the moment a commit made during the turn lands a completion
+#       record that claims AND carries the turn's work (no older work left
+#       uncommitted — a record-only commit is not the end: the model may
+#       commit the rest next), it ends the turn — v0.18.0's take-control
+#       (SIGTERM to the pid run-phase.sh names) — and snapshots the tree at
+#       that commit, so the model gets no further tool call in it. In
+#       branch-per-iteration mode the light review, which precedes the final
+#       commit, does not run over a completion the build turn committed with
+#       the whole tree.
+#   (b) the settle (this block): at the start of the landing walk, at step 3
+#       (before the squash's gate judges the tree) and before the rest is
+#       proven, every path that changed since the completion snapshot
+#       (tracked: back to the committed bytes; untracked: removed) is
+#       restored, NAMED (the record's `post_completion`, stderr) and KEPT
+#       under artifacts/logs/post-completion/<stamp>/ (tracked.patch +
+#       untracked/) — a path whose bytes cannot be kept is not restored. It
+#       corrects, it never refuses: a landing is never blocked by it
+#       (Aaron's no-new-stalls rule).
+#
+# What counts as "after" — by OBSERVATION, never by a file's time (review
+# round 4: a timestamp cannot tell older work re-touched after the commit
+# from work written after it). The loop snapshots the tree only at moments
+# it knows the state: the guard, when it sees the completion committed AND
+# the tree clean (the commit carried the turn's work, nothing written
+# since) — then it ends the turn; the walk, right after its own commit
+# (which staged the whole tree). Whatever appears after such a snapshot — a
+# write racing the signal, a process the turn left running, a write after a
+# kill between the commit and the rest — is after, and is restored. A turn
+# the loop dispatches (a repair pass, the light review, a verdict request)
+# drops the snapshot first: its writes are never residue. No snapshot, no
+# judgement: a completion never seen clean (a record-only commit over older
+# work, a write in the same shell command as the commit) keeps the v0.18.0
+# rest — its dirt is named by finish_complete and left as is. Untracked
+# files are restored too (removed, kept in the residue): an untracked `??`
+# blocks the rest exactly like a tracked edit. The loop's own paths (logs,
+# batons, transient signals) are never residue.
+
+completion_blob_at_head() {
+  git rev-parse -q --verify "HEAD:artifacts/project-complete.json" 2>/dev/null || true
+}
+
+completion_landed_at_head() {
+  # The completion record on disk is the one HEAD carries (committed, and
+  # unchanged since).
+  [[ -f "$ARTIFACTS_DIR/project-complete.json" && -n "$(completion_blob_at_head)" ]] \
+    && ! artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"
+}
+
+_completion_commit_time() {
+  # The committer time (epoch s) of the commit that put $1 (a blob) at
+  # artifacts/project-complete.json in HEAD's history; empty when unknown.
+  local c
+  c="$(git log -1 --format='%H %ct' HEAD -- artifacts/project-complete.json 2>/dev/null)" || c=""
+  echo "${c#* }"
+}
+
+_status_records_to_b64_file() {
+  # $1 = a NUL-separated "XY<TAB>path" file (gate_status_snapshot), $2 = out:
+  # one base64 record per line (raw bytes survive jq; a huge set never
+  # passes through argv — the gate-pending record's ARG_MAX limit).
+  local rec
+  : > "$2"
+  while IFS= read -r -d '' rec; do printf '%s' "$rec" | base64 -w0 >> "$2"; echo >> "$2"; done < "$1"
+}
+
+_boundary_b64_records_file() {
+  # $1 = jq path of an array of base64 records in the record, $2 = out: the
+  # NUL-separated "XY<TAB>path" file they encode.
+  local line
+  : > "$2"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    { base64 -d <<<"$line" 2>/dev/null || true; printf '\0'; } >> "$2"
+  done < <(boundary_get "$1 | if type == \"array\" then .[] else empty end | strings")
+}
+
+completion_snapshot_take() {
+  # $1 = source (turn-guard | landing), $2 = the completion blob at HEAD.
+  # Records `completion_snapshot` {blob, commit, source, at, before}:
+  # `before` is the tree's dirt at the moment the loop OBSERVED the
+  # completion committed — the guard only when the tree was clean then, the
+  # walk right after its own commit (which staged everything). Nothing is
+  # judged by a timestamp (review round 4: a file's time cannot tell older
+  # work re-touched after the commit from work written after it).
+  local src="$1" blob="$2" commit snap b64
+  [[ -n "$blob" ]] || return 0
+  commit="$(git log -1 --format=%H HEAD -- artifacts/project-complete.json 2>/dev/null)" || commit=""
+  snap="$(mktemp)" || return 0
+  b64="$(mktemp)" || { rm -f "$snap"; return 0; }
+  if ! GIT_OPTIONAL_LOCKS=0 gate_status_snapshot "$snap"; then
+    rm -f "$snap" "$b64"
+    echo "boundary-state: git status unavailable — no snapshot at the completion commit (a later write is left for the rest to name)" >&2
+    return 0
+  fi
+  _status_records_to_b64_file "$snap" "$b64"
+  _boundary_write '.completion_snapshot = {blob: $blob, commit: (if $commit == "" then null else $commit end),
+        source: $src, at: $now, before: ($b | split("\n") | map(select(length > 0)))}' \
+    --arg blob "$blob" --arg commit "$commit" --arg src "$src" --rawfile b "$b64"
+  rm -f "$snap" "$b64"
+  return 0
+}
+
+completion_snapshot_ensure() {
+  # The walk, right after its OWN commit carried a (new) completion record:
+  # keep the guard's snapshot of this very record, else take the walk's own —
+  # the commit staged the whole tree, so what is dirty now predates nothing.
+  # Never anything else (review round 2): a record the walk finds already
+  # committed without a snapshot is not judged — its dirt is named at the
+  # rest, as before.
+  local blob
+  completion_landed_at_head || return 0
+  blob="$(completion_blob_at_head)"
+  [[ "$(boundary_get '.completion_snapshot.blob // empty')" == "$blob" ]] && return 0
+  completion_snapshot_take landing "$blob"
+}
+
+completion_snapshot_drop() {
+  # A snapshot covers the window from its completion commit until the loop
+  # next hands the tree to a model: whatever a dispatched turn writes (a
+  # repair pass, the light review, a verdict request) is that turn's work,
+  # never residue (review round 2). run_once drops it before every turn.
+  [[ -f "$BOUNDARY_STATE_FILE" ]] || return 0
+  [[ -n "$(boundary_get '.completion_snapshot // empty | tostring')" ]] || return 0
+  _boundary_write 'del(.completion_snapshot)'
+}
+
+completion_residue_settle() {
+  # (b): at a final boundary whose completion is committed, restore every
+  # path that changed since the completion snapshot, keep the bytes, name
+  # them. Best-effort per path, never refuses, never blocks. A path whose
+  # bytes could not be kept is NOT restored (named, left as is): a restore
+  # never discards what the residue did not keep.
+  boundary_final || return 0
+  local blob
+  blob="$(completion_blob_at_head)"
+  [[ -n "$blob" && "$(boundary_get '.completion_snapshot.blob // empty')" == "$blob" ]] || return 0
+  local before after paths keep rec xy path dir stamp json ok left=()
+  before="$(mktemp)"; after="$(mktemp)"; paths="$(mktemp)"; keep="$(mktemp)"
+  _boundary_b64_records_file '.completion_snapshot.before' "$before"
+  if ! gate_status_snapshot "$after"; then
+    rm -f "$before" "$after" "$paths" "$keep"
+    return 0
+  fi
+  gate_footprint_diff "$before" "$after" "$paths"
+  if [[ ! -s "$paths" ]]; then rm -f "$before" "$after" "$paths" "$keep"; return 0; fi
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
+  dir="$ARTIFACTS_DIR/logs/post-completion/$stamp"
+  : > "$keep"
+  if mkdir -p "$dir/untracked" 2>/dev/null; then
+    # Keep every byte first, path by path; only a kept path is restored.
+    while IFS= read -r -d '' rec; do
+      xy="${rec%%$'\t'*}"; path="${rec#*$'\t'}"
+      ok=0
+      if [[ "$xy" == "??" ]]; then
+        ( cd "$ROOT_DIR" && cp -a --parents -- "${path%/}" "$dir/untracked/" ) 2>/dev/null && ok=1
+      else
+        # A deletion, a modification, a staged add: the diff against HEAD
+        # carries it (binary-safe); appended per path.
+        _gate_git diff --binary HEAD -- "$path" >> "$dir/tracked.patch" 2>/dev/null && ok=1
+      fi
+      if [[ "$ok" -eq 1 ]]; then printf '%s\0' "$rec" >> "$keep"; else left+=("$path"); fi
+    done < "$paths"
+  else
+    while IFS= read -r -d '' rec; do left+=("${rec#*$'\t'}"); done < "$paths"
+  fi
+  if [[ -s "$keep" ]]; then
+    gate_footprint_restore "$keep"
+    # Name only what the restore achieved (review round 5): a submodule, or a
+    # checkout git refused, is still dirty exactly as it was — left, named.
+    local -A was=() now=()
+    local done_paths=() r2 k
+    while IFS= read -r -d '' rec; do k="${rec#*$'\t'}"; was["$k"]="${rec%%$'\t'*}"; done < "$before"
+    r2="$(mktemp)" || r2=""
+    if [[ -n "$r2" ]] && gate_status_snapshot "$r2"; then
+      while IFS= read -r -d '' rec; do k="${rec#*$'\t'}"; now["$k"]="${rec%%$'\t'*}"; done < "$r2"
+    fi
+    while IFS= read -r -d '' rec; do
+      k="${rec#*$'\t'}"
+      if [[ -n "${now[$k]:-}" && "${now[$k]}" != "${was[$k]:-}" ]]; then left+=("$k")
+      elif [[ "${rec%%$'\t'*}" == "??" && ( -e "$ROOT_DIR/${k%/}" || -L "$ROOT_DIR/${k%/}" ) ]]; then left+=("$k")   # ignored again, kept on disk
+      else done_paths+=("$k"); fi
+    done < "$keep"
+    [[ -n "$r2" ]] && rm -f "$r2"
+    if [[ ${#done_paths[@]} -gt 0 ]]; then
+      json="$(jq -cn '$ARGS.positional' --args -- "${done_paths[@]}")" || json='["(unavailable)"]'
+      _boundary_write '.post_completion = {restored: (((.post_completion // {}).restored // []) + $p | unique),
+            residue: $dir, commit: (.completion_snapshot.commit // null), at: $now}' \
+        --argjson p "$json" --arg dir "${dir#"$ROOT_DIR"/}"
+      echo "boundary-state: ${#done_paths[@]} path(s) were written AFTER the completion commit $(boundary_get '.completion_snapshot.commit // "?"' | cut -c1-12) — the iteration is terminal, so they are restored to the committed state and named, never landed (v0.18.1); the bytes are kept under ${dir#"$ROOT_DIR"/}/: $(jq -r 'join(", ")' <<<"$json" 2>/dev/null)" >&2
+    fi
+  fi
+  if [[ ${#left[@]} -gt 0 ]]; then
+    echo "boundary-state: WARN — ${#left[@]} path(s) written after the completion commit are NOT restored (their bytes could not be kept under artifacts/logs/post-completion/ — a restore never discards what the residue did not keep — or git could not restore them: a submodule, a refused checkout) — left as is: ${left[*]}" >&2
+  fi
+  rm -f "$before" "$after" "$paths" "$keep"
+  return 0
 }
 
 _boundary_kill_probe() {
@@ -3164,6 +3419,20 @@ phasekit_verify() {
     echo "phasekit verify: skipped — the $tier tier's measured P90 is ${p90}s, longer than a tool call may run (600 s). End your turn; the loop's commit gate runs the gate itself."
     return 3
   fi
+  # v0.18.1 (row 1193 (1)): a git index.lock stops `git add` with only git's
+  # own "fatal: Unable to create …" and no word from this tool. Name it and
+  # what to do; never remove it (a model's own git may be running — the
+  # loop's commit gate stages the tree itself later).
+  local lock lock_age
+  lock="$(git rev-parse --git-path index.lock 2>/dev/null)" || lock=""
+  if [[ -n "$lock" ]]; then
+    [[ "$lock" = /* ]] || lock="$ROOT_DIR/$lock"
+    if [[ -e "$lock" ]]; then
+      lock_age=$(( $(date +%s) - $(stat -c %Y "$lock" 2>/dev/null || date +%s) ))
+      echo "phasekit verify: not run — git's index is locked: $lock exists (${lock_age}s old). Another git command is running in this repository, or one died and left the lock behind. If no git process is running (\`pgrep -a git\` shows none), remove it — rm -f '$lock' — and run phasekit verify again; otherwise wait for it to finish. Nothing was staged or run." >&2
+      return 2
+    fi
+  fi
   prepare_verdicts_for_landing
   drv="$(evidence_driver)"
   stage_landing_tree "$drv" landing
@@ -3244,6 +3513,30 @@ took_control_this_iteration() {
   # Did the deadline watchdog end a turn during this iteration (v0.18.0)?
   local y="$ARTIFACTS_DIR/logs/.deadline-yield"
   [[ -f "$y" && -n "${ITER_START_MARKER:-}" && -f "${ITER_START_MARKER:-}" && "$y" -nt "$ITER_START_MARKER" ]]
+}
+
+took_control_inferred() {
+  # v0.18.1 (row 1193 (3), v0.18.0 review round 11): the watchdog could not
+  # write its marker (a full disk, an unwritable logs/) and ended the turn
+  # anyway; left to the marker alone, the SIGTERM's exit code read as a CLI
+  # failure and was retried. The loop knows its own plan: a turn that
+  # started before a take-control instant, ended after it, and ended
+  # non-zero was taken — read as taken, and said so (loudly: the marker's
+  # absence is a fault worth seeing). $1 = the turn's start (epoch s),
+  # $2 = build | review (the light build turn has its own earlier instant),
+  # $3 = the turn's exit code. A turn that yielded (0) is never inferred.
+  local started="$1" role="$2" rc="${3:-0}" now t inst
+  [[ "$rc" != 0 && -n "${SESSION_DEADLINE:-}" && "$started" =~ ^[0-9]+$ ]] || return 1
+  now="$(date +%s)"
+  for t in "$( [[ "$role" == build ]] && echo "${DEADLINE_BUILDER_TAKE_CONTROL:-0}" || echo 0)" "${DEADLINE_TAKE_CONTROL:-0}"; do
+    [[ "$t" =~ ^[0-9]+$ && "$t" -gt 0 ]] || continue
+    inst=$((SESSION_DEADLINE - t))
+    if [[ "$started" -lt "$inst" && "$now" -ge "$inst" ]]; then
+      echo "deadline watchdog: took control (inferred — the take-control marker artifacts/logs/.deadline-yield is missing; the turn ended with exit $rc after the T-${t}s take-control point, so the watchdog ended it; see artifacts/logs/deadline-watchdog.log) — not a CLI failure, not retried (v0.18.1)." >&2
+      return 0
+    fi
+  done
+  return 1
 }
 
 release_stale_index_lock() {
@@ -3647,13 +3940,32 @@ _land_boundary() {
   # already read and deleted its baton by then).
   local prior_ccip="${COMPLETION_COMMIT_IN_PROGRESS:-0}"
   if boundary_final || [[ "$context" == "stranded" ]]; then COMPLETION_COMMIT_IN_PROGRESS=1; fi
+  # v0.18.1 (row 831 (b)): a completion already committed when the walk
+  # begins (the model's own commit, a killed session's) — restore what was
+  # written after it BEFORE any step stages the tree (an approval commit's
+  # `git add -A` would otherwise land it).
+  if boundary_final; then completion_residue_settle || true; fi
+  local act_blob
   for (( step=1; step<=BOUNDARY_STEP_RESTED; step++ )); do
     name="${BOUNDARY_STEP_NAMES[$step]}"
+    # v0.18.1: at the rest nothing written after the completion commit
+    # survives in the tree — restored, named, kept under logs/ — whether or
+    # not the rest would otherwise prove (a derived-state edit it tolerates
+    # is still residue).
+    if [[ "$step" -eq "$BOUNDARY_STEP_RESTED" ]] && boundary_final; then completion_residue_settle || true; fi
     if ! boundary_prove "$step"; then
       rc=0
+      act_blob="$(completion_blob_at_head)"
       boundary_do "$step" "$context" "$any_age" || rc=$?
       case "$rc" in
-        0) did=1 ;;
+        0) did=1
+           # v0.18.1: the walk's own commit carried the completion record
+           # (step 3, or step 2 when the approval commit swept it): the
+           # tree right after it is the snapshot.
+           if [[ "$step" -eq 2 || "$step" -eq 3 ]] && boundary_final \
+              && [[ -n "$(completion_blob_at_head)" && "$(completion_blob_at_head)" != "$act_blob" ]]; then
+             completion_snapshot_ensure || true
+           fi ;;
         2) : ;;
         *) COMPLETION_COMMIT_IN_PROGRESS="$prior_ccip"; BOUNDARY_WALK_CONTEXT=""
            echo "boundary-state: stopped at step $step ($name) — rc $rc; record stays at step $(boundary_step) ($(boundary_get '.step_name // "idle"'))." >&2
@@ -3671,6 +3983,10 @@ _land_boundary() {
     sha="$(_boundary_sha_for "$step")"
     boundary_advance "$step" "$sha"
     _boundary_kill_probe "$step" post
+    # v0.18.1 (row 831 (b)): the completion is committed — snapshot the tree
+    # at it (or keep the turn guard's), and restore anything written since
+    # BEFORE the squash's gate judges the tree; step 7 settles again.
+    if [[ "$step" -eq 3 ]] && boundary_final; then completion_residue_settle || true; fi
   done
   COMPLETION_COMMIT_IN_PROGRESS="$prior_ccip"; BOUNDARY_WALK_CONTEXT=""
   echo "boundary-state: rested (step $BOUNDARY_STEP_RESTED) — $(boundary_final && echo "final boundary" || echo "phase boundary") for phase $(boundary_get '.phase // "unknown"')$( [[ "$did" -eq 1 ]] || echo " (nothing new to commit)")."
@@ -4209,9 +4525,13 @@ deadline_take_control() {
   read -r pid role <<<"$turn"
   if [[ "$which" == builder && "$role" == light-review ]]; then return 0; fi
   if boundary_complete; then return 0; fi
-  jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg t "$tminus" --arg pid "$pid" --arg role "$role" \
-    '{took_control: true, at: $at, t_minus_s: ($t | tonumber), pid: ($pid | tonumber), turn: $role}' \
-    > "$ARTIFACTS_DIR/logs/.deadline-yield" 2>/dev/null || true
+  if ! jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg t "$tminus" --arg pid "$pid" --arg role "$role" \
+       '{took_control: true, at: $at, t_minus_s: ($t | tonumber), pid: ($pid | tonumber), turn: $role}' \
+       > "$ARTIFACTS_DIR/logs/.deadline-yield" 2>/dev/null; then
+    # v0.18.1 (row 1193 (3)): degrade loudly, never into a CLI retry — the
+    # loop infers the take-control from its own plan (took_control_inferred).
+    echo "deadline watchdog: WARN — could not write artifacts/logs/.deadline-yield; ending the turn anyway (the loop reads the take-control from its own plan and says so)"
+  fi
   if [[ ! -f "$WRAPUP_SENTINEL" ]]; then touch "$WRAPUP_SENTINEL" 2>/dev/null || true; fi
   kill -TERM "$pid" 2>/dev/null || true
   echo "deadline watchdog: took control at T-${tminus}s — the model had not yielded; its turn was ended (SIGTERM to claude pid $pid, turn $role); the loop lands what is verified"
@@ -4348,6 +4668,7 @@ run_until_done_exit_trap() {
   # watchdog already inside phase 2 could re-write the baton after the clear
   # below removed it, leaving a lying "you were killed" note on a session
   # that concluded. wait makes the ordering real.
+  completion_guard_stop   # v0.18.1: a turn's guard never outlives the loop
   if [[ -n "$DEADLINE_WATCHDOG_PID" ]]; then
     kill "$DEADLINE_WATCHDOG_PID" 2>/dev/null || true
     wait "$DEADLINE_WATCHDOG_PID" 2>/dev/null || true
@@ -4704,7 +5025,8 @@ REVIEW_EOF
   ) || rrc=$?
   rm -f "$review_prompt"
   REVIEW_ENDED=0
-  if [[ -f "$ARTIFACTS_DIR/logs/.deadline-yield" && "$ARTIFACTS_DIR/logs/.deadline-yield" -nt "${ITER_START_MARKER}.review" ]]; then
+  if [[ -f "$ARTIFACTS_DIR/logs/.deadline-yield" && "$ARTIFACTS_DIR/logs/.deadline-yield" -nt "${ITER_START_MARKER}.review" ]] \
+     || { ! completion_guard_ended_turn "${ITER_START_MARKER}.review" "$rrc" && took_control_inferred "$rstart" review "$rrc"; }; then
     TOOK_CONTROL=1
     REVIEW_ENDED=1
     release_stale_index_lock
@@ -4716,6 +5038,9 @@ REVIEW_EOF
     # its review runs to the end.
     if [[ -f "$ARTIFACTS_DIR/project-complete.json" ]]; then carry_completion_record; fi
     echo "deadline watchdog: took control — the light review's turn was ended before it finished; the completion is not landed this session (the build is wrapped up; the next session re-claims it)."
+  elif completion_guard_ended_turn "${ITER_START_MARKER}.review" "$rrc"; then
+    echo "completion guard: the review committed the completion record itself — its turn was ended there (v0.18.1); landing it."
+    release_stale_index_lock
   else
     cost_sample r "$(( $(date +%s) - rstart ))"
   fi
@@ -4726,23 +5051,181 @@ REVIEW_EOF
   return 0
 }
 
+# --- the completion turn guard (v0.18.1, row 831 (a)) -------------------------
+# See "writes after the completion commit" in the boundary block. One
+# background child per model turn, started and reaped by run_once: it polls
+# HEAD every half second; when a commit made during the turn lands a
+# completion record that CLAIMS (completion_record_claims — a carried record
+# a checkpoint swept in unchanged claims nothing), it snapshots the tree at
+# that commit (the commit's instant from HEAD's reflog), writes
+# artifacts/logs/.completion-yield and ends the turn — SIGTERM to the claude
+# pid run-phase.sh names, the take-control mechanism v0.18.0 probed (the turn
+# ends in ~0.5 s, completed writes intact, no index.lock). A write racing the
+# signal is the settle's business. When the turn ended on its own before a
+# poll saw the commit, run_once makes the same observation once, in the
+# foreground, without a signal. Stdio detached (the v0.13.0 pipe-holder
+# lesson); it exits within half a second of the loop, and is reaped when the
+# turn ends. Its git reads take no optional locks (never an index.lock
+# against the model's own git).
+COMPLETION_GUARD_PID=""
+COMPLETION_GUARD_BASE=""
+COMPLETION_GUARD_STARTED=""
+COMPLETION_GUARD_STASH=""
+
+completion_guard_observe() {
+  # $1 = the completion blob at HEAD when the turn started, $2 = the turn's
+  # start (epoch s), $3 = 1 to end the turn. 0 when a completion commit of
+  # this turn is observed (and recorded); 1 otherwise.
+  local base="$1" started="$2" end_turn="${3:-0}" b ct turn pid="" role="" waited=0
+  b="$(completion_blob_at_head)"
+  [[ -n "$b" && "$b" != "$base" ]] || return 1
+  ct="$(_completion_commit_time)"
+  [[ "$ct" =~ ^[0-9]+$ && "$ct" -ge "$started" ]] || return 1
+  git cat-file -p "$b" 2>/dev/null | jq -e 'type == "object"' >/dev/null 2>&1 || return 1
+  committed_record_claims "$b" || return 1
+  # A rebase, cherry-pick, merge or am in progress re-commits as it goes:
+  # never end a turn in the middle of one (review round 2) — the next poll,
+  # or the observation after the turn, sees where it lands.
+  local gd
+  gd="$(git rev-parse --git-dir 2>/dev/null)" || gd=""
+  if [[ -n "$gd" ]]; then
+    [[ "$gd" = /* ]] || gd="$ROOT_DIR/$gd"
+    if [[ -d "$gd/rebase-merge" || -d "$gd/rebase-apply" || -f "$gd/CHERRY_PICK_HEAD" \
+          || -f "$gd/MERGE_HEAD" || -f "$gd/REVERT_HEAD" || -d "$gd/sequencer" ]]; then
+      return 1
+    fi
+  fi
+  # Git's own commit may still hold the index lock (it is released after
+  # HEAD and the reflog move): never end a turn inside that window (review
+  # round 4).
+  if [[ -n "$gd" && -e "$gd/index.lock" ]]; then return 1; fi
+  # A stash made during the turn hides work from the tree (review round 5:
+  # `git stash -u` to look at the committed tree, the pop never came): a
+  # clean tree then proves nothing — no snapshot, no signal.
+  if [[ "$(git rev-parse -q --verify refs/stash 2>/dev/null || true)" != "${COMPLETION_GUARD_STASH:-}" ]]; then return 1; fi
+  # The completion stands only on a clean tree: the commit carried the
+  # turn's work (review round 3: a record-only commit over older work is not
+  # the end — the model may commit the rest next) and nothing has been
+  # written since. Seen clean, the snapshot is exact: whatever appears after
+  # this moment — a write racing the signal included — is after the
+  # commit. Never seen clean: no snapshot, no judgement (the v0.18.0 rest).
+  _boundary_tree_clean || return 1
+  completion_snapshot_take turn-guard "$b" || true
+  # Still clean AFTER the snapshot, so nothing written between the two reads
+  # hides in its before-set (review round 6); else no snapshot, no signal.
+  if ! _boundary_tree_clean; then completion_snapshot_drop || true; return 1; fi
+  if [[ "$end_turn" == 1 ]]; then
+    turn="$(claude_turn_pid)"
+    if [[ -n "$turn" ]]; then read -r pid role <<<"$turn"; fi
+    if [[ -n "$pid" ]]; then kill -TERM "$pid" 2>/dev/null || true; fi
+  fi
+  if ! jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg blob "$b" \
+       --arg commit "$(git log -1 --format=%H HEAD -- artifacts/project-complete.json 2>/dev/null)" \
+       --arg pid "$pid" --arg role "$role" \
+       '{completion_committed: true, at: $at, blob: $blob, commit: $commit,
+         pid: (if $pid == "" then null else ($pid | tonumber) end),
+         turn: (if $role == "" then null else $role end)}' \
+       > "$ARTIFACTS_DIR/logs/.completion-yield" 2>/dev/null; then
+    echo "completion guard: WARN — could not write artifacts/logs/.completion-yield; the turn is still ended, the loop reads the commit from git"
+  fi
+  if [[ -n "$pid" ]]; then
+    echo "completion guard: the completion record was committed during the turn — the turn was ended (SIGTERM to claude pid $pid, turn $role)"
+    while kill -0 "$pid" 2>/dev/null && [[ "$waited" -lt 30 ]]; do sleep 0.5; waited=$((waited + 1)); done
+  elif [[ "$end_turn" == 1 ]]; then
+    echo "completion guard: the completion record was committed during the turn — no live turn to end"
+  fi
+  return 0
+}
+
+completion_guard_watch() {
+  # The background poll: $1 base, $2 start (see completion_guard_observe).
+  local base="$1" started="$2"
+  export GIT_OPTIONAL_LOCKS=0
+  while :; do
+    kill -0 "$$" 2>/dev/null || exit 0
+    if completion_guard_observe "$base" "$started" 1; then exit 0; fi
+    # (The base never advances: a record older than the turn never fires —
+    # the commit-time check — and a completion the guard held back for (a
+    # rebase in progress, older work not yet committed) must fire the
+    # moment it stands, review round 3.)
+    sleep 0.5
+  done
+}
+
+completion_guard_start() {
+  completion_guard_stop
+  mkdir -p "$ARTIFACTS_DIR/logs" 2>/dev/null || true
+  COMPLETION_GUARD_BASE="$(completion_blob_at_head)"
+  COMPLETION_GUARD_STARTED="$(date +%s)"
+  COMPLETION_GUARD_STASH="$(git rev-parse -q --verify refs/stash 2>/dev/null || true)"
+  touch "$ARTIFACTS_DIR/logs/.completion-guard-start" 2>/dev/null || true
+  ( completion_guard_watch "$COMPLETION_GUARD_BASE" "$COMPLETION_GUARD_STARTED" ) \
+    >>"$ARTIFACTS_DIR/logs/completion-guard.log" 2>&1 </dev/null &
+  COMPLETION_GUARD_PID=$!
+}
+
+completion_guard_stop() {
+  if [[ -n "${COMPLETION_GUARD_PID:-}" ]]; then
+    kill "$COMPLETION_GUARD_PID" 2>/dev/null || true
+    wait "$COMPLETION_GUARD_PID" 2>/dev/null || true
+    COMPLETION_GUARD_PID=""
+  fi
+  return 0
+}
+
+completion_guard_ended_turn() {
+  # $1 = the turn's start marker file, $2 = the turn's exit code. Was the
+  # completion committed during that turn (and the turn ended there)? The
+  # guard's marker; else — a turn that ended NON-zero only (a SIGTERM whose
+  # marker could not be written) — git's own evidence: the claiming record
+  # HEAD carries was committed at or after the marker (the loop commits no
+  # completion while a turn runs). A turn that ended 0 without a marker
+  # yielded on its own: nothing to say.
+  local mk="${1:-}" rc="${2:-0}" y="$ARTIFACTS_DIR/logs/.completion-yield" ct mt
+  [[ -n "$mk" && -f "$mk" ]] || return 1
+  if [[ -f "$y" && "$y" -nt "$mk" ]]; then return 0; fi
+  [[ "$rc" != 0 ]] || return 1
+  completion_landed_at_head && committed_record_claims "$(completion_blob_at_head)" || return 1
+  # Only a turn the guard acted on: its snapshot of this very record (taken
+  # before the signal) — a CLI failure after a record-only commit the guard
+  # held back for is a CLI failure (review round 5).
+  [[ "$(boundary_get '.completion_snapshot.source // empty')" == turn-guard \
+     && "$(boundary_get '.completion_snapshot.blob // empty')" == "$(completion_blob_at_head)" ]] || return 1
+  ct="$(_completion_commit_time)"; mt="$(stat -c %Y "$mk" 2>/dev/null)" || mt=""
+  [[ "$ct" =~ ^[0-9]+$ && "$mt" =~ ^[0-9]+$ && "$ct" -ge "$mt" ]]
+}
+
 run_once() {
   local prompt_file="$1"
   local mode="$2"
   local iter_num="$3"
   local retry_attempt="${4:-0}"
+  local rc=0
 
+  # v0.18.1: every model turn runs under the completion guard, and a turn's
+  # own writes are never residue of an earlier completion commit.
+  completion_snapshot_drop || true
+  completion_guard_start
   if [[ "$mode" == "continue" ]]; then
     CLAUDE_MODE=continue \
       PHASEKIT_ITER="$iter_num" \
       PHASEKIT_RETRY_ATTEMPT="$retry_attempt" \
-      "$RUN_PHASE_SCRIPT" "$prompt_file"
+      "$RUN_PHASE_SCRIPT" "$prompt_file" || rc=$?
   else
     CLAUDE_MODE=new \
       PHASEKIT_ITER="$iter_num" \
       PHASEKIT_RETRY_ATTEMPT="$retry_attempt" \
-      "$RUN_PHASE_SCRIPT" "$prompt_file"
+      "$RUN_PHASE_SCRIPT" "$prompt_file" || rc=$?
   fi
+  completion_guard_stop
+  # The turn ended before a poll saw its completion commit: the same
+  # observation once, now, so the walk judges "after" by the commit's own
+  # instant (no signal — the turn is over).
+  if [[ ! -f "$ARTIFACTS_DIR/logs/.completion-yield" ]] \
+     || ! [[ "$ARTIFACTS_DIR/logs/.completion-yield" -nt "$ARTIFACTS_DIR/logs/.completion-guard-start" ]]; then
+    GIT_OPTIONAL_LOCKS=0 completion_guard_observe "$COMPLETION_GUARD_BASE" "$COMPLETION_GUARD_STARTED" 0 >/dev/null 2>&1 || true
+  fi
+  return "$rc"
 }
 
 # --- model-facing subcommands (v0.18.0) --------------------------------------
@@ -4862,7 +5345,8 @@ if [[ -f "$WRAPUP_SENTINEL" ]]; then
   rm -f "$WRAPUP_SENTINEL"
 fi
 # v0.18.0: the take-control marker belongs to the session that wrote it.
-rm -f "$ARTIFACTS_DIR/logs/.deadline-yield"
+rm -f "$ARTIFACTS_DIR/logs/.deadline-yield" 2>/dev/null || true
+rm -f "$ARTIFACTS_DIR/logs/.completion-yield" 2>/dev/null || true   # v0.18.1: so does the completion guard's
 TOOK_CONTROL=0          # set when the deadline watchdog ended a turn (v0.18.0)
 rm -f "$ARTIFACTS_DIR/logs/claude.pid"   # v0.18.0: a dead session's turn is nobody's to end
 rm -f "$ARTIFACTS_DIR/logs/.landing-in-flight"
@@ -5134,6 +5618,7 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   # retries (and every later iteration) use `continue` so they resume the
   # session that was just established rather than starting a new one.
   rc=0
+  turn_started_at="$(date +%s)"
   if [[ "$iteration" -eq 1 && "$CLAUDE_MODE" == "new" && "$retries_used" -eq 0 ]]; then
     run_once "$PROMPT_FILE" "new" "$iteration" "$retries_used" || rc=$?
   else
@@ -5144,13 +5629,30 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   # the exit code is the SIGTERM's, not a transient CLI failure: no CLI
   # retry, no verdict retry — the loop lands what the turn left (a verdict
   # through its own verify-gated path) and wraps up at the next boundary.
-  if took_control_this_iteration; then
+  # v0.18.1 (row 1193 (3)): a marker the watchdog could not write no longer
+  # turns that into a CLI retry — a turn that ended non-zero across its
+  # take-control instant is read as taken, and said so.
+  # The guard's own SIGTERM is never read as a take-control (review round 1).
+  if took_control_this_iteration \
+     || { ! completion_guard_ended_turn "$ITER_START_MARKER" "$rc" && took_control_inferred "$turn_started_at" build "$rc"; }; then
     TOOK_CONTROL=1
     echo "deadline watchdog: took control — the model's turn was ended at the take-control point (claude exited $rc); landing what stands, then wrapping up (no CLI retry, no verdict retry)."
     # (The loop's landing and wrap-up mark themselves in flight; the
     # last-resort commit stands down for both — no marker needed here.)
     release_stale_index_lock
     rc=0
+  elif completion_guard_ended_turn "$ITER_START_MARKER" "$rc"; then
+    # v0.18.1 (row 831 (a)): the turn committed the completion record — the
+    # iteration is terminal. Ended there by the guard (its exit code is the
+    # SIGTERM's): no CLI retry, no verdict retry — the loop lands it.
+    if [[ "$rc" != 0 || -n "$(jq -r '.pid // empty' "$ARTIFACTS_DIR/logs/.completion-yield" 2>/dev/null)" ]]; then
+      echo "completion guard: the completion record was committed during the turn ($(git log -1 --format=%h HEAD -- artifacts/project-complete.json 2>/dev/null)) — the iteration is terminal, so the turn was ended there (claude exited $rc; v0.18.1); landing it — a write made after that commit is restored at the rest."
+      release_stale_index_lock
+      rc=0
+    else
+      echo "completion guard: the turn committed the completion record itself ($(git log -1 --format=%h HEAD -- artifacts/project-complete.json 2>/dev/null)) and ended on its own — landing it; a write made after that commit is restored at the rest (v0.18.1)."
+      record_close_out_sample
+    fi
   else
     record_close_out_sample
   fi
@@ -5214,9 +5716,11 @@ Inspect the tree first (git status, git diff), then write the artifact. Do not
 start new work and do not run git commit — the wrapper owns commits.
 VERDICT_RETRY_EOF
     vrc=0
+    turn_started_at="$(date +%s)"
     run_once "$verdict_prompt" "continue" "$iteration" 0 || vrc=$?
     rm -f "$verdict_prompt"
-    if took_control_this_iteration; then
+    if took_control_this_iteration \
+       || { ! completion_guard_ended_turn "$ITER_START_MARKER" "$vrc" && took_control_inferred "$turn_started_at" build "$vrc"; }; then
       TOOK_CONTROL=1
       echo "deadline watchdog: took control — the verdict request's turn was ended at the take-control point; wrapping up what stands."
       release_stale_index_lock
@@ -5232,7 +5736,35 @@ VERDICT_RETRY_EOF
     # Light mode: one review pass on the default model BEFORE the final commit
     # (decided fork A). The reviewer may fix defects in place, or withdraw the
     # completion by swapping the artifact for phase-blocked.json.
-    if [[ "$ITERATION_MODE" == "light" && "$light_review_done" -eq 0 ]]; then
+    light_review_skip=0
+    if [[ "$ITERATION_MODE" == "light" && "$light_review_done" -eq 0 ]] \
+       && [[ -n "$(completion_blob_at_head)" && "$(boundary_get '.completion_snapshot.blob // empty')" == "$(completion_blob_at_head)" ]]; then
+      # v0.18.1 (row 831): the review precedes the final commit — and the
+      # build turn committed the completion itself (the guard saw it). What
+      # the turn wrote after that commit is restored first. If the commit
+      # then carries the whole tree, the iteration is terminal and the review
+      # does not run: it could only write what the rest restores (iteration
+      # 142's review edited tests/test_record_run.py after the commit). If
+      # older work is still uncommitted (a record-only commit), the review
+      # runs exactly as in v0.18.0 — a record it re-writes with new bytes
+      # lands that work through the verify-gated completion commit — and,
+      # like every turn the
+      # loop dispatches, its writes are never residue (run_once drops the
+      # snapshot).
+      completion_residue_settle || true
+      # Squash mode only (review round 2): there the catch-up squash still
+      # runs the verify gate before the tree reaches the target. In plain
+      # mode nothing after a model's own commit gates it, so the review
+      # keeps its v0.18.0 role (its re-written record lands through the
+      # verify-gated completion commit).
+      if squash_mode && _boundary_tree_clean; then
+        # Not marked done (review round 3): if this landing goes red, the
+        # repaired completion still gets its review.
+        light_review_skip=1
+        echo "Light mode: the completion record is already committed ($(git log -1 --format=%h HEAD -- artifacts/project-complete.json 2>/dev/null)) and carries the whole tree — the iteration is terminal, so the final review, which precedes the final commit, does not run (v0.18.1)."
+      fi
+    fi
+    if [[ "$ITERATION_MODE" == "light" && "$light_review_done" -eq 0 && "$light_review_skip" -eq 0 ]]; then
       light_review_done=1
       run_light_final_review
       if [[ "${REVIEW_ENDED:-0}" == 1 ]]; then
