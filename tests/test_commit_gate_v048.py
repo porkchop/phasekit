@@ -27,8 +27,11 @@ class CommitGateStructuralTest(unittest.TestCase):
     def test_hard_refusal_pair_and_explanation_artifact(self) -> None:
         self.assertIn(r"^\.claude/settings\.json$|^\.github/workflows/", self.text)
         self.assertIn("scope-refusal.json", self.text)
-        # Refusal must explain recovery, not just refuse.
-        self.assertIn("git restore --staged", self.text)
+        # Refusal must explain recovery, not just refuse — and (v0.18.2, the
+        # loop owns every commit) a recovery the model can run: editing the
+        # files back, never a git index write the command guard refuses.
+        self.assertIn("put those files back as HEAD has them (git show HEAD:<path> > <path>", self.text)
+        self.assertNotIn("git restore --staged", self.text)
 
     def test_scaffold_warning_proceeds_not_blocks(self) -> None:
         self.assertIn("scope-warning.json", self.text)

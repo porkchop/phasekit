@@ -8,9 +8,9 @@ This document describes how to run the scaffold's phase-gated workflow autonomou
 
 The container runs Claude Code with `--permission-mode bypassPermissions`. This means:
 - Claude can execute any command without prompting for approval
-- **Hooks do not apply** — `deny-dangerous-commands.sh` and other PreToolUse hooks are bypassed entirely
-- **Full repo access** — the bind mount gives Claude read/write access to the entire repository, including `.git` history
-- **`git add -A`** — the wrapper's commit function stages all changes; the only defense against committing unexpected files is `.gitignore`
+- **Hooks still apply** — permission prompts are skipped, but the project's hooks run on every tool call (probed in scaffold-runner, claude 2.1.285, 2026-09-30): a PreToolUse hook that exits 2 refuses the call. `deny-dangerous-commands.sh` receives its payload as JSON on stdin; until v0.18.1 it read only `CLAUDE_TOOL_INPUT`, which the harness never sets, so it blocked nothing. Since v0.18.2 it is live, and under the loop it refuses the model's git writes to this repository — the loop owns every commit (docs/QUALITY_GATES.md "The loop owns every commit")
+- **Full repo access** — the bind mount gives Claude read/write access to the entire repository, including `.git` history (the guard refuses git writes by command; a program that runs git itself is caught by the loop's whole-tree check at every completion)
+- **`git add -A`** — the wrapper's commit function stages all changes; `.gitignore` and the loop's own exclusions (artifacts/logs/, artifacts/scratch/) are the only defense against committing unexpected files — scratch goes in `artifacts/scratch/` or `/tmp`
 
 ### Network firewall (best-effort)
 

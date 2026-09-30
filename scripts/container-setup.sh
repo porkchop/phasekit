@@ -217,7 +217,10 @@ run_container() {
 
   # Pass API key only if set — omitting it lets Claude use stored subscription credentials.
   if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-    docker_args+=(-e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY")
+    # v0.18.2: by NAME — docker reads the value from its own environment; a
+    # value on docker's command line is readable in the host process table.
+    export ANTHROPIC_API_KEY
+    docker_args+=(-e ANTHROPIC_API_KEY)
   fi
 
   if [[ -n "${GIT_USER_NAME:-}" ]]; then
@@ -311,7 +314,13 @@ run_container() {
           continue ;;
       esac
       if [[ -n "${!_fwd_name:-}" ]]; then
-        docker_args+=(-e "$_fwd_name=${!_fwd_name}")
+        # v0.18.2: `-e NAME` — docker reads the value from its own
+        # environment. `-e NAME=value` put the value on docker's command
+        # line, readable by every account on the host in the process table
+        # (seen on foundry-worker, 2026-09-30); the promise above is "values
+        # travel only in the process env".
+        export "${_fwd_name?}"
+        docker_args+=(-e "$_fwd_name")
         _fwd_names+=("$_fwd_name")
       fi
     done
@@ -397,10 +406,12 @@ run_container() {
   # GH_TOKEN / GITHUB_TOKEN for HTTPS-with-PAT push workflows. Pass through
   # if set; container uses it via gh CLI or git credential helper.
   if [[ -n "${GH_TOKEN:-}" ]]; then
-    docker_args+=(-e GH_TOKEN="$GH_TOKEN")
+    export GH_TOKEN
+    docker_args+=(-e GH_TOKEN)
   fi
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    docker_args+=(-e GITHUB_TOKEN="$GITHUB_TOKEN")
+    export GITHUB_TOKEN
+    docker_args+=(-e GITHUB_TOKEN)
   fi
 
   docker run "${docker_args[@]}" "$IMAGE_NAME" "${cmd[@]}"

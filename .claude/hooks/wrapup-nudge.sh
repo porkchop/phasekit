@@ -138,6 +138,7 @@ Close out in this order, then end your turn:
      commit runs it; a green verdict is reused by the commit, not repeated.
   3. End your turn without changing anything after a green verify.
 
+The loop owns every commit: never run git commit, add, reset or stash yourself.
 Partial, committed progress is the designed outcome here; a dead tree is not.
 If you are a subagent: stop and return what you have to the main agent now.
 WRAPUP_EOF

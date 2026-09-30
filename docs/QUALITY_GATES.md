@@ -296,6 +296,87 @@ The host-side wrapper is responsible for:
 3. creating a git commit
 4. resuming Claude for the next phase
 
+### The loop owns every commit (v0.18.2)
+The loop owns every commit: a session never runs git commands that write
+history, refs or the index (commit, add, rm, mv, reset, restore, checkout,
+switch, stash, merge, rebase, cherry-pick, revert, tag, branch -f/-D,
+update-ref, worktree, …). Under the loop the PreToolUse command guard
+(`.claude/hooks/deny-dangerous-commands.sh`) refuses them with one plain line;
+read-only git (status, diff, log, show, grep, blame, ls-files, rev-parse, …)
+is allowed, and a write aimed at another repository (a scratch repo under
+`/tmp`) is not refused. An interactive session is a human's: this rule is
+inert there. (The guard's dangerous list — git push, a git tag write, git
+reset --hard, git clean -fd, sudo, shred — applies to every session, as the
+settings' deny list always meant; until v0.18.2 the guard read a variable the
+harness never sets, so it matched nothing.) To undo an edit of your own, edit the file back
+(`git show HEAD:<path> > <path>` restores the committed bytes). Why (queue row
+1233): a model that committed the completion record itself made the landing
+walk read "recorded" as done over work that commit did not carry, and the
+catch-up squash then verified the worktree while landing HEAD.
+
+The safety net for what the guard cannot see (a script or program that runs
+git itself): at every completion the loop checks the WHOLE tree, whoever
+committed. Every refusal of a commit a turn's verdict drives (and of the
+kept-out deploy claim's landing) reaches the next turn through
+`artifacts/phase-verify-failed.json` (its `label` says which: the gate, the
+credential scan, a path git cannot stage, git refusing the commit), bounded
+by `VERIFY_MAX_ATTEMPTS` — a wrap-up's refusal ends the session and is named
+in its baton instead; a path `git add` cannot stage is refused and
+named, never silently left out of the commit (a stale `index.lock` is
+released first); and while a committed completion is still landing, the loop
+never deletes its record (an earlier completion, in a project resumed for new
+work, goes at the next pass as it always did). Work the committed record's commit did not carry lands through the
+loop's own verify-gated completion commit; if the gate refuses it, it stays in
+the tree, is named (`boundary-state.json` `unlanded`, stderr), and the walk
+stops as for any red completion — never a red tree on the target (the
+record stays committed and on disk for the repair turn). The catch-up squash
+judges only a worktree that IS HEAD's tree, and in plain mode a commit the
+loop did not make is gated before its boundary counts. A final boundary
+whose worktree still differs from HEAD in paths no loop commit can carry
+stops with `phase-blocked.json`, `blocker_kind: landing`, never re-entering
+to the iteration cap.
+
+**Scratch.** `artifacts/scratch/` is the one sanctioned place in the tree for
+a session's scratch files (or `/tmp`): ignored, never committed, cleared when
+an iteration starts. The loop commits everything else it finds — phasekit
+cannot tell scratch from work anywhere else. A test never reads
+`artifacts/scratch/`: the verify gate runs on the worktree and sees it, while
+the committed tree (and the target) never carries it.
+
+**Subjects come from the plan.** The commit subject after the loop's
+`iteration N phase P:` prefix is the phase's PLANNED title from
+docs/PHASES.md (its `## Phase P — <title>` heading — the shallowest such
+heading, then the last; never a progress or status record); the session's
+`suggested_commit_message` goes in the commit body. A phase with no heading
+keeps the record's prose as its subject (the loop says so).
+
+### Planned paths (v0.18.2)
+A phase MAY declare the paths it expects to change, inside its section of
+docs/PHASES.md (its heading to the next heading of the same or a higher
+level, outside code fences):
+
+```
+## Phase 12 — The lobby admits three matches
+Planned paths: src/lobby/**, tests/lobby/*.test.ts, docs/SPEC.md
+```
+
+One or more `Planned paths:` lines (they add up); globs relative to the
+repository root, separated by commas or spaces, backticks optional. `*` stays
+inside one path segment, `**` crosses segments, `?` is one character, and a
+trailing `/` or a glob-free name also covers everything under it.
+`Planned paths: none` declares that the phase changes nothing beyond the
+always-planned paths: `artifacts/**`, `docs/PHASES.md`, `docs/LEARNINGS*.md`.
+
+At every approval-class landing the loop compares the phase's changed paths
+with the declaration and records the result as `plan_paths` in the landed
+record, the phase-close evidence file (`artifacts/iterations/<N>/<phase>.json`)
+and `boundary-state.json`, plus ONE stderr line: `status` is `inside`,
+`outside` (with `unplanned`, `unplanned_count`), `no-plan-declared` (never
+zero — `unplanned_count` is null) or `underivable`. It warns and never
+refuses. A scoping session writes the declaration when it plans a phase; the
+supervisor counts `unplanned_count` and the share of phases `inside` their
+plan.
+
 ### No-churn rule
 The wrapper only commits when the iteration produced a **substantive** change.
 Two kinds of churn are explicitly excluded:

@@ -24,6 +24,8 @@ CONTAINER_SCRIPT = REPO_ROOT / "scripts" / "container-setup.sh"
 
 STUB_DOCKER = """#!/usr/bin/env bash
 printf '%s\\n' "$@" >> "$DOCKER_ARGS_LOG"
+# v0.18.2: what docker's OWN environment holds (a `-e NAME` reads it there)
+printf 'ENV:XMEO_SEQUENCER_URL=%s\\n' "${XMEO_SEQUENCER_URL:+set}" >> "$DOCKER_ARGS_LOG"
 printf -- '---\\n' >> "$DOCKER_ARGS_LOG"
 exit 0
 """
@@ -79,7 +81,11 @@ class ForwardEnvTest(unittest.TestCase):
             "XMEO_SEQUENCER_URL": SECRET_VALUE,
         })
         envs = self._env_args(argv)
-        self.assertIn(f"XMEO_SEQUENCER_URL={SECRET_VALUE}", envs)
+        # v0.18.2: the NAME crosses on the command line, the value only in
+        # docker's environment — never in argv (the host's process table).
+        self.assertIn("XMEO_SEQUENCER_URL", envs)
+        self.assertNotIn(SECRET_VALUE, "\n".join(argv), "a value on docker's command line is readable by every account")
+        self.assertIn("ENV:XMEO_SEQUENCER_URL=set", argv)
         self.assertFalse(any(e.startswith("FOO_UNSET") for e in envs), "an unset name must not be forwarded")
         self.assertIn("PHASEKIT_FORWARD_ENV=XMEO_SEQUENCER_URL, FOO_UNSET", envs)
         self.assertIn("container: forwarding project env: XMEO_SEQUENCER_URL", proc.stdout)
@@ -91,7 +97,8 @@ class ForwardEnvTest(unittest.TestCase):
             "XMEO_SEQUENCER_URL": SECRET_VALUE,
         })
         envs = self._env_args(argv)
-        self.assertIn(f"XMEO_SEQUENCER_URL={SECRET_VALUE}", envs)
+        self.assertIn("XMEO_SEQUENCER_URL", envs)
+        self.assertNotIn(SECRET_VALUE, "\n".join(argv))
         self.assertIn("skipping malformed name 'bad-name'", proc.stderr)
 
     def test_env_file_syntax_in_the_list_never_prints_the_value(self):
@@ -108,7 +115,7 @@ class ForwardEnvTest(unittest.TestCase):
         proc, argv = self._run({"PHASEKIT_FORWARD_ENV": "HOME,PATH,XMEO_SEQUENCER_URL",
                                 "XMEO_SEQUENCER_URL": SECRET_VALUE})
         envs = self._env_args(argv)
-        self.assertIn(f"XMEO_SEQUENCER_URL={SECRET_VALUE}", envs)
+        self.assertIn("XMEO_SEQUENCER_URL", envs)
         # This harness runs the non-root branch, where the script sets no HOME
         # itself; the point is that the HOST's HOME/PATH never cross.
         self.assertFalse(any(e.startswith(("HOME=", "PATH=")) for e in envs), envs)
@@ -128,9 +135,24 @@ class ForwardEnvTest(unittest.TestCase):
         proc, argv = self._run({"PHASEKIT_FORWARD_ENV": "A_ONE\nXMEO_SEQUENCER_URL",
                                 "A_ONE": "1", "XMEO_SEQUENCER_URL": SECRET_VALUE})
         envs = self._env_args(argv)
-        self.assertIn("A_ONE=1", envs)
-        self.assertIn(f"XMEO_SEQUENCER_URL={SECRET_VALUE}", envs)
+        self.assertIn("A_ONE", envs)
+        self.assertIn("XMEO_SEQUENCER_URL", envs)
+        self.assertNotIn(SECRET_VALUE, "\n".join(argv))
         self.assertIn("forwarding project env: A_ONE XMEO_SEQUENCER_URL", proc.stdout)
+
+    def test_no_secret_value_ever_reaches_dockers_command_line(self):
+        """v0.18.2 (review round 5): the scaffold's own secret-bearing names
+        cross by NAME too — a value in argv is readable by every account on
+        the host (the process table)."""
+        values = {"ANTHROPIC_API_KEY": "sk-ant-" + "k" * 24, "GH_TOKEN": "ghp_" + "g" * 24,
+                  "GITHUB_TOKEN": "ghp_" + "h" * 24, "XMEO_SEQUENCER_URL": SECRET_VALUE,
+                  "PHASEKIT_FORWARD_ENV": "XMEO_SEQUENCER_URL"}
+        _, argv = self._run(values)
+        joined = "\n".join(argv)
+        for name in ("ANTHROPIC_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "XMEO_SEQUENCER_URL"):
+            with self.subTest(name=name):
+                self.assertNotIn(values[name], joined)
+                self.assertIn(name, self._env_args(argv))
 
     def test_a_list_with_nothing_set_says_so(self):
         proc, argv = self._run({"PHASEKIT_FORWARD_ENV": "FOO_UNSET"})

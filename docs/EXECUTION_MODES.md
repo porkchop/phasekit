@@ -358,6 +358,20 @@ completion never seen clean (a record-only commit over older work) is not
 judged — its dirt is named by the step-7 line and left as is. It corrects and
 never refuses: a landing is never blocked by it.
 
+**The loop owns every commit (v0.18.2).** Under the loop the command guard
+refuses a model's git writes to this repository (docs/QUALITY_GATES.md "The
+loop owns every commit"), so the completion is the loop's to commit — and
+whoever committed it, the walk checks the whole tree: step 3 (`recorded`) is
+proven only on a clean tree; work the committed record's commit did not carry
+lands through the loop's own verify-gated completion commit (the body names
+the commit it completes), or stays in the tree, named (`unlanded` in the
+record, stderr), with the walk stopped at step 3 for the next turn to repair.
+The catch-up squash judges only a worktree that equals HEAD's tree (decided:
+commit first, then squash — a difference waits for the next verify-gated
+commit), and in plain mode step 4 means "HEAD's tree passed the verify gate":
+the loop's own green verdict recorded for exactly HEAD's tree (the verify
+memo), else the gate runs on HEAD's exact tree before the boundary counts.
+
 The generated test `tests/test_boundary_state.py` SIGKILLs a real session of
 the shipped loop at every step boundary (before and after the record
 advances), for every entry point, in both modes, for final and non-final

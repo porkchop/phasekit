@@ -196,7 +196,9 @@ ensure_transients_excluded() {
   # rev-parse --git-path may return a relative path; resolve from ROOT_DIR.
   [[ "$exclude_file" = /* ]] || exclude_file="$ROOT_DIR/$exclude_file"
   mkdir -p "$(dirname "$exclude_file")" 2>/dev/null || return 0
-  local lines=("artifacts/logs/" "artifacts/wrapup-requested")
+  # v0.18.2: artifacts/scratch/ is the session's sanctioned scratch space —
+  # ignored, never committed, cleared when an iteration starts.
+  local lines=("artifacts/logs/" "artifacts/wrapup-requested" "artifacts/scratch/")
   for sig in "${HIDDEN_TRANSIENTS[@]}"; do
     lines+=("artifacts/$sig")
   done
@@ -316,8 +318,14 @@ cleanup_artifacts() {
   rm -f \
     "$ARTIFACTS_DIR/phase-update.json" \
     "$ARTIFACTS_DIR/phase-blocked.json" \
-    "$ARTIFACTS_DIR/project-complete.json" \
     "$ARTIFACTS_DIR/light-escalation.json"
+  # v0.18.2 (review rounds 1-8): THIS iteration's committed completion,
+  # still landing (completion_in_flight), is never deleted here — it is kept
+  # (restored to HEAD's bytes when the tree holds other ones): a deletion on
+  # disk is what a later checkpoint commits, un-recording it. Any other
+  # record goes, as before (a record carried over a refused landing is set
+  # aside above).
+  retire_completion_record
   if [[ -n "$carried" ]]; then
     mv -f "$carried" "$ARTIFACTS_DIR/project-complete.json" 2>/dev/null || true
   else
@@ -337,6 +345,30 @@ cleanup_artifacts() {
   # end; one surviving into an iteration start belongs to a previous session
   # and would silently stand the deadline watchdog down for this whole one.
   rm -f "$ARTIFACTS_DIR/.wrapup-in-progress"
+}
+
+clear_scratch_at_iteration_start() {
+  # v0.18.2 (row 1233 (5)): artifacts/scratch/ is the one sanctioned place
+  # for a session's scratch files (or /tmp) — ignored (.git/info/exclude,
+  # and unstaged by every commit path should a project's .gitignore
+  # re-include it), never committed, and cleared when an ITERATION starts:
+  # a new supervising iteration label (artifacts/iteration-mode.json), or
+  # every session start when no supervisor names one. A second session of
+  # the same iteration keeps it. phasekit cannot tell scratch from work
+  # anywhere else in the tree — `git add -A` commits whatever is not
+  # ignored — so the prompts send scratch here. Best-effort: never blocks.
+  local d="$ARTIFACTS_DIR/scratch" mark="$ARTIFACTS_DIR/logs/.scratch-iteration" cur prev=""
+  cur="$(supervising_iteration_json)"
+  if [[ -f "$mark" ]]; then prev="$(head -c 200 "$mark" 2>/dev/null)" || prev=""; fi
+  if [[ -d "$d" ]] && { [[ "$cur" == null ]] || [[ "$cur" != "$prev" ]]; }; then
+    if [[ -n "$(ls -A "$d" 2>/dev/null | head -n1)" ]]; then
+      rm -rf -- "$d" 2>/dev/null || true
+      echo "run-until-done: cleared artifacts/scratch/ — a new iteration starts (scratch never outlives its iteration; v0.18.2)"
+    fi
+  fi
+  mkdir -p "$d" "$ARTIFACTS_DIR/logs" 2>/dev/null || true
+  printf '%s' "$cur" > "$mark" 2>/dev/null || true
+  return 0
 }
 
 print_json_summary() {
@@ -506,6 +538,61 @@ record_verify_failure() {
 # never staged as the session's work (review MAJOR-1, 2026-09-15).
 GATE_FOOTPRINT_RULE="a verify gate is read-only over tracked files and writes nothing untracked; gate output belongs under an ignored path"
 GATE_FOOTPRINT_RECIPE="write the gate's output under artifacts/logs/ (ignored in every scaffolded project) or another ignored path; a measurement the project wants committed is produced in the phase's own work, not by the gate; a formatter runs in check mode here, never with a write flag"
+
+# The credential shapes, ONE list (v0.18.2): the post-verify LEARNINGS scan
+# refuses on them, and redact_credentials masks them in a refusal capture.
+CREDENTIAL_TOKEN_RE='sk-ant-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}'
+PRIVATE_KEY_RE='-----BEGIN [A-Z ]*PRIVATE KEY-----'
+
+redact_credentials() {
+  # stdin → stdout with credential-shaped text masked — the post-verify
+  # scan's own patterns (one list): a capture a supervisor may surface never
+  # carries a secret a git hook (e.g. an un-redacted scanner) printed.
+  # A key on one line goes first; a multi-line one is cut from its BEGIN
+  # line to its END line, the marker where it began (an unterminated one to
+  # the end of the stream, never printed).
+  sed -E "s/$CREDENTIAL_TOKEN_RE/[REDACTED]/g
+    s/$PRIVATE_KEY_RE.*-----END [A-Z ]*PRIVATE KEY-----/[REDACTED PRIVATE KEY]/g
+    /$PRIVATE_KEY_RE/,/-----END [A-Z ]*PRIVATE KEY-----/ {
+      /$PRIVATE_KEY_RE/ {
+        s/$PRIVATE_KEY_RE.*/[REDACTED PRIVATE KEY]/
+        p
+      }
+      d
+    }"
+}
+
+clear_commit_refusal() {
+  # A loop commit that ran the gates green and HAPPENED clears a refusal the
+  # commit path recorded (review round 4, m4: a wrap-up or a kept-out claim
+  # landing is such a commit too). Only a commit refusal — the gate's own red
+  # is the green gate's to clear.
+  if jq -e '.commit_refusal == true' "$ARTIFACTS_DIR/phase-verify-failed.json" >/dev/null 2>&1; then
+    rm -f "$ARTIFACTS_DIR/phase-verify-failed.json"
+  fi
+  return 0
+}
+
+record_commit_refusal() {
+  # v0.18.2 (review round 3, MAJOR 2/3): a refusal INSIDE the loop's commit
+  # path that is not the verify gate — the LEARNINGS credential scan, a
+  # failed `git commit` (the project's own git hook, identity, signing), a
+  # `git add` that could not stage — goes through the one channel a repair
+  # turn reads: artifacts/phase-verify-failed.json (CONTINUE_PROMPT step 2),
+  # with the VERIFY_MAX_ATTEMPTS breaker bounding it. Until v0.18.1 these
+  # printed a line only the loop's log shows, and the next turn repaired
+  # blind (or, with a committed completion record kept on disk, forever).
+  # $1 = label, $2 = what the repair turn must read.
+  local t out
+  t="$(mktemp)" || return 0
+  printf '%s\n' "$2" > "$t"
+  record_verify_failure "$1" "$1" 1 "$t"
+  rm -f "$t"
+  # marked, so the next green gate does not clear it (_clear_verify_failed)
+  out="$(jq '.commit_refusal = true' "$ARTIFACTS_DIR/phase-verify-failed.json" 2>/dev/null)" \
+    && printf '%s\n' "$out" > "$ARTIFACTS_DIR/phase-verify-failed.json"
+  return 0
+}
 
 gate_status_snapshot() {
   # $1 = output file: one NUL-terminated "XY<TAB>path" record per entry of
@@ -851,7 +938,12 @@ _clear_verify_failed() {
   # too — a green early return (VERIFY_SKIP, no gate configured, the memo)
   # once left LAST_GATE_RED standing for the wrap-up to read.
   if [[ "${VERIFY_INVOKER:-loop}" != model ]]; then
-    rm -f "$ARTIFACTS_DIR/phase-verify-failed.json"
+    # v0.18.2: a refusal the COMMIT path recorded (record_commit_refusal —
+    # the gate was green then too) is not the gate's to clear: only a commit
+    # that happens clears it, so its attempts count to VERIFY_MAX_ATTEMPTS.
+    if ! jq -e '.commit_refusal == true' "$ARTIFACTS_DIR/phase-verify-failed.json" >/dev/null 2>&1; then
+      rm -f "$ARTIFACTS_DIR/phase-verify-failed.json"
+    fi
     LAST_GATE_RED=0
   fi
   return 0
@@ -865,6 +957,17 @@ verify_memo_reusable() {
   # by phasekit_verify from the loop's hashed snapshot.
   [[ "${VERIFY_INVOKER:-loop}" != model ]] && return 0
   [[ "${MODEL_ENV_REUSABLE:-0}" == 1 ]]
+}
+
+verify_command_resolve() {
+  # The project's gate, resolved ONE way (run_verify_gate and plain step 4's
+  # memo check read it): VC_CMD, VC_LABEL, VC_INVOKE (empty when none).
+  VC_CMD=""; VC_LABEL=""; VC_INVOKE=""
+  if [[ -n "${PHASEKIT_VERIFY_CMD:-}" ]]; then
+    VC_CMD="$PHASEKIT_VERIFY_CMD"; VC_LABEL="PHASEKIT_VERIFY_CMD"; VC_INVOKE="shell"
+  elif [[ -f "$ROOT_DIR/scripts/phasekit-verify.sh" ]]; then
+    VC_CMD="$ROOT_DIR/scripts/phasekit-verify.sh"; VC_LABEL="scripts/phasekit-verify.sh"; VC_INVOKE="bash"
+  fi
 }
 
 run_verify_gate() {
@@ -898,18 +1001,9 @@ run_verify_gate() {
     return 0
   fi
 
-  local cmd=""
-  local label=""
-  local invoke=""
-  if [[ -n "${PHASEKIT_VERIFY_CMD:-}" ]]; then
-    cmd="$PHASEKIT_VERIFY_CMD"
-    label="PHASEKIT_VERIFY_CMD"
-    invoke="shell"
-  elif [[ -f "$ROOT_DIR/scripts/phasekit-verify.sh" ]]; then
-    cmd="$ROOT_DIR/scripts/phasekit-verify.sh"
-    label="scripts/phasekit-verify.sh"
-    invoke="bash"
-  fi
+  local cmd="" label="" invoke=""
+  verify_command_resolve
+  cmd="$VC_CMD"; label="$VC_LABEL"; invoke="$VC_INVOKE"
 
   if [[ -z "$cmd" ]]; then
     # Expected on the phasekit source repo itself: the verify script is rendered
@@ -1182,6 +1276,26 @@ write_branch_integrity_block() {
   echo "run-until-done: BLOCKED (branch-integrity) — $reason. See artifacts/phase-blocked.json." >&2
 }
 
+write_landing_block() {
+  # v0.18.2 (review round 1, M1): a FINAL boundary whose worktree still
+  # differs from HEAD after the loop's own commit carried everything it can
+  # stage — nothing any later commit could carry, so re-entering would spin
+  # to MAX_ITERATIONS. Stop, named: the paths, and what to do.
+  local paths="$1" why="${2:-the worktree differs from HEAD in paths no loop commit can carry}"
+  jq -n --arg paths "$paths" --arg why "$why" --arg branch "$(current_branch)" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{
+      blocked: true,
+      blocker_kind: "landing",
+      reason: ("the completion cannot land: " + $why + (if $paths == "" then "" else " (" + $paths + ")" end)),
+      summary: ("landing: " + $why),
+      branch: $branch,
+      next_step: "make the listed paths match HEAD (they are changes no loop commit can carry — the loop never lands what it cannot verify), then re-run: the committed completion lands at the next start",
+      ts: $ts
+    }' > "$ARTIFACTS_DIR/phase-blocked.json"
+  BRANCH_INTEGRITY_BLOCKED=1
+  echo "run-until-done: BLOCKED (landing) — the completion cannot land: $why${paths:+ ($paths)}. See artifacts/phase-blocked.json." >&2
+}
+
 squash_applies_to() {
   # Only approval-class records move the target; checkpoints stay on the branch.
   squash_mode || return 1
@@ -1399,6 +1513,24 @@ squash_to_target() {
     fi
   fi
   if [[ "$verified" != "1" ]]; then
+    # v0.18.2 (row 1233 shape 2): the gate judges EXACTLY the tree it
+    # squashes. Until v0.18.1 it verified the worktree and squashed HEAD's
+    # tree — a repair left uncommitted went green here while HEAD (red) was
+    # squashed onto the target. Decided: commit first, then squash — at a
+    # completion step 3 lands the rest through its verify-gated commit
+    # before this runs; a worktree that still differs from HEAD here is
+    # never judged in HEAD's place (the squash waits, named, for the next
+    # verify-gated commit to carry the difference).
+    local _sq_dirty
+    _sq_dirty="$(_boundary_dirty_paths | sed -E 's/^.. //' | head -n 8 | paste -sd' ' -)"
+    if [[ -n "$_sq_dirty" ]]; then
+      if boundary_final; then
+        write_landing_block "$_sq_dirty"
+        return 1
+      fi
+      echo "Branch-per-iteration: squash deferred — the worktree differs from HEAD ($_sq_dirty), and the catch-up squash judges exactly the tree it lands; the next verify-gated commit carries the difference (v0.18.2)." >&2
+      return 1
+    fi
     echo "Branch-per-iteration: squash caught up at a boundary — running the verify gate on the branch tree first."
     if ! run_verify_gate; then
       echo "Branch-per-iteration: squash deferred — the verify gate is red (artifacts/phase-verify-failed.json); the next approval carries this work." >&2
@@ -1578,7 +1710,7 @@ PY
   local learnings_file
   while IFS= read -r learnings_file; do
     [[ -n "$learnings_file" && -f "$ROOT_DIR/$learnings_file" ]] || continue
-    if grep -nE 'sk-ant-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----' \
+    if grep -nE "$CREDENTIAL_TOKEN_RE|$PRIVATE_KEY_RE" \
         "$ROOT_DIR/$learnings_file" >&2; then
       echo "run-until-done: REFUSED — $learnings_file matches a credential pattern (lines above). Remove the secret and retry." >&2
       return 1
@@ -1602,6 +1734,30 @@ artifact_never_landed() {
   [[ -n "$(git status --porcelain --ignored=matching -- "$1" 2>/dev/null)" ]]
 }
 
+stage_all() {
+  # `git add -A`, failing LOUDLY (v0.18.2, review rounds 3-6): git_add_all's
+  # lock retry, then — git stages NOTHING when one path fails (an empty or
+  # nested repository, an unreadable file) — a path-by-path add that names
+  # what git refused. Sets STAGE_FAILED (the paths), STAGE_ERR (git's error),
+  # STAGE_LOCKED (the lock that stayed). The landing (stage_landing_tree) and
+  # the wrap-up both stage through here.
+  STAGE_FAILED=""; STAGE_ERR=""; STAGE_LOCKED=""
+  # Contention is not an unstageable path (review round 4, MAJOR): git_add_all
+  # retries it and releases a dead writer's lock.
+  if STAGE_ERR="$(git_add_all)"; then STAGE_ERR=""; fi
+  if [[ "$STAGE_ERR" == *index.lock* ]]; then
+    STAGE_LOCKED="$(git rev-parse --git-path index.lock 2>/dev/null || echo .git/index.lock)"
+  elif [[ -n "$STAGE_ERR" ]]; then
+    local _sp
+    while IFS= read -r -d '' _sp; do
+      [[ -n "$_sp" ]] || continue
+      git add -A -- "$_sp" >/dev/null 2>&1 || STAGE_FAILED="${STAGE_FAILED}${_sp} "
+    done < <(git ls-files -z --others --exclude-standard 2>/dev/null; git ls-files -z --modified --deleted 2>/dev/null)
+    STAGE_FAILED="${STAGE_FAILED% }"
+    if [[ -z "$STAGE_FAILED" ]]; then STAGE_ERR=""; fi
+  fi
+}
+
 stage_landing_tree() {
   # $1 = an artifact to force-add first (it may be partially gitignored), or
   # empty; $2 = "landing" (default) when the commit lands an approval-class
@@ -1609,13 +1765,18 @@ stage_landing_tree() {
   # `phasekit verify` (v0.18.0), so the tree a model verified IS the tree the
   # commit gate judges.
   if [[ -n "${1:-}" ]]; then git add -f "$1" 2>/dev/null || true; fi
-  git add -A
+  # v0.18.2 (review round 3, MAJOR 3): `git add -A` stages NOTHING when one
+  # path fails (an empty or nested repository, an unreadable file) — and the
+  # commit then carried only what was force-added. Add path by path instead
+  # and NAME what git refused (STAGE_FAILED / STAGE_ERR, for the caller).
+  stage_all
   # Never commit per-iteration logs. run-phase.sh rewrites artifacts/logs/*
   # every iteration (the iteration counter resets on each run), so committing
   # them floods history with churn AND lets a no-progress iteration look like
   # a real change. Keep them on disk for live tailing/forensics; just don't
   # stage them. (Autonomous-loop-only — logs only exist during loop runs.)
   git reset -q -- "$ARTIFACTS_DIR/logs" 2>/dev/null || true
+  git reset -q -- "$ARTIFACTS_DIR/scratch" 2>/dev/null || true   # v0.18.2: scratch is never committed
   git reset -q -- "${WRAPUP_SENTINEL:-$ARTIFACTS_DIR/wrapup-requested}" 2>/dev/null || true
   # Never commit transient signals either (v0.6.5) — fresh adds only; a staged
   # deletion of a legacy tracked copy rides so the untracking lands.
@@ -1661,6 +1822,7 @@ commit_from_artifact() {
 _commit_from_artifact() {
   local file="$1"
   local fallback_msg="$2"
+  local body_note="${3:-}"   # v0.18.2: one paragraph appended to the body (the leftover commit says what it is)
 
   # Deferred-scope gate, machine side (v0.14.5), and the loop's iteration
   # facts (v0.18.0): every approval-class artifact this commit may sweep
@@ -1688,11 +1850,28 @@ _commit_from_artifact() {
   if [[ "$kind" != update ]]; then
     msg="$(compose_commit_message "$msg" "$file")"
   fi
+  if [[ -n "$body_note" ]]; then msg="$msg"$'\n\n'"$body_note"; fi
 
   if [[ "$kind" == update ]]; then
     stage_landing_tree "$file" checkpoint
   else
     stage_landing_tree "$file" landing
+  fi
+  if [[ -n "${STAGE_LOCKED:-}" ]]; then
+    echo "run-until-done: REFUSED — git's index is locked ($STAGE_LOCKED); nothing was staged" >&2
+    record_commit_refusal "git add (the git index is locked)" "git's index is locked: $STAGE_LOCKED exists and is not stale yet, so nothing could be staged. If no git process is running, the loop removes a lock older than 10 s itself at the next attempt; never run git yourself — end your turn and the loop retries the commit."
+    unstage_verdicts_after_refusal
+    return 1
+  fi
+  if [[ -n "${STAGE_FAILED:-}" ]]; then
+    echo "run-until-done: REFUSED — git could not stage: $STAGE_FAILED" >&2
+    record_commit_refusal "git add (paths git cannot stage)" "git could not stage: $STAGE_FAILED
+$(printf '%s' "$STAGE_ERR" | head -n 5)
+Make them stageable (an empty or nested repository: remove its .git or move it outside the tree; an unreadable file: fix its permissions) or remove them — the loop commits everything else it finds (the loop owns every commit; never run git add yourself)."
+    unstage_verdicts_after_refusal
+    return 1
+  fi
+  if [[ "$kind" != update ]]; then
     # Only a record this commit LANDS writes its evidence: a landed approval
     # re-written byte-identical is no landing, and a rewritten evidence file
     # would defeat the no-churn gate below (review round 1).
@@ -1730,7 +1909,7 @@ _commit_from_artifact() {
   if staged_touches_security_pair; then
     # Explain the refusal where the NEXT session will find it, so staged-but-
     # uncommitted work is never a mystery state.
-    printf '{"scope_refused": true, "reason": "staged changes touch committed .claude/settings.json or .github/workflows/ — security-critical, never committed by the loop (docs/QUALITY_GATES.md scope containment)", "action": "git restore --staged <those files> (and revert them) then re-write your signal artifact; the wrapper will retry the commit", "ts": "%s"}\n' \
+    printf '{"scope_refused": true, "reason": "staged changes touch committed .claude/settings.json or .github/workflows/ — security-critical, never committed by the loop (docs/QUALITY_GATES.md scope containment)", "action": "put those files back as HEAD has them (git show HEAD:<path> > <path>; delete a file HEAD does not have) — never git restore/checkout/reset, the loop owns the index — then re-write your signal artifact; the loop retries the commit", "ts": "%s"}\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$ARTIFACTS_DIR/scope-refusal.json"
     echo "run-until-done: REFUSED — staged changes touch committed .claude/settings.json or .github/workflows/ (security-critical). See artifacts/scope-refusal.json." >&2
     unstage_verdicts_after_refusal
@@ -1738,22 +1917,49 @@ _commit_from_artifact() {
   fi
   rm -f "$ARTIFACTS_DIR/scope-refusal.json"
 
-  local pvrc=0
-  post_verify_commit_gates iteration || pvrc=$?
+  local pvrc=0 pv_err
+  pv_err="$(mktemp)"
+  post_verify_commit_gates iteration 2>"$pv_err" || pvrc=$?
+  cat "$pv_err" >&2 2>/dev/null || true
   if [[ "$pvrc" -ne 0 ]]; then
+    if [[ "$pvrc" -eq 1 ]]; then
+      # Only the REFUSED line(s): the scan's matched lines hold the secret,
+      # and a supervisor may surface log_tail.
+      record_commit_refusal "commit gate (after verify)" "$(grep '^run-until-done: REFUSED —' "$pv_err" | head -n 5)
+The commit gates that run after the verify gate refused the staged work. Fix what the line above names (e.g. remove the credential-shaped line from the named docs/LEARNINGS*.md file), then end your turn — the loop retries the commit."
+    fi
+    rm -f "$pv_err"
     unstage_verdicts_after_refusal
     return "$pvrc"
   fi
+  rm -f "$pv_err"
 
-  local pre_commit_head
+  local pre_commit_head cm_err
   pre_commit_head="$(git rev-parse -q --verify HEAD 2>/dev/null)" || pre_commit_head=""
-  if ! git commit -m "$msg" -m "$(phasekit_trailers "$kind" "$file")"; then
+  cm_err="$(mktemp)"
+  if ! git commit -m "$msg" -m "$(phasekit_trailers "$kind" "$file")" 2>"$cm_err"; then
+    cat "$cm_err" >&2 2>/dev/null || true
     # v0.18.0 (review round 5): no commit, no squash — a squash of whatever
     # HEAD is (the watchdog's wip of this very index, committed inside the
     # gate window) would land it under this phase's subject.
     echo "run-until-done: the commit did not happen (HEAD ${pre_commit_head:0:12} → $(git rev-parse --short HEAD 2>/dev/null)); nothing squashed — the next boundary lands what stands." >&2
+    # v0.18.2: git itself refused (HEAD did not move — a project's git hook,
+    # identity, signing): the repair turn is told why.
+    if [[ "$(git rev-parse -q --verify HEAD 2>/dev/null)" == "$pre_commit_head" ]]; then
+      record_commit_refusal "git commit (git refused the loop's commit)" "$(redact_credentials < "$cm_err" | tail -n 30)
+git refused the loop's commit of the staged work (a project git hook, the commit identity, signing). Fix what git names — never commit yourself: the loop retries the commit."
+    fi
+    rm -f "$cm_err"
     unstage_verdicts_after_refusal
     return 1
+  fi
+  cat "$cm_err" >&2 2>/dev/null || true
+  rm -f "$cm_err"
+  clear_commit_refusal   # the commit happened: nothing it recorded stands
+  # v0.18.2: the landing's plan check (planned vs changed paths) is the
+  # record's `plan_paths`; the boundary record carries the last one.
+  if [[ "$kind" != update ]] && jq -e '(.plan_paths // null) | type == "object"' "$file" >/dev/null 2>&1; then
+    _boundary_write '.plan_paths = $p' --argjson p "$(jq -c '.plan_paths' "$file" 2>/dev/null || echo null)"
   fi
   # Branch-per-iteration (v0.14.0): an approval-class commit also lands on the
   # target as one squash commit. A refused squash leaves the branch commit in
@@ -1857,7 +2063,8 @@ drop_unclaimed_carried_record() {
   # boundary also removes it first (its record is the approval's own).
   completion_record_carried || return 0
   completion_record_claims && return 0
-  rm -f "$ARTIFACTS_DIR/project-complete.json" "$ARTIFACTS_DIR/logs/.carried-completion"
+  retire_completion_record
+  rm -f "$ARTIFACTS_DIR/logs/.carried-completion"
   echo "run-until-done: the carried completion record was not re-written this session — removed at exit (it claims nothing; v0.18.0)." >&2
   return 0
 }
@@ -1913,11 +2120,39 @@ drop_unlanded_synthesized_record() {
   local pc="$ARTIFACTS_DIR/project-complete.json"
   [[ -f "$pc" ]] && artifact_never_landed "$pc" || return 0
   jq -e '(.recorded_by // "") | tostring | startswith("phasekit run-until-done.sh — boundary-state step 3")' "$pc" >/dev/null 2>&1 || return 0
+  retire_completion_record
+  echo "run-until-done: the completion record the loop synthesized did not land — removed at exit (the approval re-records it at the next start; v0.18.0)." >&2
+  return 0
+}
+
+retire_completion_record() {
+  # v0.18.2 (review rounds 3-4): the ONE way the loop takes a completion
+  # record off the tree when it claims nothing (a new pass, a carry nobody
+  # re-claimed, a synthesized record that did not land). A record that is
+  # THIS boundary's committed completion, still landing (completion_in_flight),
+  # is never deleted: a deletion on disk is exactly what the next checkpoint
+  # commits, un-recording it (on the target itself in plain mode) — its
+  # committed bytes are restored instead. Any other record goes, as before
+  # v0.18.2 ("deleted until real"): an untracked one unstaged and removed; an
+  # EARLIER completion HEAD still carries (a project resumed for new work)
+  # removed from disk, its deletion landing with the new work. A deletion
+  # already on disk (a human's, an intake's) is left as it is.
+  local pc="$ARTIFACTS_DIR/project-complete.json"
+  [[ -f "$pc" ]] || return 0
+  # Only THIS boundary's completion, still landing, is kept (review round 4,
+  # BLOCKER: an EARLIER completion kept at a new pass re-recorded a resumed
+  # project complete over its half-done work — the v0.14.5 BLOCKER 1 class).
+  if completion_in_flight; then
+    if artifact_never_landed "$pc"; then
+      git checkout -q HEAD -- artifacts/project-complete.json 2>/dev/null \
+        && echo "run-until-done: the completion record on disk differed from the committed one — restored to HEAD's bytes, never deleted (the completion is committed; v0.18.2)." >&2
+    fi
+    return 0
+  fi
   if ! git cat-file -e "HEAD:artifacts/project-complete.json" 2>/dev/null; then
     git reset -q -- "$pc" 2>/dev/null || true
   fi
   rm -f "$pc"
-  echo "run-until-done: the completion record the loop synthesized did not land — removed at exit (the approval re-records it at the next start; v0.18.0)." >&2
   return 0
 }
 
@@ -2026,7 +2261,7 @@ write_provisional_handoff() {
       stopped_at_phase: $phase,
       in_flight: ("iteration " + $iter + " (" + $mode + " mode) was IN FLIGHT when this session ended; whatever `git status` shows now is that iteration'"'"'s unverified work-in-progress"),
       verified: false,
-      next_step: "audit the dirty tree as IN-PROGRESS IMPLEMENTATION from an interrupted session: re-derive what is verified, keep it, finish or revert the rest — do not read the tree as intentional resting state",
+      next_step: "audit the dirty tree as IN-PROGRESS IMPLEMENTATION from an interrupted session: re-derive what is verified, keep it, finish the rest or edit it back (the loop owns every commit: never git checkout/reset/stash) — do not read the tree as intentional resting state",
       note: "dead-man baton: written at iteration start, removed when the iteration concludes with a verdict — you are reading it because the previous session was killed or exited without concluding (stopped_at_phase = last APPROVED phase). Ephemeral: delete after orienting.",
       ts: $ts
     }' > "$ARTIFACTS_DIR/session-interrupted.json"
@@ -2109,6 +2344,8 @@ clear_provisional_handoff_on_exit() {
 BOUNDARY_STATE_FILE="$ARTIFACTS_DIR/boundary-state.json"
 BOUNDARY_APPROVAL_RIDES_COMPLETION=0   # set by step 2 when a stale approval is left to the completion sweep (walk-local: reset at land_boundary entry)
 BOUNDARY_STEP2_ATTEMPTED=0             # set by step 2's action (walk-local): a FRESH in-loop approval always drives its commit once
+BOUNDARY_STEP3_ATTEMPTED=0             # v0.18.2: set by step 3's action (walk-local): the whole-tree check ran once
+BOUNDARY_STEP4_VERIFIED=0              # v0.18.2: set by plain step 4's action (walk-local): HEAD's tree passed the gate
 BOUNDARY_STEP_NAMES=(idle approved committed recorded squashed merged-back armed rested)
 BOUNDARY_STEP_RESTED=7
 
@@ -2205,7 +2442,11 @@ boundary_begin() {
       verify_memo: (.verify_memo // null), verify_red: (.verify_red // null),
       work_base: (.work_base // null),
       previous: (if (.step // 0) > 0 then (del(.verify_memo) | del(.previous)) else (.previous // null) end)
-    }' --arg pass "$pass" --argjson iteration "$(supervising_iteration_json)" \
+    } + (if (.unlanded // null) != null and $ucc != "" and ((.unlanded.completion_commit // "") == $ucc)
+            and (if $iteration != null and (.iteration // null) != null then .iteration == $iteration
+                 else (.branch // "") == $branch end)
+         then {unlanded: .unlanded} else {} end)' --arg pass "$pass" --argjson iteration "$(supervising_iteration_json)" \
+       --arg ucc "$(git cat-file -e HEAD:artifacts/project-complete.json 2>/dev/null && git log -1 --format=%H HEAD -- artifacts/project-complete.json 2>/dev/null)" \
        --arg branch "$(current_branch)" --arg target "$SQUASH_TARGET" --arg mode "$mode"
 }
 
@@ -2317,16 +2558,73 @@ boundary_complete_here() {
   # (schema 2) and the marker both carry one, else by the work branch (a
   # schema-1 record; a standalone run).
   boundary_complete || return 1
-  local schema rec cur
-  schema="$(boundary_get '.schema // 1')"; [[ "$schema" =~ ^[0-9]+$ ]] || schema=1
+  boundary_same_iteration
+}
+
+boundary_same_iteration() {
+  # Is the record's boundary THIS iteration's? By the supervisor's label when
+  # the record (schema 2) and the marker both carry one, else by the work
+  # branch (a schema-1 record; a standalone run). One test, two readers:
+  # boundary_complete_here and completion_in_flight (v0.18.2). $1 = the
+  # block to read: "" (the current boundary) or ".previous".
+  local b="${1:-}" schema rec cur
+  schema="$(boundary_get "${b}.schema // 1")"; [[ "$schema" =~ ^[0-9]+$ ]] || schema=1
   if [[ "$schema" -ge 2 ]]; then
-    rec="$(boundary_get '.iteration | tojson')"
+    rec="$(boundary_get "${b}.iteration | tojson")"
     cur="$(supervising_iteration_json)"
     if [[ -n "$rec" && "$rec" != "null" && "$cur" != "null" ]]; then
       [[ "$rec" == "$cur" ]]; return
     fi
   fi
-  [[ -n "$(boundary_get '.branch // empty')" && "$(boundary_get '.branch // empty')" == "$(current_branch)" ]]
+  [[ -n "$(boundary_get "${b}.branch // empty")" && "$(boundary_get "${b}.branch // empty")" == "$(current_branch)" ]]
+}
+
+completion_in_flight() {
+  # v0.18.2 (review round 4, BLOCKER): is the completion record HEAD tracks
+  # THIS boundary's completion, still landing? Either `unlanded` names the
+  # commit that landed it, or the record says a final boundary of this very
+  # iteration stopped before it completed (step 1..5). A record from an
+  # EARLIER completion (a project resumed for new work without an intake
+  # deleting it, a wiped boundary-state.json) is not — it goes at the next
+  # pass, as it always did.
+  git cat-file -e "HEAD:artifacts/project-complete.json" 2>/dev/null || return 1
+  [[ -f "$BOUNDARY_STATE_FILE" ]] || return 1
+  local rc b uc st base
+  rc="$(git log -1 --format=%H HEAD -- artifacts/project-complete.json 2>/dev/null)" || rc=""
+  [[ -n "$rc" ]] || return 1
+  # The RECORD must be this iteration's (review round 7, BLOCKER — the root
+  # the earlier rounds circled): the commit that landed it comes after this
+  # iteration's base (the supervisor's intake, else the work base the loop
+  # recorded). An earlier iteration's completion is an ancestor of the new
+  # intake, so it is never "in flight" here, whatever a boundary block says.
+  # No base at all (a standalone run on one branch) has no iteration
+  # boundary to cross (declined with record).
+  base="$(iteration_base_sha "$(supervising_iteration_label)")"
+  if [[ -n "$base" ]]; then
+    if [[ "$rc" == "$base" ]]; then
+      # the commit that first carried the iteration's marker may itself land
+      # the record (a marker nobody committed before it — review round 8); a
+      # supervisor's intake never does (it only ever deletes the record)
+      [[ "$(git log -1 --format='%(trailers:key=Phasekit-Kind,valueonly,separator=%x2C)' "$base" 2>/dev/null)" != intake ]] || return 1
+    else
+      git merge-base --is-ancestor "$base" "$rc" 2>/dev/null || return 1
+    fi
+  fi
+  # The current boundary, else the one boundary_begin archived when a new
+  # pass began — a session that ended between that begin and its walk (a CLI
+  # failure, a kill) leaves the stopped completion only there (review round
+  # 6, MAJOR). Always THIS iteration's (round 5, BLOCKER: an earlier
+  # iteration's `unlanded` once kept its record alive across the next
+  # iteration's intake).
+  for b in "" ".previous"; do
+    boundary_same_iteration "$b" || continue
+    uc="$(boundary_get "${b}.unlanded.completion_commit // empty")"
+    if [[ -n "$uc" && "$uc" == "$rc" ]]; then return 0; fi
+    [[ "$(boundary_get "${b}.final // false")" == "true" ]] || continue
+    st="$(boundary_get "${b}.step // 0")"; [[ "$st" =~ ^[0-7]$ ]] || st=0
+    if [[ "$st" -ge 1 && "$st" -lt 6 ]]; then return 0; fi
+  done
+  return 1
 }
 
 finish_complete() {
@@ -2590,9 +2888,10 @@ verify_memo_tier() {
 
 verify_memo_exact_tree() {
   # Only a tree the gate ran on EXACTLY may be memoised: no unstaged tracked
-  # changes and no untracked files outside artifacts/. (The catch-up squash
-  # verifies the working tree while landing HEAD's — today's imprecision; a
-  # memo must not make it durable.)
+  # changes and no untracked files outside artifacts/. (Until v0.18.2 the
+  # catch-up squash verified the working tree while landing HEAD's; it now
+  # gates only a tree that is HEAD's — and a memo still never makes an
+  # inexact tree durable.)
   git diff --quiet 2>/dev/null || return 1
   [[ -z "$(git ls-files --others --exclude-standard 2>/dev/null | grep -v '^artifacts/')" ]]
 }
@@ -2895,6 +3194,222 @@ phasekit_trailers() {
   echo "Phasekit-Kind: $kind"
 }
 
+# --- the plan in docs/PHASES.md (v0.18.2, row 1233 (4) and (6)) -------------
+# The PLANNED phase is the loop's to read, never the model's to restate: the
+# commit subject after the `iteration N phase P:` prefix is the phase's title
+# as docs/PHASES.md plans it (the session's `suggested_commit_message` goes in
+# the body — iteration 88's squash carried iteration 87's words because the
+# subject was the model's prose), and a phase MAY declare the paths it
+# expects to change:
+#
+#   ## Phase 12 — Lobby admits three matches
+#   Planned paths: src/lobby/**, tests/lobby/*.test.ts, docs/SPEC.md
+#
+# One `Planned paths:` line (or several — they add up) anywhere in the
+# phase's section (its heading to the next heading of the same or a higher
+# level; not inside a code fence); globs relative to the repository root,
+# separated by commas or spaces, backticks optional: `*` stays inside one
+# path segment, `**` crosses them, `?` is one character, a trailing `/` or a
+# glob-free name also covers everything under it; `Planned paths: none`
+# declares that the phase changes nothing outside the implicit set. Always
+# planned (the loop's and the workflow's own): artifacts/**, docs/PHASES.md,
+# docs/LEARNINGS*.md. A phase is found by its heading: `Phase <P>` (or the
+# bare id when it is not purely numeric; `Meta Phase <P>` too) followed by a
+# separator (— – - : or ". "); of those the SHALLOWEST level, then the last
+# (a plan that restarts its numbering names the current phase last); never a
+# progress or status record (`### Phase 109 — progress record …`), and
+# `## Phase 193 continuation — …` is not a heading of phase 193.
+_phase_plan_py() {
+  # $1 = title | check, $2 = phase id, $3 = since (check only). Reads the plan
+  # from docs/PHASES.md (else docs/META_PHASES.md); check reads the changed
+  # paths from `git diff --cached` since $3. Prints the title (or nothing),
+  # or the plan_paths JSON object.
+  python3 - "$@" <<'PLAN_PY'
+import json, os, re, subprocess, sys
+
+mode, pid = sys.argv[1], sys.argv[2]
+since = sys.argv[3] if len(sys.argv) > 3 else ""
+IMPLICIT = ["artifacts/**", "docs/PHASES.md", "docs/LEARNINGS*.md"]
+CAP = 100
+
+def plan_file():
+    for rel in ("docs/PHASES.md", "docs/META_PHASES.md"):
+        if os.path.isfile(rel):
+            return rel
+    return None
+
+# a record ABOUT the phase, not its plan: "progress record …", "status
+# update", or the bare word — never a title like "Status page" (round 3)
+PROGRESS = re.compile(r"^(progress|status)(\s+(record|records|report|update|updates|log|note|notes)\b|\s*$|\s*[(:\u2014\u2013-])", re.I)
+
+def section(lines, pid):
+    """(title, body lines) of the heading that PLANS phase pid: `Phase <pid>`
+    (or `Meta Phase <pid>`; a bare id only when it is not purely numeric,
+    `## M9.4 — …`) followed by a separator. Of those: never a progress or
+    status record (`### Phase 109 — progress record …`), then the SHALLOWEST
+    level, then the last (a plan that restarts its numbering names the
+    current phase last)."""
+    if not pid:
+        return None
+    lead = r"(?:(?:meta[\s_-]*)?phase[\s_-]*)" + ("?" if re.search(r"[A-Za-z]", pid) else "")
+    head = re.compile(r"^(#{1,6})\s+(?:\*\*|__)?\s*" + lead + re.escape(pid)
+                      + r"(?![A-Za-z0-9._-])\s*(?:\*\*|__)?\s*(?:[—–:\-]|\.\s)\s*(.*?)\s*#*\s*$", re.I)
+    fence = False
+    found = []
+    heads = []
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        if fence:
+            continue
+        m = re.match(r"^(#{1,6})\s", ln)
+        if m:
+            heads.append((i, len(m.group(1))))
+        hm = head.match(ln)
+        if hm and not PROGRESS.match(re.sub(r"(\*\*|__)", "", hm.group(2)).strip()):
+            found.append((i, len(hm.group(1)), hm.group(2)))
+    if not found:
+        return None
+    top = min(f[1] for f in found)
+    i, lvl, title = [f for f in found if f[1] == top][-1]
+    end = len(lines)
+    for j, l2 in heads:
+        if j > i and l2 <= lvl:
+            end = j
+            break
+    return title, lines[i + 1:end]
+
+def clean_title(t):
+    t = re.sub(r"(\*\*|__)", "", t).strip()
+    t = re.sub(r"\s*[✅✔☑]\s*$", "", t)
+    t = re.sub(r"\s*\[(x|done)\]\s*$", "", t, flags=re.I)
+    t = re.sub(r"\s*[—–-]+\s*(DONE|APPROVED|COMPLETE|COMPLETED)\b.*$", "", t, flags=re.I)
+    t = re.sub(r"\s*\((done|approved|complete|completed)\)\s*$", "", t, flags=re.I)
+    t = re.sub(r"\s+", " ", t).strip(" -—–:")
+    if len(t) > CAP and re.search(r"\s\([^()]*\)$", t):
+        t = re.sub(r"\s\([^()]*\)$", "", t)
+    if len(t) > CAP:
+        cut = t[:CAP].rsplit(" ", 1)[0].rstrip(" ,;:-—–")
+        t = (cut or t[:CAP]) + "…"
+    return t
+
+def glob_re(g):
+    g = g.strip().strip("`'\"")
+    while g.startswith("./"):
+        g = g[2:]
+    g = g.lstrip("/")
+    if not g:
+        return None
+    dirlike = g.endswith("/") or not re.search(r"[*?\[]", g)
+    g = g.rstrip("/")
+    out, i = "", 0
+    while i < len(g):
+        if g.startswith("**/", i):
+            out += "(?:.*/)?"; i += 3
+        elif g.startswith("**", i):
+            out += ".*"; i += 2
+        elif g[i] == "*":
+            out += "[^/]*"; i += 1
+        elif g[i] == "?":
+            out += "[^/]"; i += 1
+        elif g[i] == "[" and "]" in g[i + 2:]:
+            j = g.index("]", i + 2)
+            body = g[i + 1:j]
+            if body.startswith("!"):
+                body = "^" + body[1:]
+            out += "[" + body.replace("\\", "\\\\") + "]"; i = j + 1
+        else:
+            out += re.escape(g[i]); i += 1
+    return re.compile("^" + out + ("(?:/.*)?$" if dirlike else "$"))
+
+def declared_globs(body):
+    fence, globs, declared = False, [], False
+    for ln in body:
+        if ln.lstrip().startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        if fence:
+            continue
+        m = re.match(r"^\s*(?:[-*+]\s+)?(?:\*\*|__)?planned[ _-]paths(?:\*\*|__)?\s*:(?:\*\*|__)?\s*(.*)$", ln, re.I)
+        if not m:
+            continue
+        declared = True
+        rest = m.group(1).strip()
+        if re.fullmatch(r"\(?\s*none\s*\)?\.?", rest, re.I) or rest in ("", "-", "—"):
+            continue
+        for tok in re.split(r"[,\s]+", rest):
+            tok = tok.strip().strip("`'\"").rstrip(".;")
+            if tok:
+                globs.append(tok)
+    return declared, globs
+
+rel = plan_file()
+lines = open(rel, encoding="utf-8", errors="replace").read().splitlines() if rel else []
+sec = section(lines, pid)
+if mode == "title":
+    if sec:
+        t = clean_title(sec[0])
+        if t:
+            print(t)
+    sys.exit(0)
+
+res = {"schema": 1, "phase": pid or None, "source": rel, "declared": False, "globs": [],
+       "status": "underivable", "changed_count": None, "unplanned": [], "unplanned_count": None}
+if not pid or not since:
+    res["note"] = "no phase id" if not pid else "no base to compare against"
+    print(json.dumps(res, sort_keys=True)); sys.exit(0)
+try:
+    raw = subprocess.run(["git", "diff", "--cached", "--no-renames", "--name-only", "-z", since],
+                         capture_output=True, check=True).stdout.split(b"\0")
+except Exception:
+    res["note"] = "git could not list the changed paths"
+    print(json.dumps(res, sort_keys=True)); sys.exit(0)
+implicit = [glob_re(g) for g in IMPLICIT]
+changed = sorted({p.decode("utf-8", "replace") for p in raw if p})
+changed = [p for p in changed if not any(r.match(p) for r in implicit)]
+res["changed_count"] = len(changed)
+declared, globs = declared_globs(sec[1]) if sec else (False, [])
+res["declared"], res["globs"] = declared, globs
+if not declared:
+    res["status"] = "no-plan-declared"
+    res["note"] = ("docs/PHASES.md has no heading for phase %s" % pid) if not sec else "the phase declares no `Planned paths:`"
+    print(json.dumps(res, sort_keys=True)); sys.exit(0)
+pats = [r for r in (glob_re(g) for g in globs) if r]
+unplanned = [p for p in changed if not any(r.match(p) for r in pats)]
+res["unplanned_count"] = len(unplanned)
+res["unplanned"] = unplanned[:200]
+res["status"] = "outside" if unplanned else "inside"
+print(json.dumps(res, sort_keys=True))
+PLAN_PY
+}
+
+planned_phase_title() {
+  # $1 = normalized phase id. The phase's planned title, or nothing.
+  [[ -n "${1:-}" ]] || return 0
+  (cd "$ROOT_DIR" && _phase_plan_py title "$1" 2>/dev/null | head -n1) || true
+  return 0
+}
+
+phase_plan_check() {
+  # $1 = normalized phase id (may be empty), $2 = since. Prints the
+  # `plan_paths` JSON (never empty: a failure is `underivable`) and ONE
+  # stderr line saying what it found — warn only, never a refusal.
+  local p="${1:-}" since="${2:-}" j st
+  j="$(cd "$ROOT_DIR" && _phase_plan_py check "$p" "$since" 2>/dev/null)" || j=""
+  if [[ -z "$j" ]] || ! jq -e 'type == "object"' <<<"$j" >/dev/null 2>&1; then
+    j="$(jq -cn --arg p "$p" '{schema: 1, phase: (if $p == "" then null else $p end), status: "underivable", declared: false, globs: [], changed_count: null, unplanned: [], unplanned_count: null, note: "the plan could not be read (python3 unavailable?)"}')"
+  fi
+  st="$(jq -r '.status' <<<"$j")"
+  case "$st" in
+    inside) echo "plan: phase ${p:-?} — all $(jq -r '.changed_count' <<<"$j") changed path(s) are inside its planned paths (docs/PHASES.md)." >&2 ;;
+    outside) echo "plan: phase ${p:-?} — $(jq -r '.unplanned_count' <<<"$j") changed path(s) are OUTSIDE its planned paths (warn only; recorded as plan_paths): $(jq -r '.unplanned[:10] | join(", ")' <<<"$j")$( [[ "$(jq -r '.unplanned_count' <<<"$j")" -gt 10 ]] && echo ", …")" >&2 ;;
+    no-plan-declared) echo "plan: phase ${p:-?} — no plan declared ($(jq -r '.note // ""' <<<"$j")); $(jq -r '.changed_count' <<<"$j") changed path(s), none compared." >&2 ;;
+    *) echo "plan: phase ${p:-?} — the plan check is underivable ($(jq -r '.note // ""' <<<"$j"))." >&2 ;;
+  esac
+  printf '%s\n' "$(jq -c . <<<"$j")"
+}
+
 compose_commit_message() {
   # $1 = the message as the verdict wrote it (or the loop's fallback), $2 =
   # the approval-class artifact it lands. Prints the message the loop
@@ -2968,11 +3483,20 @@ compose_commit_message() {
   if [[ -z "${prose//[[:space:]]/}" ]]; then
     prose="$(jq -r '.phase // "approved phase" | tostring' "$f" 2>/dev/null)" || prose="approved phase"
   fi
-  local out
-  if [[ -n "$p" && -n "$n" ]]; then
-    out="iteration $n phase $p: $prose"
+  # v0.18.2 (row 1233 (4)): the subject after the prefix is the PLANNED
+  # phase title (docs/PHASES.md); the session's prose goes in the body. No
+  # plan title: the record's prose, and the loop says so.
+  local out title="" sprose="$prose" body=""
+  if [[ -n "$p" ]]; then title="$(planned_phase_title "$p")"; fi
+  if [[ -n "$title" ]]; then
+    sprose="$title"; body="$prose"
   elif [[ -n "$p" ]]; then
-    out="phase $p: $prose"
+    echo "commit subject: docs/PHASES.md plans no title for phase $p — the record's prose is the subject (v0.18.2)" >&2
+  fi
+  if [[ -n "$p" && -n "$n" ]]; then
+    out="iteration $n phase $p: $sprose"
+  elif [[ -n "$p" ]]; then
+    out="phase $p: $sprose"
   elif [[ -n "$n" && -n "$mn" && "$mn" != "${n,,}" ]]; then
     out="iteration $n: $prose"
     echo "run-until-done: WARN — the phase of $(basename "$f") cannot be derived; the stale iteration in its subject was corrected, the phase left out (F5)." >&2
@@ -2985,6 +3509,7 @@ compose_commit_message() {
   if [[ "$disagree" -eq 1 ]]; then
     echo "commit subject corrected: '${head}' → '${out%%: *}' (the record says so)" >&2
   fi
+  if [[ -n "$body" && "$body" != "$title" ]]; then out="$out"$'\n\n'"$body"; fi
   if [[ -n "$rest" ]]; then printf '%s\n%s' "$out" "$rest"; else printf '%s' "$out"; fi
 }
 
@@ -3190,11 +3715,10 @@ write_phase_evidence() {
   # against this file: a golden read from the tree, hermetic. Supervised
   # iterations only (a standalone run has no iteration to file it under);
   # best-effort — a failure is a WARN, never a refused commit.
-  local f="$1" n p name since base rel c
-  n="$(supervising_iteration_label)"; [[ -n "$n" ]] || return 0
+  local f="$1" n p name since base rel c plan
+  n="$(supervising_iteration_label)"
   case "$(basename "$f")" in
-    phase-approval.json) p="$(verdict_phase_id "$f")"; name="$p"
-      if [[ -z "$p" ]]; then echo "run-until-done: WARN — the approval names no usable phase; no phase-close evidence written (F5)." >&2; return 0; fi ;;
+    phase-approval.json) p="$(verdict_phase_id "$f")"; name="$p" ;;
     project-complete.json) p="$(verdict_phase_id "$f")"; name="complete" ;;
     *) return 0 ;;
   esac
@@ -3208,6 +3732,14 @@ write_phase_evidence() {
   fi
   [[ -n "$since" ]] || since="$base"
   [[ -n "$since" ]] || since="$(git rev-parse -q --verify HEAD 2>/dev/null)" || since=""
+  # v0.18.2 (row 1233 (6)): the phase's changed paths against the paths its
+  # plan declares — every approval-class landing, supervised or not; warn
+  # only. The record carries it as `plan_paths` (stamped into the staged
+  # record, mtime kept), and so does the evidence file below.
+  plan="$(phase_plan_check "$p" "$since")"
+  _stamp_plan_paths "$f" "$plan"
+  [[ -n "$n" ]] || return 0
+  if [[ -z "$p" && "$name" != complete ]]; then echo "run-until-done: WARN — the approval names no usable phase; no phase-close evidence written (F5)." >&2; return 0; fi
   [[ -n "$since" ]] || return 0
   rel="artifacts/iterations/$n/$name.json"
   mkdir -p "$ROOT_DIR/artifacts/iterations/$n" 2>/dev/null || return 0
@@ -3220,8 +3752,8 @@ write_phase_evidence() {
     rm -f -- "$ROOT_DIR/$stale"
   done < <(git -C "$ROOT_DIR" ls-files -z --others --exclude-standard -- "artifacts/iterations/$n" 2>/dev/null; \
            git -C "$ROOT_DIR" diff --cached --name-only -z --diff-filter=A -- "artifacts/iterations/$n" 2>/dev/null)
-  if ! (cd "$ROOT_DIR" && python3 - "$since" "$rel" "$n" "$p" "$base" <<'EVIDENCE_PY'
-import hashlib, json, subprocess, sys
+  if ! (cd "$ROOT_DIR" && PK_PLAN_PATHS="$plan" python3 - "$since" "$rel" "$n" "$p" "$base" <<'EVIDENCE_PY'
+import hashlib, json, os, subprocess, sys
 since, rel, n, p, base = sys.argv[1:6]
 raw = subprocess.run(["git", "diff", "--cached", "--no-renames", "--name-status", "-z", since],
                      capture_output=True, check=True).stdout.split(b"\0")
@@ -3267,6 +3799,12 @@ record = {
                 for pth, st in sorted(entries)],
     "note": "written by phasekit run-until-done.sh at this phase's close (v0.18.0): what the phase changed since `since`; read it from the tree instead of git history (docs/QUALITY_GATES.md 'Hermetic tests')",
     }
+try:
+    plan = json.loads(os.environ.get("PK_PLAN_PATHS") or "null")
+except ValueError:
+    plan = None
+if isinstance(plan, dict):
+    record["plan_paths"] = plan
 with open(rel, "w", encoding="utf-8") as fh:
     json.dump(record, fh, indent=1, sort_keys=True)
     fh.write("\n")
@@ -3276,6 +3814,19 @@ EVIDENCE_PY
     return 0
   fi
   git add -f -- "$rel" 2>/dev/null || true
+  return 0
+}
+
+_stamp_plan_paths() {
+  # $1 = the approval-class record being landed, $2 = the plan_paths JSON.
+  # Written into the record (mtime kept: the loop's rewrite is never the
+  # session's verdict) and re-staged. Best-effort.
+  local f="$1" j="$2" out
+  [[ -f "$f" && -n "$j" ]] || return 0
+  jq -e 'type == "object"' "$f" >/dev/null 2>&1 || return 0
+  out="$(jq --argjson p "$j" '.plan_paths = $p' "$f" 2>/dev/null)" || return 0
+  _rewrite_json_keeping_mtime "$f" "$out" || true
+  git add -f -- "$f" 2>/dev/null || true
   return 0
 }
 
@@ -3436,6 +3987,16 @@ phasekit_verify() {
   prepare_verdicts_for_landing
   drv="$(evidence_driver)"
   stage_landing_tree "$drv" landing
+  if [[ -n "${STAGE_LOCKED:-}" ]]; then
+    git reset -q -- "$ARTIFACTS_DIR/phase-approval.json" "$ARTIFACTS_DIR/project-complete.json" 2>/dev/null || true
+    echo "phasekit verify: not run — git's index is locked ($STAGE_LOCKED) and nothing could be staged; the gate would judge a stale index. If no git process is running (\`pgrep -a git\` shows none), remove it — rm -f '$STAGE_LOCKED' — and run phasekit verify again." >&2
+    return 2
+  fi
+  if [[ -n "${STAGE_FAILED:-}" ]]; then
+    git reset -q -- "$ARTIFACTS_DIR/phase-approval.json" "$ARTIFACTS_DIR/project-complete.json" 2>/dev/null || true
+    echo "phasekit verify: RED — git cannot stage: $STAGE_FAILED ($(printf '%s' "$STAGE_ERR" | head -n 2 | tr '\n' ' ')). Make them stageable (an empty or nested repository: remove its .git or move it outside the tree; an unreadable file: fix its permissions) or remove them; the loop's commit stages everything else it finds." >&2
+    return 1
+  fi
   if [[ -n "$drv" ]]; then write_phase_evidence "$drv"; fi
   echo "phasekit verify: the tree is staged exactly as the commit will stage it; running the gate ($tier tier)."
   if [[ "$MODEL_ENV_REUSABLE" != 1 ]]; then
@@ -3555,9 +4116,30 @@ release_stale_index_lock() {
   age=$(( $(date +%s) - $(stat -c %Y "$lock" 2>/dev/null || date +%s) ))
   [[ "$age" -ge 10 ]] || return 0
   if rm -f "$lock" 2>/dev/null; then
-    echo "deadline watchdog: removed $lock — left by the ended turn, whose writer is gone" >&2
+    echo "${1:-deadline watchdog}: removed $lock (${age}s old) — its writer is gone" >&2
   fi
   return 0
+}
+
+git_add_all() {
+  # `git add -A` for the loop's own commits (the landing's stage_landing_tree,
+  # the wrap-up), ONE retry rule (v0.18.2, review round 5): the loop runs no
+  # other git while it stages, so an index.lock that stays is a dead
+  # writer's — retried for ~14 s, long enough for a lock to age past
+  # release_stale_index_lock's 10 s and be removed. Prints git's error of the
+  # last attempt; returns git's status.
+  local _t err=""
+  for _t in 1 2 3 4 5 6 7 8; do
+    if err="$(git add -A 2>&1)"; then return 0; fi
+    [[ "$err" == *index.lock* ]] || { printf '%s' "$err"; return 1; }
+    # Never inside a live model turn (`phasekit verify`): its own git may
+    # hold the lock (review round 6) — there the lock is the model's to judge.
+    [[ "${VERIFY_INVOKER:-loop}" == model ]] && { printf '%s' "$err"; return 1; }
+    release_stale_index_lock "run-until-done (staging)"
+    [[ "$_t" -lt 8 ]] && sleep 2
+  done
+  printf '%s' "$err"
+  return 1
 }
 
 record_close_out_sample() {
@@ -3602,23 +4184,40 @@ hermetic_tests_advisory() {
 
 _boundary_tree_clean() {
   # The tree is clean apart from the loop's own transients, logs and batons.
-  local line path sig
+  [[ -z "$(_boundary_dirty_paths | head -n1)" ]]
+}
+
+_boundary_dirty_paths() {
+  # One line per path that keeps the tree from being clean ("XY path", as
+  # `git status --porcelain` prints it), the loop's own transients, logs,
+  # batons, scratch and derived state excepted — the ONE list the rest, the
+  # completion's whole-tree check (v0.18.2) and the squash's exactness check
+  # read.
+  # Content INSIDE a submodule is not this repository's tree — no commit of
+  # this repository can carry it — so `--ignore-submodules=dirty` (a moved
+  # submodule commit still counts). A custom wrap-up sentinel inside the tree
+  # is the loop's own file (review round 1, M1).
+  local line path sig sentinel_rel=""
+  if [[ -n "${WRAPUP_SENTINEL:-}" ]]; then
+    sentinel_rel="$(realpath -m --relative-to="$ROOT_DIR" "$WRAPUP_SENTINEL" 2>/dev/null)" || sentinel_rel=""
+  fi
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     path="${line:3}"; path="${path#\"}"; path="${path%\"}"
+    [[ -n "$sentinel_rel" && "$path" == "$sentinel_rel" ]] && continue
     case "$path" in
-      artifacts/logs/*|artifacts/session-handoff.json|artifacts/session-interrupted.json|artifacts/wrapup-requested) continue ;;
+      artifacts/logs/*|artifacts/scratch/*|artifacts/session-handoff.json|artifacts/session-interrupted.json|artifacts/wrapup-requested) continue ;;
       artifacts/project-complete.json)
         # v0.18.0: a carried record that claims nothing is deliberately on
         # disk (the repair turn's to edit), not unlanded work of this boundary.
         completion_record_rides || continue ;;
-      artifacts/deferrals.json|artifacts/iterations/*/*.json|artifacts/iterations/*/)
+      artifacts/deferrals.json|artifacts/iterations/*/*.json|artifacts/iterations/*/|artifacts/iterations/)
         # v0.18.0: derived state a draft left; the next landing recomputes it.
         [[ "${line:0:2}" == "??" || "${line:0:2}" == " M" ]] && continue ;;
     esac
     for sig in "${TRANSIENT_SIGNALS[@]}"; do [[ "$path" == "artifacts/$sig" ]] && continue 2; done
-    return 1
-  done < <(git status --porcelain 2>/dev/null)
+    printf '%s\n' "$line"
+  done < <(git status --porcelain --ignore-submodules=dirty 2>/dev/null)
   return 0
 }
 
@@ -3697,9 +4296,22 @@ boundary_prove() {
     3) if boundary_final; then
          [[ -f "$ARTIFACTS_DIR/project-complete.json" ]] \
            && ! artifact_never_landed "$ARTIFACTS_DIR/project-complete.json" \
-           && ! artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json"
+           && ! artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json" || return 1
+         # v0.18.2 (row 1233): the WHOLE tree, whoever committed the record —
+         # a committed record over uncommitted work is not a recorded
+         # completion (a record-only commit over older work; a review that
+         # fixed files and left the record's bytes as they were). The action
+         # runs once per walk; after it, what it could not stage is the
+         # rest's to name.
+         [[ "${BOUNDARY_STEP3_ATTEMPTED:-0}" == 1 ]] && return 0
+         _boundary_tree_clean
        else return 0; fi ;;
-    4) if squash_mode; then ! squash_pending; else return 0; fi ;;
+    4) # Squash mode: the target carries the approval-class record. Plain
+       # mode (v0.18.2): the branch IS the target, so step 4 is "HEAD's tree
+       # passed the verify gate" — a loop-gated commit by its trailer, or the
+       # gate run by this step's action (a model's own commit is gated
+       # before the boundary counts; row 1233's plain shape).
+       if squash_mode; then ! squash_pending; else plain_head_verified; fi ;;
     5) if squash_mode; then git merge-base --is-ancestor "refs/heads/$SQUASH_TARGET" HEAD 2>/dev/null; else return 0; fi ;;
     6) return 0 ;;
     7) _boundary_tree_clean || return 1
@@ -3791,11 +4403,28 @@ boundary_do() {
         fi
         _boundary_synthesize_completion || return 1
       fi
+      BOUNDARY_STEP3_ATTEMPTED=1
+      if completion_landed_at_head; then
+        # v0.18.2 (row 1233): the record is committed — by a model's own
+        # commit, a hand, a killed session — and the tree is not. The rest
+        # lands through the loop's own verify-gated completion commit (the
+        # record is unchanged, so the commit carries exactly what the first
+        # one did not); if the gate refuses it, it is NAMED (boundary-state
+        # `unlanded`, stderr) and the walk stops here as for any red
+        # completion — the next turn repairs it; the work is never discarded
+        # and a red tree never reaches the target.
+        land_completion_leftovers || rc=$?
+        return "$rc"
+      fi
       commit_from_artifact \
         "$ARTIFACTS_DIR/project-complete.json" \
         "chore(workflow): final session work + project completion record" || rc=$?
       return "$rc" ;;
     4)
+      if ! squash_mode; then
+        plain_verify_head || rc=$?
+        return "$rc"
+      fi
       # verified=0: the memo decides whether the gate re-runs for this tree.
       catchup_squash 0 || rc=$?
       return "$rc" ;;
@@ -3823,10 +4452,95 @@ boundary_do() {
       if boundary_final; then
         clear_consumed_batons_at_completion
         rest_on_target
+        # v0.18.2: a rested final boundary carries nothing unlanded
+        if [[ -n "$(boundary_get '.unlanded // empty | tostring')" ]]; then _boundary_write 'del(.unlanded)'; fi
       fi
       return 0 ;;
   esac
   return 1
+}
+
+land_completion_leftovers() {
+  # Step 3's action when the completion record is already committed and the
+  # tree is not clean (v0.18.2, row 1233 shape 1). Returns commit_from_artifact's rc.
+  local paths rc=0 cc head0 t0
+  paths="$(_boundary_dirty_paths | sed -E 's/^.. //; s/^"//; s/"$//' | head -n 50 | paste -sd, - | sed 's/,/, /g')"
+  head0="$(git rev-parse -q --verify HEAD 2>/dev/null)" || head0=""
+  t0="$(date +%s)"
+  cc="$(git log -1 --format=%h HEAD -- artifacts/project-complete.json 2>/dev/null)" || cc=""
+  echo "boundary-state: the completion record is committed (${cc:-?}) but the tree is not — the rest of the iteration's work lands through the loop's verify-gated completion commit (the loop owns every commit; v0.18.2): ${paths:-(unnamed)}"
+  commit_from_artifact \
+    "$ARTIFACTS_DIR/project-complete.json" \
+    "chore(workflow): the rest of the iteration's work" \
+    "The completion record was already committed (${cc:-?}); this commit lands what that commit did not carry (phasekit v0.18.2: at a completion the loop checks the whole tree, whoever committed)." || rc=$?
+  # The rest landed (the commit happened) even when a later step refused —
+  # a squash refused for branch integrity writes its own blocker: nothing
+  # is unlanded then (review round 1, m4).
+  # "Nothing substantive staged" while the tree is still dirty and HEAD did
+  # not move is NOT landed (review round 4, MAJOR: nothing could be staged).
+  if [[ "$rc" -eq 2 && "$(git rev-parse -q --verify HEAD 2>/dev/null)" == "$head0" \
+        && -n "$(_boundary_dirty_paths | head -n1)" ]]; then
+    rc=1
+  fi
+  if [[ "$rc" -eq 0 || "$rc" -eq 2 || "$(git rev-parse -q --verify HEAD 2>/dev/null)" != "$head0" ]]; then
+    _boundary_write 'del(.unlanded)'
+    return "$rc"
+  fi
+  case "$rc" in
+    *)
+      local why="a commit gate refused it"
+      if [[ "$rc" -eq 4 ]]; then why="light mode: the change touches scaffold-class files (escalated)"
+      elif [[ -f "$ARTIFACTS_DIR/scope-refusal.json" ]]; then why="a commit gate refused it (artifacts/scope-refusal.json)"
+      elif [[ -f "$ARTIFACTS_DIR/phase-verify-failed.json" && "$(stat -c %Y "$ARTIFACTS_DIR/phase-verify-failed.json" 2>/dev/null || echo 0)" -ge "$t0" ]]; then
+        why="refused by $(jq -r '.label // "the verify gate"' "$ARTIFACTS_DIR/phase-verify-failed.json" 2>/dev/null | cut -c1-80) — artifacts/phase-verify-failed.json says why"
+      fi
+      local json
+      json="$(_boundary_dirty_paths | sed -E 's/^.. //; s/^"//; s/"$//' | jq -Rsc 'split("\n") | map(select(length > 0))')" || json='[]'
+      _boundary_write '.unlanded = {paths: $p, reason: $why, completion_commit: (if $cc == "" then null else $cc end), at: $now}' \
+        --argjson p "${json:-[]}" --arg why "$why" --arg cc "$(git log -1 --format=%H HEAD -- artifacts/project-complete.json 2>/dev/null)"
+      echo "boundary-state: NOT landed — the work the completion commit ${cc:-?} did not carry could not be verified ($why); it stays in the tree, named in boundary-state.json \`unlanded\`, and the walk stops at step 3 (never a red tree on the target; the next turn repairs it): ${paths:-(unnamed)}" >&2 ;;
+  esac
+  return "$rc"
+}
+
+plain_head_verified() {
+  # Plain mode's step 4 (v0.18.2): HEAD's tree passed the verify gate —
+  # proven by the loop's own green verdict for EXACTLY that tree (the verify
+  # memo: every loop commit's gate records the tree it commits), never by a
+  # trailer a copied or amended message could carry (review round 1, m3).
+  # Anything else — a model's own commit, a hand commit, the watchdog's wip,
+  # an intake, a verdict older than the memo's TTL — is gated by the
+  # action, once per walk.
+  [[ "${BOUNDARY_STEP4_VERIFIED:-0}" == 1 ]] && return 0
+  git rev-parse -q --verify HEAD >/dev/null 2>&1 || return 0
+  # (Tree and freshness only, never the gate's command: a tree the loop's
+  # gate passed stays passed when a later session's PHASEKIT_VERIFY_CMD
+  # differs — the next approval-class commit is gated with that command.)
+  local tree memo
+  tree="$(git rev-parse "HEAD^{tree}" 2>/dev/null)" || return 1
+  memo="$(boundary_get '.verify_memo.tree_sha // empty')"
+  [[ -n "$memo" && "$memo" == "$tree" ]] || return 1
+  _verify_memo_fresh "$(boundary_get '.verify_memo.passed_at // empty')"
+}
+
+plain_verify_head() {
+  # Plain step 4's action: run the gate on HEAD's tree — only when the tree
+  # IS HEAD's (the gate judges exactly what the target carries); otherwise
+  # stop, named: the next verify-gated commit carries the difference.
+  local dirty
+  dirty="$(_boundary_dirty_paths | sed -E 's/^.. //' | head -n 8 | paste -sd' ' -)"
+  if [[ -n "$dirty" ]]; then
+    if boundary_final; then
+      write_landing_block "$dirty"
+      return 1
+    fi
+    echo "boundary-state: HEAD ($(git rev-parse --short HEAD 2>/dev/null)) was not made by the loop's verify-gated commit, and the worktree differs from it ($dirty) — its tree cannot be judged exactly here; the boundary waits for the next verify-gated commit (v0.18.2)." >&2
+    return 1
+  fi
+  echo "boundary-state: HEAD ($(git rev-parse --short HEAD 2>/dev/null)) was not made by the loop's verify-gated commit — running the verify gate on its tree before the boundary counts (v0.18.2)."
+  run_verify_gate || return 1
+  BOUNDARY_STEP4_VERIFIED=1
+  return 0
 }
 
 kept_out_claim_only() {
@@ -3840,7 +4554,7 @@ kept_out_claim_only() {
     [[ -n "$line" ]] || continue
     path="${line:3}"; path="${path#\"}"; path="${path%\"}"
     case "$path" in
-      artifacts/logs/*|artifacts/session-handoff.json|artifacts/session-interrupted.json|artifacts/wrapup-requested) continue ;;
+      artifacts/logs/*|artifacts/scratch/*|artifacts/session-handoff.json|artifacts/session-interrupted.json|artifacts/wrapup-requested) continue ;;
       artifacts/ready-to-deploy.json) found=1; continue ;;
       # the wip keeps these out too (review round 8); they land beside the
       # claim, behind the post-verify gates' credential scan
@@ -3863,12 +4577,29 @@ land_kept_out_claim() {
   echo "boundary-state: the last unverified commit kept the deploy claim out — landing it with its tree, verify-gated (v0.18.0)."
   git add -f -- "$ARTIFACTS_DIR/ready-to-deploy.json" 2>/dev/null || return 1
   git add -- "$ROOT_DIR/docs/LEARNINGS"*.md 2>/dev/null || true
-  if ! run_verify_gate || ! post_verify_commit_gates wrapup; then
+  local _kc_err _kc_rc=0
+  _kc_err="$(mktemp)"
+  if run_verify_gate; then post_verify_commit_gates wrapup 2>"$_kc_err" || _kc_rc=$?; else _kc_rc=1; : > "$_kc_err"; fi
+  cat "$_kc_err" >&2 2>/dev/null || true
+  if [[ "$_kc_rc" -ne 0 ]]; then
+    if grep -q '^run-until-done: REFUSED —' "$_kc_err" 2>/dev/null; then
+      record_commit_refusal "commit gate (after verify)" "$(grep '^run-until-done: REFUSED —' "$_kc_err" | head -n 5)
+The commit gates that run after the verify gate refused the deploy claim's landing. Fix what the line above names, then end your turn — the loop retries."
+    fi
+    rm -f "$_kc_err"
     git reset -q -- "$ARTIFACTS_DIR/ready-to-deploy.json" "$ROOT_DIR/docs/LEARNINGS"*.md 2>/dev/null || true
     return 1
   fi
-  git commit -q -m "chore(workflow): land the deploy claim the last unverified commit kept out" \
-    -m "$(phasekit_trailers claim)" || return 1
+  : > "$_kc_err"
+  if ! git commit -q -m "chore(workflow): land the deploy claim the last unverified commit kept out" \
+       -m "$(phasekit_trailers claim)" 2>"$_kc_err"; then
+    record_commit_refusal "git commit (git refused the loop's commit)" "$(redact_credentials < "$_kc_err" | tail -n 30)
+git refused the loop's commit of the kept-out deploy claim (a project git hook, the commit identity, signing). Fix what git names — never commit yourself: the loop retries."
+    rm -f "$_kc_err"
+    return 1
+  fi
+  rm -f "$_kc_err"
+  clear_commit_refusal
   return 0
 }
 
@@ -3894,6 +4625,8 @@ _land_boundary() {
   # once let a FRESH approval skip its own commit).
   BOUNDARY_APPROVAL_RIDES_COMPLETION=0
   BOUNDARY_STEP2_ATTEMPTED=0
+  BOUNDARY_STEP3_ATTEMPTED=0   # v0.18.2
+  BOUNDARY_STEP4_VERIFIED=0    # v0.18.2 (plain mode)
   BOUNDARY_WALK_CONTEXT="$context"
   # The caller's `from` is a claim the walk verifies, not a shortcut past
   # step 1: every walk derives phase/final from disk first (the catch-up
@@ -3989,6 +4722,9 @@ _land_boundary() {
     if [[ "$step" -eq 3 ]] && boundary_final; then completion_residue_settle || true; fi
   done
   COMPLETION_COMMIT_IN_PROGRESS="$prior_ccip"; BOUNDARY_WALK_CONTEXT=""
+  # v0.18.2 (review round 2, m1): a final boundary that rests carries
+  # nothing unlanded, however the rest landed (step 7 proven, not acted on).
+  if boundary_final && [[ -n "$(boundary_get '.unlanded // empty | tostring')" ]]; then _boundary_write 'del(.unlanded)'; fi
   echo "boundary-state: rested (step $BOUNDARY_STEP_RESTED) — $(boundary_final && echo "final boundary" || echo "phase boundary") for phase $(boundary_get '.phase // "unknown"')$( [[ "$did" -eq 1 ]] || echo " (nothing new to commit)")."
   if [[ "$did" -eq 1 ]]; then
     # v0.18.0: the landing's own cost (commit, squash, merge-back, rest) —
@@ -4267,7 +5003,7 @@ deadline_lastresort_commit() {
        '.note += $tail | .ts = $ts' \
        "$baton" > "$baton.tmp" 2>/dev/null && mv "$baton.tmp" "$baton" 2>/dev/null || rm -f "$baton.tmp" 2>/dev/null || true
   else
-    local next_step="audit the last wip commit as IN-PROGRESS IMPLEMENTATION from a killed session: re-derive what is verified, keep it, finish or revert the rest; an uncommitted artifacts/phase-approval.json, project-complete.json or ready-to-deploy.json on disk is the session's own (the wip kept them out, unstaged) — the loop lands them verify-gated with the rest of the tree, do not delete or rebuild them (a completion whose landing was refused and never re-claimed is removed at the next start)"
+    local next_step="audit the last wip commit as IN-PROGRESS IMPLEMENTATION from a killed session: re-derive what is verified, keep it, finish the rest or edit it back (never git checkout/reset/stash — the loop owns every commit); an uncommitted artifacts/phase-approval.json, project-complete.json or ready-to-deploy.json on disk is the session's own (the wip kept them out, unstaged) — the loop lands them verify-gated with the rest of the tree, do not delete or rebuild them (a completion whose landing was refused and never re-claimed is removed at the next start)"
     local note="dead-man baton written by the deadline watchdog (v0.13.0): the loop was killed before it could conclude. Ephemeral: delete after orienting."
     if [[ "$mode" == "wrapup" ]]; then
       next_step="audit the last wip commit as UNVERIFIED work from a session whose verify gate was red at wrap-up; the approval artifact (if any) was left on disk uncommitted for the stranded-artifact recovery to re-verify"
@@ -4388,6 +5124,7 @@ deadline_lastresort_commit() {
     # never sweep session logs or an in-repo custom sentinel into history on
     # the strand path either.
     git reset -q -- "$ARTIFACTS_DIR/logs" 2>/dev/null || true
+    git reset -q -- "$ARTIFACTS_DIR/scratch" 2>/dev/null || true
     git reset -q -- "$WRAPUP_SENTINEL" 2>/dev/null || true
     if ! git diff --cached --quiet -- \
         "$ARTIFACTS_DIR/ready-to-deploy.json" \
@@ -4719,16 +5456,21 @@ wrapup_commit() {
   # ended the iteration before the boundary saw it — round-2 F5) leaves
   # with keyed deferrals like every other commit path.
   prepare_verdicts_for_landing || true
-  local _wa
-  for _wa in 1 2 3 4 5 6 7 8; do
-    git add -A 2>/dev/null && break
-    echo "Wrap-up: git add contended (attempt $_wa) — retrying" >&2
-    # After a take-control the ended turn's writer is dead: a lock it left
-    # is released once it is old enough to be nobody's (review round 2).
-    if [[ "${TOOK_CONTROL:-0}" == 1 ]]; then release_stale_index_lock; fi
-    sleep 2
-  done
+  # The loop's one staging retry rule (git_add_all): a lock left by a dead
+  # writer — an ended turn's, after a take-control — is released once it is
+  # old enough to be nobody's (review round 2; one rule since v0.18.2).
+  stage_all
+  if [[ -n "${STAGE_LOCKED:-}" ]]; then
+    echo "Wrap-up: git's index is locked ($STAGE_LOCKED) — committing what is staged" >&2
+  elif [[ -n "${STAGE_FAILED:-}" ]]; then
+    # The gate would judge a worktree the commit does not carry: never a
+    # LANDING then (review round 7) — the verdicts stay out and the rest is a
+    # checkpoint; the next landing judges the whole tree.
+    echo "Wrap-up: git could not stage: $STAGE_FAILED — committing the rest as a checkpoint (verdicts kept out); the baton names them" >&2
+    git reset -q -- "$ARTIFACTS_DIR/phase-approval.json" "$ARTIFACTS_DIR/project-complete.json" 2>/dev/null || true
+  fi
   git reset -q -- "$ARTIFACTS_DIR/logs" 2>/dev/null || true
+  git reset -q -- "$ARTIFACTS_DIR/scratch" 2>/dev/null || true
   git reset -q -- "$WRAPUP_SENTINEL" 2>/dev/null || true
   unstage_transient_adds
   keep_unclaimed_completion_out
@@ -4739,6 +5481,7 @@ wrapup_commit() {
   # Otherwise it is a checkpoint and carries none.
   local _wdrv
   _wdrv="$(evidence_driver)"
+  [[ -z "${STAGE_FAILED:-}" ]] || _wdrv=""
   if [[ -n "$_wdrv" ]]; then
     if artifact_never_landed "$_wdrv"; then write_phase_evidence "$_wdrv"; fi
   else
@@ -4751,7 +5494,7 @@ wrapup_commit() {
     return 0
   fi
   if staged_touches_security_pair; then
-    write_session_handoff false "unstage and revert the staged .claude/settings.json / .github/workflows/ changes — the loop never commits them — then redo the phase work without touching them"
+    write_session_handoff false "put the changed .claude/settings.json / .github/workflows/ files back as HEAD has them (edit them back: git show HEAD:<path> > <path>) — the loop never commits them — then redo the phase work without touching them"
     echo "Wrap-up: staged changes touch committed .claude/settings.json or .github/workflows/ — leaving work uncommitted (security-critical, never committed by the loop). Handoff note written." >&2
     return 0
   fi
@@ -4794,16 +5537,20 @@ wrapup_commit() {
         return 0
       fi
     fi
-    write_session_handoff false "fix the verify failure recorded in artifacts/phase-verify-failed.json, then re-commit the standing work"
+    write_session_handoff false "fix the verify failure recorded in artifacts/phase-verify-failed.json, then write your verdict (phase-update.json at least) — the loop commits the standing work"
     echo "Wrap-up: verify failed — leaving work uncommitted (phase-verify-failed.json + session-handoff.json record the state for the next session)." >&2
     return 0
   fi
   if ! post_verify_commit_gates wrapup; then
-    write_session_handoff false "the post-verify commit gates refused the staged work (see the REFUSED line in the session log — e.g. remove a credential-shaped line from docs/LEARNINGS.md), then re-commit the standing work"
+    write_session_handoff false "the post-verify commit gates refused the staged work (see the REFUSED line in the session log — e.g. remove a credential-shaped line from docs/LEARNINGS.md), then write your verdict (phase-update.json at least) — the loop commits the standing work"
     echo "Wrap-up: post-verify gates refused the staged work — leaving it uncommitted (session-handoff.json records the state)." >&2
     return 0
   fi
-  write_session_handoff true "standing work was committed at wrap-up; re-orient and continue from the next unapproved phase"
+  if [[ -n "${STAGE_FAILED:-}" ]]; then
+    write_session_handoff true "standing work was committed at wrap-up EXCEPT paths git cannot stage: $STAGE_FAILED — make them stageable (an empty or nested repository: remove its .git or move it outside the tree; an unreadable file: fix its permissions) or remove them, then continue from the next unapproved phase"
+  else
+    write_session_handoff true "standing work was committed at wrap-up; re-orient and continue from the next unapproved phase"
+  fi
   git add -f "$ARTIFACTS_DIR/session-handoff.json" 2>/dev/null || true
   # Tolerant commit (v0.13.1): under set -e a bare failure here killed the
   # loop. "Nothing to commit" means a concurrent last-resort commit already
@@ -4819,6 +5566,8 @@ wrapup_commit() {
     fi
     return 0
   fi
+  # a refusal the wrap-up could not stage past still stands (review round 6)
+  [[ -n "${STAGE_FAILED:-}" ]] || clear_commit_refusal
   auto_push_if_enabled
 }
 
@@ -4866,6 +5615,8 @@ OVERRIDE the standard operating rules below wherever they conflict:
   contract, or dependency changes; multi-surface edits; unclear acceptance),
   write artifacts/phase-blocked.json and stop. Escalation to a standard
   full-ceremony run is automatic — do not grind.
+- The loop owns every commit: never run git commands that write history, refs or the index (commit, add, rm, mv, reset, restore, checkout, switch, stash, merge, rebase, cherry-pick, revert, tag, branch -f/-D, update-ref, worktree) — the command guard refuses them. Write your verdict artifact; the loop commits it, verify-gated. To undo an edit of your own, edit the file back (`git show HEAD:<path> > <path>` restores the committed bytes).
+- Scratch files go in artifacts/scratch/ (ignored, never committed, cleared when an iteration starts) or /tmp — never elsewhere in the tree: the loop commits everything else it finds.
 === END LIGHT MODE OVERRIDES ===
 
 LIGHT_EOF
@@ -5010,7 +5761,8 @@ Do, in order:
    green verdict is REUSED by that commit instead of run again — so change
    nothing after it. If it is red, fix and run it again.
 
-Never run git commit or git push — the wrapper owns commits.
+The loop owns every commit: never run git commands that write history, refs or the index (commit, add, rm, mv, reset, restore, checkout, switch, stash, merge, rebase, cherry-pick, revert, tag, branch -f/-D, update-ref, worktree) — the command guard refuses them. Write your verdict artifact; the loop commits it, verify-gated. To undo an edit of your own, edit the file back (`git show HEAD:<path> > <path>` restores the committed bytes).
+Scratch files go in artifacts/scratch/ (ignored, never committed, cleared when an iteration starts) or /tmp — never elsewhere in the tree: the loop commits everything else it finds.
 REVIEW_EOF
   echo "Light mode: final review pass on the default model before the final commit."
   local rrc=0 rstart
@@ -5411,6 +6163,8 @@ check_for_scaffold_update || true
 # order is deliberate: it fails closed (an exclude line for a still-tracked
 # path is inert; untracked-and-unexcluded is the state to avoid).
 ensure_transients_excluded || true
+# v0.18.2: the scratch space belongs to one iteration.
+clear_scratch_at_iteration_start || true
 
 # Branch-per-iteration (v0.14.0): put HEAD on the work branch before any
 # loop-made commit can land — the heal commit just below and the recovery
@@ -5451,6 +6205,12 @@ elif squash_pending; then
 elif approval_final_unrecorded; then
   recover_from=1
   recover_why="The landed phase-approval.json names the final phase (final_phase: true) and no commit since it has recorded a completion — recording it before starting."
+elif completion_in_flight && ! boundary_complete; then
+  # v0.18.2 (review round 6): this iteration's committed completion stopped
+  # mid-landing and a later pass began before its walk (the record's current
+  # boundary is idle) — plain mode has no squash_pending to witness it.
+  recover_from=1
+  recover_why="The committed completion record is this iteration's and its landing never finished — continuing it before starting (v0.18.2)."
 elif kept_out_claim_only; then
   recover_from=2
   recover_why="The last commit is an unverified wip that kept the deploy claim out — landing the claim with its tree and proving the boundary before starting (v0.18.0)."
@@ -5518,7 +6278,7 @@ if [[ -n "$recover_why" ]]; then
       exit 0
     fi
   elif [[ "$BRANCH_INTEGRITY_BLOCKED" -eq 1 ]]; then
-    echo "Stopping: the work branch cannot be squashed onto $SQUASH_TARGET (see artifacts/phase-blocked.json)." >&2
+    echo "Stopping: the landing cannot proceed — the work branch cannot be squashed onto ${SQUASH_TARGET:-its target}, or the completion's tree cannot be judged (see artifacts/phase-blocked.json)." >&2
     print_json_summary "$ARTIFACTS_DIR/phase-blocked.json"
     exit 2
   else
@@ -5688,9 +6448,13 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
   #     verify-retry paths commit it under its own phase's message at this same
   #     boundary). Prodding there would spend a turn asking for a verdict that
   #     already exists — caught by the v0.6.0/v0.6.3 regression tests.
+  # v0.18.2: nor while a COMMITTED completion record claims — the completion
+  # site below lands the rest of the tree whatever the turn wrote (review
+  # round 3, MAJOR 2: a retry every pass asked for a record that exists).
   if [[ "$verdict_retry_used" -eq 0 ]] \
      && [[ "$TOOK_CONTROL" != 1 ]] \
      && [[ -z "$PENDING_COMMIT_RETRY" ]] \
+     && ! { completion_record_claims && completion_landed_at_head; } \
      && ! has_verdict_artifact \
      && [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
     verdict_retry_used=1
@@ -5713,7 +6477,8 @@ Decide what the work in the tree is, and write exactly one artifact:
 - artifacts/project-complete.json — the whole project is done.
 
 Inspect the tree first (git status, git diff), then write the artifact. Do not
-start new work and do not run git commit — the wrapper owns commits.
+start new work.
+The loop owns every commit: never run git commands that write history, refs or the index (commit, add, rm, mv, reset, restore, checkout, switch, stash, merge, rebase, cherry-pick, revert, tag, branch -f/-D, update-ref, worktree) — the command guard refuses them. Write your verdict artifact; the loop commits it, verify-gated. To undo an edit of your own, edit the file back (`git show HEAD:<path> > <path>` restores the committed bytes).
 VERDICT_RETRY_EOF
     vrc=0
     turn_started_at="$(date +%s)"

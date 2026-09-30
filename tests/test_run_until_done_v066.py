@@ -57,7 +57,11 @@ class LoopV066StructuralTest(unittest.TestCase):
         # The credential regex must exist exactly once — a second copy is the
         # drift that produced the wrap-up bypass.
         self.assertEqual(self.text.count("sk-ant-"), 1)
-        self.assertIn("sk-ant-", self._fn("post_verify_commit_gates"))
+        # v0.18.2: the one list is CREDENTIAL_TOKEN_RE, shared by the scan and
+        # redact_credentials (the capture of a refusal)
+        self.assertIn("sk-ant-", [ln for ln in self.text.splitlines() if ln.startswith("CREDENTIAL_TOKEN_RE=")][0])
+        self.assertIn("$CREDENTIAL_TOKEN_RE", self._fn("post_verify_commit_gates"))
+        self.assertIn("$CREDENTIAL_TOKEN_RE", self._fn("redact_credentials"))
 
     def test_security_pair_single_source(self) -> None:
         self.assertIn("staged_touches_security_pair() {", self.text)

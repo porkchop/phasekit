@@ -14,6 +14,8 @@ See `README.md` for product detail and `docs/META_SPEC.md` for the self-improvem
 - Start from the **earliest unapproved phase** in `docs/META_PHASES.md` (for self-improvement) or `docs/PHASES.md` (for downstream projects).
 - Prefer **minimal, backward-compatible** changes.
 - **Stop after writing `artifacts/phase-approval.json`** — do not proceed past a phase until the repository has been committed externally.
+- **The loop owns every commit**: never run git commands that write history, refs or the index (commit, add, rm, mv, reset, restore, checkout, switch, stash, merge, rebase, cherry-pick, revert, tag, branch -f/-D, update-ref, worktree) — the command guard refuses them. Write your verdict artifact; the loop commits it, verify-gated. To undo an edit of your own, edit the file back (`git show HEAD:<path> > <path>` restores the committed bytes).
+- Scratch files go in artifacts/scratch/ (ignored, never committed, cleared when an iteration starts) or /tmp — never elsewhere in the tree: the loop commits everything else it finds.
 - Treat containerized unattended mode as **opt-in**. Permissive execution must live in local/container-only configuration or explicit CLI overrides — never in shared project settings.
 
 ## Lifecycle

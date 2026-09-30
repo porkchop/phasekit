@@ -12,7 +12,7 @@ set -euo pipefail
 # gate: it needs Docker.
 #
 # Usage (from the phasekit repo root, host with Docker):
-#   bash scripts/verify-in-container.sh                 # tests.test_boundary_state
+#   bash scripts/verify-in-container.sh                 # the boundary-state suite + the command guard (v0.18.2)
 #   bash scripts/verify-in-container.sh tests.test_x …  # other unittest targets
 #   IMAGE_NAME=scaffold-runner JQ_MIN=1.7 bash scripts/verify-in-container.sh
 #
@@ -35,7 +35,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE_NAME="${IMAGE_NAME:-scaffold-runner}"
 JQ_MIN="${JQ_MIN:-1.7}"
 TARGETS=("$@")
-[[ ${#TARGETS[@]} -gt 0 ]] || TARGETS=("tests.test_boundary_state")
+# v0.18.2: the command guard's parse runs on the image's python and git too.
+[[ ${#TARGETS[@]} -gt 0 ]] || TARGETS=("tests.test_boundary_state" "tests.test_loop_owns_commits")
 
 command -v docker >/dev/null 2>&1 || { echo "verify-in-container: docker not found" >&2; exit 2; }
 docker image inspect "$IMAGE_NAME" >/dev/null 2>&1 || {

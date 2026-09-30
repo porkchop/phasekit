@@ -886,7 +886,7 @@ class ReviewRound11Minors(unittest.TestCase):
     # (4) every green path clears LAST_GATE_RED ------------------------------
     def _gate_fns(self):
         return "\n".join(H._extract_block(rf"^{name}\(\) \{{", r"^\}") + "\n}"
-                         for name in ("run_contracts_gate", "_clear_verify_failed", "run_verify_gate"))
+                         for name in ("run_contracts_gate", "_clear_verify_failed", "verify_command_resolve", "run_verify_gate"))
 
     def _last_gate_red_after(self, root, env_line):
         script = (f'set -euo pipefail\nROOT_DIR="{root}"\nARTIFACTS_DIR="$ROOT_DIR/artifacts"\n'

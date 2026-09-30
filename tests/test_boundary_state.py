@@ -334,7 +334,8 @@ class Repo:
 # The explicit model of what the sequence owes after a kill at step k
 # ---------------------------------------------------------------------------
 
-def expected_step(mode, k, red, verified_tree, needs_completion_commit, claim_kept_out=False):
+def expected_step(mode, k, red, verified_tree, needs_completion_commit, claim_kept_out=False,
+                  unverified_head=False):
     """k = the last step whose ACTION completed before the kill (0..7).
     red = the resume's verify gate is red. verified_tree = the tree the
     resume must land already passed a gate (a memo exists), so no
@@ -350,6 +351,8 @@ def expected_step(mode, k, red, verified_tree, needs_completion_commit, claim_ke
         return 2                    # the completion commit is the next gated action
     if squash and k < 4 and not verified_tree:
         return 3                    # the catch-up squash re-verifies an unverified tree
+    if not squash and unverified_head:
+        return 3                    # v0.18.2: plain step 4 gates a commit the loop did not make
     return RESTED
 
 
@@ -361,6 +364,8 @@ def expected_verify_runs_green(entry, mode, k, needs_completion_commit, gate="lo
     if entry in ("catchup", "watchdog", "watchdog-late"):
         if squash:
             return 1                # an unverified tree: the completion commit OR the catch-up squash verifies it once
+        if entry == "catchup":
+            return 1                # v0.18.2: a hand commit is gated once (plain step 4) before its boundary counts
         return 1 if needs_completion_commit else 0
     return 0                        # iteration entry, k >= 2: the memo covers the tree
 
@@ -603,7 +608,8 @@ class KillPointMatrix(unittest.TestCase):
         verified_tree = entry == "iteration" and kill_step >= 2
         needs_completion_commit = final and not res["completion_landed"]
         exp = expected_step(mode, kill_step, red, verified_tree, needs_completion_commit,
-                            claim_kept_out=(gate == "consistency" and entry in ("watchdog", "watchdog-late")))
+                            claim_kept_out=(gate == "consistency" and entry in ("watchdog", "watchdog-late")),
+                            unverified_head=(entry == "catchup"))
         if not res["resumed"]:
             exp = RESTED
 
@@ -746,7 +752,13 @@ class Primitives(unittest.TestCase):
         full = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1"}
         full.pop("PHASEKIT_BOUNDARY_KILL_PROBE", None)
         full.update(env or {})
-        return subprocess.run(["bash", "-c", "\n".join(prelude) + "\n" + body],
+        # A file, not `bash -c`: the boundary block outgrew one argument's
+        # 128 KiB limit (MAX_ARG_STRLEN) in v0.18.2.
+        fd, script = tempfile.mkstemp(prefix="pk-prim-", suffix=".sh")
+        self.addCleanup(os.unlink, script)
+        with os.fdopen(fd, "w") as fh:
+            fh.write("\n".join(prelude) + "\n" + body)
+        return subprocess.run(["bash", script],
                               capture_output=True, text=True, timeout=60, env=full)
 
     def record(self):
@@ -2253,7 +2265,8 @@ class StructuralPins(unittest.TestCase):
 
     def test_the_wrapup_commit_keys_the_deferrals_it_sweeps(self):
         fn = _extract_block(r"^wrapup_commit\(\) \{", r"^\}")
-        self.assertLess(fn.index("prepare_verdicts_for_landing"), fn.index("git add -A"))
+        # v0.18.2: the wrap-up stages through stage_all (the loud path)
+        self.assertLess(fn.index("prepare_verdicts_for_landing"), fn.index("stage_all"))
         prep = _extract_block(r"^prepare_verdicts_for_landing\(\) \{", r"^\}")
         self.assertIn("normalize_deferral_keys", prep)
 

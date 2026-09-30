@@ -177,10 +177,11 @@ class UntrackedWritesAfterTheCompletion(_Base):
 
 
 class DirtOlderThanTheCompletionCommitIsNeverJudged(_Base):
-    """Negative pin: dirt that predates the completion commit and that the
-    model's partial commit did not carry is NOT a post-completion write —
-    left exactly as it is and named by finish_complete (never restored on a
-    guess). Green on v0.18.0 and after."""
+    """Dirt that predates the completion commit and that the model's partial
+    commit did not carry is NOT a post-completion write — never restored on a
+    guess (v0.18.1). v0.18.2 (row 1233 shape 1): it is not left dirty either
+    — the whole-tree check at step 3 lands it through the loop's own
+    verify-gated completion commit."""
 
     def test_older_dirt_is_left_and_named(self):
         # Review round 1 (MAJOR 3b): the write is in the SAME shell command
@@ -195,9 +196,10 @@ git commit -qm "only the completion record (a partial commit)"
         r = repo.run(env={"MAX_ITERATIONS": "2"})
         out, rec = self._state(repo, r)
         self.assertEqual(r.returncode, 0, out)
-        self.assertIn("did not rest", out)
-        self.assertIn(" M src.txt", out)
+        self.assertNotIn("did not rest", out)
         self.assertIn("unclaimed older work", (repo.repo / "src.txt").read_text())
+        self.assertIn("unclaimed older work", repo.git("show", "HEAD:src.txt"), "v0.18.2: it lands")
+        self.assertEqual(repo.porcelain_all(), [], out)
         self.assertNotIn("post_completion", rec)
 
 
@@ -328,12 +330,15 @@ git commit -qm "only the record"
         out, rec = self._state(repo, r)
         self.assertFalse((repo.repo / "old.txt").exists(), "an older deletion was resurrected\n" + out)
         self.assertNotIn("post_completion", rec)
-        self.assertIn(" D old.txt", out, "named by the step-7 line")
+        # v0.18.2: the deletion lands through the loop's gated completion commit
+        self.assertFalse(repo.tracked("old.txt", "HEAD"), out)
+        self.assertEqual(repo.porcelain_all(), [], out)
 
     def test_a_completion_never_seen_clean_is_never_judged(self):
         # Round 4: the loop judges only what it observed. A write in the SAME
         # shell command as the commit leaves the tree dirty at every poll —
-        # no snapshot, nothing restored, the v0.18.0 rest (named).
+        # no snapshot, nothing restored. v0.18.2: nor left dirty — the rest
+        # lands through the loop's verify-gated completion commit.
         repo = self._repo(COMPLETE_AND_SELF_COMMIT.rstrip("\n") + " && rm old.txt\n"
                           + "for i in 1 2 3; do echo \"more $i\" >> src.txt; sleep 0.3; done\n")
         repo.write("old.txt", "old\n"); repo.git("add", "-A"); repo.git("commit", "-qm", "old")
@@ -342,7 +347,9 @@ git commit -qm "only the record"
         self.assertEqual(r.returncode, 0, out)
         self.assertFalse((repo.repo / "old.txt").exists(), out)
         self.assertIn("more 3", (repo.repo / "src.txt").read_text(), out)
-        self.assertIn("did not rest", out)
+        self.assertIn("more 3", repo.git("show", "HEAD:src.txt"), out)
+        self.assertFalse(repo.tracked("old.txt", "HEAD"), out)
+        self.assertEqual(repo.porcelain_all(), [], out)
         self.assertNotIn("post_completion", rec)
 
     def test_light_a_record_only_commit_over_older_work_still_gets_its_review_and_lands_the_work(self):
@@ -464,13 +471,15 @@ touch "$STUB_DIR/repair-finished"
         r = repo.run(env={"MAX_ITERATIONS": "3"})
         out, rec = self._state(repo, r)
         self.assertTrue((repo.stub / "repair-finished").exists(), out)
-        # (What v0.18.1 owns here: the repair is never restored or discarded,
-        # and the loop does not stall. That the catch-up squash then lands
-        # HEAD's tree rather than the repaired worktree is identical on
-        # v0.18.0 — declined with record, filed as its own design row.)
+        # (v0.18.1 owned: the repair is never restored or discarded, and the
+        # loop does not stall. v0.18.2 (row 1233 shape 2): the catch-up squash
+        # lands the REPAIRED tree — the repair lands first through the loop's
+        # gated commit, and the squash judges exactly the tree it lands.)
         self.assertFalse(repo.artifact("phase-blocked.json").exists(), out)
         self.assertIn("the repair", (repo.repo / "src.txt").read_text(), out)
         self.assertFalse((repo.repo / "BAD").exists(), out)
+        self.assertFalse(repo.tracked("BAD", "main"), "a red tree reached the target\n" + out)
+        self.assertIn("the repair", repo.git("show", "main:src.txt"), out)
         self.assertNotIn("written AFTER the completion commit", out)
 
     def test_the_light_reviews_fix_is_its_own_work_even_when_it_leaves_the_record_as_is(self):
@@ -604,7 +613,13 @@ git add -A; git commit -qm "the repair, with the completion re-claimed"
         out, rec = self._state(repo, r)
         self.assertIn("completion guard: the completion record was committed during the turn", out)
         self.assertFalse((repo.stub / "turn-ran-to-its-end").exists(), out)
-        self.assertEqual(repo.porcelain_all(), [], out)
+        # v0.18.2: plain step 4 now gates the model's own commit — green here,
+        # and the gate clears phase-verify-failed.json, which the model's
+        # `git add -A` had swept into its commit (a bypass: the guard refuses
+        # that add). The loop's rest ignores transient signals (step 7 is
+        # proven) and the next start's heal untracks it.
+        self.assertEqual([ln for ln in repo.porcelain_all() if "phase-verify-failed.json" not in ln], [], out)
+        self.assertEqual((repo.record() or {}).get("step"), H.RESTED, out)
 
     def test_a_skipped_review_still_runs_for_the_repaired_completion(self):
         # MINOR 5: a builder's own commit once bypassed the review for good.
