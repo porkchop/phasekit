@@ -51,3 +51,9 @@ a git forge, or pasted into an LLM.
   lint, no spellcheck — deliberate). Keep it green.
 - Any check over these docs reads the tree, never git history (docs/QUALITY_GATES.md
   "Hermetic tests").
+- Tests read the declared surface: a test reads this project's own tree and
+  phasekit's DECLARED surface (`contracts/interface.json` `facts`, or
+  `bash scripts/phasekit.sh facts --json`), never the files phasekit owns (the
+  vendored loop and scripts, the hooks, the scaffold docs). A fact a test
+  needs that the surface lacks is a request to phasekit, not a parse
+  (docs/QUALITY_GATES.md "Tests read the declared surface").

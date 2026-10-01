@@ -2961,6 +2961,7 @@ ALWAYS_INSTALLED_FILE_PATHS = (
     "scripts/phasekit-log-fmt.sh",
     "scripts/phasekit-contracts.py",
     "scripts/phasekit-roadmap.py",
+    "scripts/phasekit-surface.py",
     ".devcontainer/devcontainer.json",
     ".devcontainer/Dockerfile",
     ".devcontainer/entrypoint.sh",
@@ -3273,9 +3274,32 @@ def cmd_check(target_dir, strict=False, include_templates=False):
             f"(was {adv['recorded']}, now {adv['current']})"
         )
 
+    _scaffold_reads_advisory(target)
+
     if drift or missing or template_drift:
         return 3
     return 0
+
+
+def _scaffold_reads_advisory(target):
+    """v0.18.3 (queue row 1194): the `scaffold-reads` advisory — project test
+    files that read scaffold-owned files instead of phasekit's declared surface
+    (docs/QUALITY_GATES.md "Tests read the declared surface"). Warn-only: it
+    prints and never changes check's exit code; any failure is silent."""
+    try:
+        import importlib.util
+        src = Path(__file__).resolve().parent / "phasekit-surface.py"
+        spec = importlib.util.spec_from_file_location("phasekit_surface", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        reads = mod.scaffold_reads(target)
+        line = mod.advisory_line(reads)
+    except Exception:  # noqa: BLE001 — an advisory never fails the check
+        return
+    if line:
+        print(f"  {line}")
+        for entry in reads:
+            print(f"    {entry['test']}: {', '.join(entry['paths'])}")
 
 
 def cmd_check_version(target_dir):

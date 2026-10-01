@@ -204,7 +204,7 @@ class GuardRefusesGitWritesUnderTheLoop(_GuardBase):
         self.assertEqual(rc, 2)
 
     def test_the_legacy_list_through_a_pipe_or_a_process_substitution(self):
-        for c in ("cat <(git push)", "echo \"git push origin main\" | bash"):
+        for c in ("cat <(git push --force)", "echo \"git push -f origin main\" | bash"):
             with self.subTest(command=c):
                 self.assertEqual(self.guard(c, loop=False)[0], 2, c)
 
@@ -287,10 +287,11 @@ class GuardOutsideTheLoop(_GuardBase):
 
     def test_the_dangerous_list_is_refused_in_every_session(self):
         # RED on v0.18.1: the payload arrives on stdin, which that hook never read.
+        # v0.18.3: the list is the DESTRUCTIVE commands only (tests/test_guard_scope.py).
         for loop in (False, True):
-            for c in ("git push", "git push origin main", "git tag v1", "git reset --hard",
+            for c in ("git push --force", "git push -f origin main", "git tag -d v1", "git reset --hard",
                       "git clean -fd", "git clean -f -d -x", "sudo ls", "shred f",
-                      "bash -c 'git push'"):
+                      "bash -c 'git push --force'"):
                 with self.subTest(command=c, loop=loop):
                     rc, err = self.guard(c, loop=loop)
                     self.assertEqual(rc, 2, f"{c!r}: {err}")
@@ -322,7 +323,7 @@ class GuardFailsOpenNarrowly(_GuardBase):
     def test_without_python3_a_regex_stands_in(self):
         path = self._no_python_path()
         self.assertEqual(self.guard("git commit -m x", path=path)[0], 2)
-        self.assertEqual(self.guard("git push", loop=False, path=path)[0], 2)
+        self.assertEqual(self.guard("git push --force", loop=False, path=path)[0], 2)
         self.assertEqual(self.guard("git status", path=path)[0], 0)
         self.assertEqual(self.guard("git commit -m x", loop=False, path=path)[0], 0)
 

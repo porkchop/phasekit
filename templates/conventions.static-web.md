@@ -48,6 +48,12 @@ no framework. What's in the repo is what ships.
   A fact about a past phase is an evidence file — phasekit commits
   `artifacts/iterations/<N>/<phase>.json` at every phase close — or a golden
   file (docs/QUALITY_GATES.md "Hermetic tests").
+- Tests read the declared surface: a test reads this project's own tree and
+  phasekit's DECLARED surface (`contracts/interface.json` `facts`, or
+  `bash scripts/phasekit.sh facts --json`), never the files phasekit owns (the
+  vendored loop and scripts, the hooks, the scaffold docs). A fact a test
+  needs that the surface lacks is a request to phasekit, not a parse
+  (docs/QUALITY_GATES.md "Tests read the declared surface").
 
 ## Layout
 

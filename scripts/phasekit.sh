@@ -15,6 +15,10 @@
 #                                 commit gate will; a green verdict is reused by it
 #   phasekit scope [--iteration N] [--phase P] [--json]
 #                                 what this iteration (or one phase) changed
+#   phasekit facts [--json]       the facts phasekit DECLARES for downstream tests
+#                                 (contracts/interface.json `facts`; read-only)
+#   phasekit scaffold-reads [--json]  the `scaffold-reads` advisory: test files that
+#                                 read scaffold-owned files instead (warn-only)
 #
 # Anything else is forwarded verbatim to the engine, so the raw flag form
 # still works for any flag enrich-project.py supports:
@@ -142,6 +146,12 @@ case "$verb" in
   roadmap)
     shift
     exec "${PHASEKIT_PYTHON:-python3}" "$SCRIPT_DIR/phasekit-roadmap.py" "$@"
+    ;;
+  facts|scaffold-reads)
+    # v0.18.3 (queue row 1194): the declared surface a downstream test reads
+    # instead of the vendored loop's text, and the advisory that names tests
+    # that still read scaffold-owned files. Read-only; run from the project.
+    exec "${PHASEKIT_PYTHON:-python3}" "$SCRIPT_DIR/phasekit-surface.py" "$@"
     ;;
   *)
     # No verb, a flag (-…), or a raw path/target: forward verbatim.

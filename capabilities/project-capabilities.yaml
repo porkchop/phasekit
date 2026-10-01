@@ -420,6 +420,18 @@ scripts:
     # scripts/phasekit-verify.sh could be edited away by the repo it polices.
     # Inert in a repo with no contracts.yaml. See docs/CONTRACTS.md.
 
+  phasekit-surface:
+    path: scripts/phasekit-surface.py
+    required: false
+    ownership: scaffold
+    # v0.18.3 (queue row 1194) the declared surface for downstream tests:
+    # `facts` prints contracts/interface.json's `facts` section (what the loop
+    # guarantees — commit surfaces and the gates they reach, the LEARNINGS
+    # credential scan, …) so a test reads that instead of the vendored loop's
+    # text; `scaffold-reads` is the warn-only advisory naming tests that still
+    # read scaffold-owned files (the loop records it after the gate; `phasekit
+    # check` prints it). Read-only, stdlib only.
+
   phasekit-roadmap:
     path: scripts/phasekit-roadmap.py
     required: false

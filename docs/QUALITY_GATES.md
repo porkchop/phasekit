@@ -296,19 +296,29 @@ The host-side wrapper is responsible for:
 3. creating a git commit
 4. resuming Claude for the next phase
 
-### The loop owns every commit (v0.18.2)
+### The loop owns every commit (v0.18.2; scope v0.18.3)
 The loop owns every commit: a session never runs git commands that write
 history, refs or the index (commit, add, rm, mv, reset, restore, checkout,
 switch, stash, merge, rebase, cherry-pick, revert, tag, branch -f/-D,
-update-ref, worktree, …). Under the loop the PreToolUse command guard
+update-ref, worktree, push, …). Under the loop the PreToolUse command guard
 (`.claude/hooks/deny-dangerous-commands.sh`) refuses them with one plain line;
 read-only git (status, diff, log, show, grep, blame, ls-files, rev-parse, …)
 is allowed, and a write aimed at another repository (a scratch repo under
-`/tmp`) is not refused. An interactive session is a human's: this rule is
-inert there. (The guard's dangerous list — git push, a git tag write, git
-reset --hard, git clean -fd, sudo, shred — applies to every session, as the
-settings' deny list always meant; until v0.18.2 the guard read a variable the
-harness never sets, so it matched nothing.) To undo an edit of your own, edit the file back
+`/tmp`) is not refused — except `git push`, which the loop refuses from any
+repository (only the loop publishes). "Under the loop" means the loop's
+`PHASEKIT_ARTIFACTS_DIR` and `PHASEKIT_ITER_MARKER` are both set and
+non-empty; their paths need not exist, so deleting the marker never turns the
+rule off. An interactive session is a human's: this rule is inert there, and
+an ordinary `git push` (an operator pushing an `operator-<topic>` branch), a
+`git tag v1` or a commit is allowed. (v0.18.3: the guard's list for EVERY
+session is only the destructive commands — `git reset --hard`, `git clean -fd`
+/ `-fdx`, a force or ref-deleting push (`--force`, `-f`, `--force-with-lease`,
+`--delete`, `--mirror`, `--prune`, a `+ref` or `:ref` refspec), deleting or
+overwriting a tag (`git tag -d`/`-f`, `git update-ref` on `refs/tags/`),
+`sudo`, `shred`, and a recursive `rm` of the repository's root, anything above
+it, or its `.git`; the shared settings' deny list names the same push and tag
+forms. Until v0.18.2 the guard read a variable the harness never sets, so it
+matched nothing.) To undo an edit of your own, edit the file back
 (`git show HEAD:<path> > <path>` restores the committed bytes). Why (queue row
 1233): a model that committed the completion record itself made the landing
 walk read "recorded" as done over work that commit did not carry, and the
@@ -535,6 +545,18 @@ Why: a test that finds "the phase 177 commit" by subject silently compares again
 - A test that builds its OWN scratch repository and runs git inside it is hermetic; the rule is about the project's history.
 
 The rule is adopted, not enforced (Bazel enforces it by hiding `.git`; enforcement here would refuse, and a refusal is a stall). After the gate, the loop prints once per session: `ADVISORY: N test files appear to read git history (…first 5…)` — never a red gate, never a row.
+
+### Tests read the declared surface (v0.18.3)
+
+**A test reads this project's own tree and phasekit's DECLARED surface, never scaffold-owned files.** Scaffold-owned = `"ownership": "scaffold"` in `.scaffold/manifest.json`: the vendored loop and scripts (`scripts/run-until-done.sh`, `scripts/container-setup.sh`, …), the hooks, the scaffold docs (this file included). The declared surface is `contracts/interface.json` — its `facts` section, printed by `bash scripts/phasekit.sh facts --json` — plus its env, artifact, convention and exit-code entries. **A fact a test needs that the surface lacks is a request to phasekit, not a parse.**
+
+Why (queue row 1194): downstream tests that parsed the vendored loop's bash bodies, its rm lists and its quoted grep literals broke on every loop reshape that kept the behaviour — four fix rows in two weeks, each blocking a phasekit upgrade at its gate. phasekit's own suite proves every declared fact against the loop's BEHAVIOUR (`tests/test_declared_surface.py`), so a reshape that keeps the facts true cannot break a consumer that reads them, and a change to a fact is a visible, versioned contract change.
+
+- "The commit gate refuses a credential in LEARNINGS": read `facts.learnings_credential_scan` (the patterns, as one ERE, and the files it covers), never the grep line.
+- "Every commit path reaches the post-verify gates": read `facts.commit_surfaces`, never a function body.
+- A test that RUNS a scaffold script (the project's gate, `phasekit verify`) is not reading it; this rule is about parsing its text.
+
+The rule is adopted, not enforced (enforcement would refuse, and a refusal is a stall). The `scaffold-reads` advisory names offenders: after the gate the loop prints, once per session, `ADVISORY scaffold-reads: N test file(s) read scaffold-owned files (…first 5…)` and records every offender in `artifacts/boundary-state.json` `scaffold_reads` (`[{"test": <file>, "paths": [<scaffold-owned paths it reads>]}]`); `phasekit check` prints the same advisory (its exit code is unchanged) and `phasekit scaffold-reads --json` prints the record. Never a red gate.
 
 ### Stack profiles seed a real gate (v0.5.0)
 

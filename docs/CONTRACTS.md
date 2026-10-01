@@ -212,6 +212,20 @@ python3 scripts/phasekit-contracts.py provider   # what the mount offers
 
 Both accept `--json`.
 
+## phasekit's declared facts (v0.18.3)
+
+phasekit's own `contracts/interface.json` (installed in every project) carries a
+`facts` section: what the loop guarantees that downstream tests used to parse out
+of the vendored scripts — the commit surfaces and the gates each runs, the
+LEARNINGS credential scan (its patterns and staged-file selector), the
+completion-record lifecycle, the container's secret forwarding, the boundary
+steps, the manifest schema, the advisory identifiers. `phasekit facts --json`
+(`bash scripts/phasekit.sh facts --json` inside a project) prints it. phasekit's
+suite proves every fact against the loop's behaviour
+(`tests/test_declared_surface.py`), so a consumer reading the facts survives any
+reshape that keeps them true. Read the facts; never parse a scaffold-owned file
+(docs/QUALITY_GATES.md "Tests read the declared surface").
+
 ## Producer responsibilities
 
 The producer publishes its contract to `contracts/` in its own repo, and its

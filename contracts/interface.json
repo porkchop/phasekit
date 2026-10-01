@@ -512,7 +512,7 @@
       "transient_signal": true,
       "hidden": false,
       "when": "Written by the session when it needs external input, or by the loop itself when VERIFY_MAX_ATTEMPTS consecutive verify failures trip the circuit breaker, or (v0.14.0, blocker_kind branch-integrity) when branch-per-iteration cannot proceed: the squash target moved out-of-band, HEAD is detached / on an unexpected branch, or the target branch is missing; or (v0.18.2, blocker_kind landing) when a FINAL boundary's worktree still differs from HEAD, at the squash or plain step 4, in paths no loop commit can carry (the loop never judges a tree it does not land) — named in `reason`, rather than re-entering to MAX_ITERATIONS. Either way the loop stops with exit 2.",
-      "keys": ["blocked", "blocker_kind", "reason", "summary", "command", "attempts", "next_step", "target", "branch", "ts"]
+      "keys": ["blocked", "blocker_kind", "reason", "summary", "command", "attempts", "next_step", "target", "branch", "ts", "unblock_command", "unblock_note"]
     },
     {
       "name": "phase-verify-failed.json",
@@ -780,7 +780,7 @@
       "hidden": true,
       "internal": false,
       "when": "A supervisor READS it instead of inferring 'done' from file presence and mtimes: step 7 with final true = the project's completion landed and HEAD rests; step 7 with final false = a phase boundary landed; step < 7 = the previous session ended mid-sequence (killed_after names the step the deadline watchdog observed at the kill, killed_mode 'kill' or 'wrapup'). sha_at_step maps '2','3','5','7' to the work-branch commit and '4' to the target tip that proved the step; verify_memo is the last GREEN gate {tree_sha (git write-tree), tier fast|full, label, command, passed_at} the loop reuses for the same tree; deploy records whether ready-to-deploy.json was present (and its mtime) when the boundary armed — the mtime rule stays the supervisor's; previous is the boundary that ended before the current idle record began (its final step, phase, final flag and shas), so 'what last landed' survives the next pass's reset. Steps 4-5 are proven trivially without PHASEKIT_SQUASH_TARGET. v0.14.8 (schema 2): `pass` is this session's index inside the MAX_ITERATIONS loop (1, 2, …; 0 when loop-start recovery opened the record before the first pass); `iteration` is the SUPERVISING iteration's label (number or string) copied verbatim from artifacts/iteration-mode.json's `iteration` when the supervisor declared one, else null — phasekit never derives it from the branch name. A schema-1 record (v0.14.5–v0.14.7) has no `pass`, and its `iteration` IS the pass counter (every live record read 1): a consumer distinguishes the two by `schema` and, for schema 1, derives the iteration from `branch` instead. `previous` carries the archived boundary's own keys INCLUDING its `schema` — a schema-1 boundary a v0.14.7 session left is archived as it was, and stays there (a new pass replaces `previous` only when the boundary it ends advanced past step 0), so a schema-1 `previous` can sit under a schema-2 record until the next boundary lands. A consumer branches on the `schema` of the block it reads (top-level or `previous`), never on the top-level value alone. v0.14.10: `verify_red` also carries `gate_footprint` (the paths, or null) so a red-by-footprint replays as the same red; `gate_pending` {before: [base64 of each `git status --porcelain` record ('XY<TAB>path', raw bytes) taken before the gate command], command, label, at} exists only while a verify gate command is running or its footprint is not yet restored — a record found with it at loop start means the previous session died inside its gate, and the loop settles that footprint (restore + red) before any turn, then removes the key. A supervisor never acts on it. v0.18.0: `work_base` {branch, sha} is the target tip the loop created the work branch from — the iteration base when no supervisor names an iteration. v0.18.1 (writes after the completion commit): `completion_snapshot` {blob, commit, source (turn-guard | landing), at, before} is the tree at a final boundary's completion commit, taken only when the loop OBSERVED that state — the turn guard when it saw the completion committed with the tree clean, the walk right after its own completion-carrying commit: `blob` the committed record's blob, `commit` the commit that landed it, `before` the base64 'XY<TAB>path' records of the dirt present then — never judged by a file's time; it covers the window until the loop next dispatches a model turn and is removed then (a dispatched turn is never residue); `post_completion` {restored, residue, commit, at} names every path written AFTER that commit that the loop restored (tracked: to the committed bytes; untracked: removed) at step 3 and at the rest, and `residue` the directory under artifacts/logs/post-completion/ that keeps their bytes (tracked.patch, untracked/). Present only when something was restored; a supervisor may surface it, never acts on it — the tree already rests. v0.18.2: `plan_paths` is the last approval-class landing's plan check (the planned-paths convention; the same object the landed record carries). `unlanded` {paths, reason, completion_commit, at} exists when a final boundary's completion record was committed but the rest of the tree could not be landed through the loop's verify-gated commit (a red gate, a refusing commit gate): the paths stay in the tree, the walk stopped at step 3, and the next turn repairs them; carried across passes and removed once the rest lands (or the final boundary rests). While it names the commit that landed the record, the pass-start cleanup KEEPS the committed record on disk (it still claims, so the repair turn's end lands the rest). Content inside a submodule is never counted as the tree's dirt (`git status --ignore-submodules=dirty`), and neither is an in-tree custom wrap-up sentinel. Plain mode (no squash target) proves step 4 as 'HEAD's tree passed the verify gate' — the loop's green verify_memo for exactly HEAD's tree, else the gate run by the step's action on a tree that IS HEAD's; in branch-per-iteration mode the catch-up squash likewise judges only a worktree that equals HEAD's tree (a difference waits for the next verify-gated commit).",
-      "keys": ["schema", "pass", "iteration", "branch", "target", "mode", "phase", "final", "step", "step_name", "step_at", "began_at", "sha_at_step", "verify_memo", "deploy", "killed_after", "killed_mode", "killed_at", "context", "recovered_at", "discarded_at", "discarded_reason", "previous", "verify_red", "gate_pending", "work_base", "completion_snapshot", "post_completion", "plan_paths", "unlanded"]
+      "keys": ["schema", "pass", "iteration", "branch", "target", "mode", "phase", "final", "step", "step_name", "step_at", "began_at", "sha_at_step", "verify_memo", "deploy", "killed_after", "killed_mode", "killed_at", "context", "recovered_at", "discarded_at", "discarded_reason", "previous", "verify_red", "gate_pending", "work_base", "completion_snapshot", "post_completion", "plan_paths", "unlanded", "scaffold_reads", "scaffold_reads_at"]
     }
   ],
   "conventions": [
@@ -846,7 +846,7 @@
       "marker": "The loop owns every commit",
       "declared_in": ["CONTINUE_PROMPT.txt", "scripts/run-until-done.sh", ".claude/hooks/deny-dangerous-commands.sh", "docs/QUALITY_GATES.md"],
       "consumers": ["session", "supervisor"],
-      "semantics": "v0.18.2 (queue row 1233, Aaron 2026-09-30). Under the loop (PHASEKIT_ARTIFACTS_DIR + PHASEKIT_ITER_MARKER in the environment) the PreToolUse command guard refuses a model's git commands that write this repository's history, refs or index — commit, commit-tree, add, rm, mv, reset, restore, checkout with arguments, switch, stash (except list/show), merge, rebase, cherry-pick, revert, am, pull, fetch, tag, branch write forms, update-ref, update-index, read-tree, worktree (except list), and the write forms of notes, replace, reflog, submodule, remote, symbolic-ref, bisect, sparse-checkout and apply — with ONE plain line (exit 2); read-only git is allowed; a write aimed at another repository is not refused; an interactive session is unaffected. Every session prompt states the rule. The loop's own git is unaffected. The safety net for what the guard cannot see: at every completion the loop checks the whole tree (boundary-state.json `unlanded`)."
+      "semantics": "v0.18.2 (queue row 1233, Aaron 2026-09-30). Under the loop (PHASEKIT_ARTIFACTS_DIR + PHASEKIT_ITER_MARKER in the environment) the PreToolUse command guard refuses a model's git commands that write this repository's history, refs or index — commit, commit-tree, add, rm, mv, reset, restore, checkout with arguments, switch, stash (except list/show), merge, rebase, cherry-pick, revert, am, pull, fetch, tag, branch write forms, update-ref, update-index, read-tree, worktree (except list), and the write forms of notes, replace, reflog, submodule, remote, symbolic-ref, bisect, sparse-checkout and apply — with ONE plain line (exit 2); read-only git is allowed; a write aimed at another repository is not refused; an interactive session is unaffected. Every session prompt states the rule. The loop's own git is unaffected. The safety net for what the guard cannot see: at every completion the loop checks the whole tree (boundary-state.json `unlanded`). v0.18.3 (Aaron 2026-09-30, the operator lane): under the loop the guard ALSO refuses any `git push` (from any repository — only the loop publishes); \"under the loop\" means both variables are NON-EMPTY — their paths need not exist, so a model deleting the /tmp marker or moving artifacts/ never turns the rule off. In an interactive session only the destructive list applies (see the hook's exit code 2): an ordinary push, tag or commit is allowed, and the shared settings' deny list names only the destructive push and tag forms."
     },
     {
       "name": "planned-paths",
@@ -877,6 +877,13 @@
       "semantics": "v0.18.0. A test reads the current tree and declared fixtures, never git history (no git log / rev-list / show <rev>: / blame / diff <rev> from a test); a fact about the past is an evidence file. The rule is adopted, not enforced (enforcement would refuse, and refusing is a stall): after the gate the loop prints, once per session, `ADVISORY: N test files appear to read git history (…first 5…) … see docs/QUALITY_GATES.md \"Hermetic tests\"` — never a red gate, never a row."
     },
     {
+      "name": "declared-surface",
+      "marker": "Tests read the declared surface",
+      "declared_in": ["docs/QUALITY_GATES.md", "CONTINUE_PROMPT.txt", "scripts/phasekit-surface.py", "scripts/run-until-done.sh"],
+      "consumers": ["session", "supervisor"],
+      "semantics": "v0.18.3 (queue row 1194, Aaron 2026-09-30). A test reads the project's own tree and phasekit's DECLARED surface — this file, whose `facts` section `phasekit facts --json` (scripts/phasekit-surface.py) prints — never a scaffold-owned file (`ownership: scaffold` in .scaffold/manifest.json: the vendored loop and scripts, the hooks, the scaffold docs); a fact a test needs that the surface lacks is a request to phasekit, not a parse. Adopted, not enforced (a refusal is a stall): the advisory `scaffold-reads` names offenders. After the gate the loop prints, once per session, `ADVISORY scaffold-reads: N test file(s) read scaffold-owned files (…first 5…) …` and writes artifacts/boundary-state.json `scaffold_reads` (and `scaffold_reads_at`, when; null = the scan failed) = [{\"test\": <tracked test file>, \"paths\": [<scaffold-owned paths it reads>]}] sorted by test ([] = scanned, none found; carried across pass starts; absent = never scanned); `phasekit check` prints the same advisory without changing its exit code; `phasekit scaffold-reads --json` prints {\"advisory\": \"scaffold-reads\", \"scaffold_reads\": […], \"line\": <the printed line or empty>}. A read = a tracked test CODE file (the hermetic advisory's test-path selection, .py/.ts/.js/.sh and kin, fixtures/ excluded) that names a scaffold-owned path — the literal, or its pieces joined (`ROOT / \"scripts\" / \"x.sh\"`, `path.join(root, 'scripts', 'x.sh')`) — on a line that reads it (open/read_text/readFileSync/readFile/a read-, load-, parse- or extract-named helper, cat/grep/sed/awk/head/tail/source), directly or through a variable assigned that path. Reading contracts/interface.json or a vendored provider copy under vendor/contracts/ is the declared surface and never flagged; running a scaffold script is not reading it."
+    },
+    {
       "name": "session-cost-lines",
       "marker": "phasekit-cost:",
       "declared_in": ["scripts/run-until-done.sh", "docs/EXECUTION_MODES.md"],
@@ -884,6 +891,339 @@
       "semantics": "v0.18.0. Lines the loop prints to its stdout (the supervisor's session log) — the single source of the session-efficiency numbers; a supervisor never computes them a second time. (1) At arm: `deadline watchdog: armed — sentinel at T-<L>s, last-resort commit at T-<LR>s (span <S>s), take control at T-<Ty>s[ (build turn T-<Tb>s)]` — the lead in force; a supervisor arms no lead of its own. (2) `phasekit-cost: <one-line JSON>` {schema: 1, mode, bound_s, lead_s, take_control_s, lead_uncapped_s, lead_cap_s, at_cap, heavy, heavy_in_previous_4, p90_s: {g_full, g_fast, w, m, r, pass} (null = no sample; the lead then used a prior), samples: {measure: count}}. `heavy` = the full tier's measured P90 over 12.5% of the bound, or the uncapped lead over the cap (only once the full tier has a sample) — the fork-F4 fact; the supervisor's threshold is 2 of the last 5 sessions (heavy_in_previous_4 + this one). (3) `deadline watchdog: took control — …` when the watchdog ended a model turn at the take-control point (the watchdog's own log says `took control at T-<Ty>s`)."
     }
   ],
+  "facts": {
+    "_about": "v0.18.3 (queue row 1194, Aaron 2026-09-30). The facts phasekit DECLARES for downstream tests and supervisors: read these (this section, or `phasekit facts --json`, which prints it) instead of parsing phasekit's scaffold-owned files. `version` changes when a fact changes meaning; a fact is only ever added, or changed with a version bump and a release note. Every fact is proven against the loop's behaviour by tests/test_declared_surface.py (`proven_by` names the tests), so a reshape of phasekit's internals that keeps these facts true cannot break a consumer that reads them. A fact a consumer needs that is missing here is a request to phasekit (docs/QUALITY_GATES.md \"Tests read the declared surface\").",
+    "version": 1,
+    "commit_surfaces": {
+      "summary": "Every way the loop creates a commit, and the gates each one runs before it. `gates` names every gate that must pass before the commit (a set; the order is internal): `verify` (the project's gate, scripts/phasekit-verify.sh or PHASEKIT_VERIFY_CMD, with the contracts gate), `security_pair` (refuses staged .claude/settings.json or .github/workflows/), `post_verify` (the post-verify commit gates, with `context`). A NEW commit path is a contract change: it is declared here or the phasekit suite is red.",
+      "surfaces": [
+        {
+          "id": "phase",
+          "creates": "the commit of a verdict artifact — phase-approval.json, phase-update.json, project-complete.json (and the loop's own completion commit)",
+          "gates": [
+            "verify",
+            "security_pair",
+            "post_verify"
+          ],
+          "post_verify_context": "iteration"
+        },
+        {
+          "id": "wrapup",
+          "creates": "the soft-stop wrap-up commit: `chore(workflow): session wrap-up — soft stop before session end`",
+          "gates": [
+            "verify",
+            "security_pair",
+            "post_verify"
+          ],
+          "post_verify_context": "wrapup"
+        },
+        {
+          "id": "kept_out_claim",
+          "creates": "the commit landing a deploy claim the last unverified commit kept out: `chore(workflow): land the deploy claim the last unverified commit kept out`",
+          "gates": [
+            "verify",
+            "post_verify"
+          ],
+          "post_verify_context": "wrapup"
+        },
+        {
+          "id": "wip",
+          "creates": "the deadline watchdog's / wrap-up fall-through's last-resort commit (`--no-verify`): `wip: last-resort deadline commit (phasekit deadline watchdog) — …`",
+          "gates": [],
+          "notes": "UNVERIFIED on purpose (it preserves work seconds before a kill). It never carries ready-to-deploy.json or project-complete.json changes; and unless a verify gate is mid-run (then it commits the index as it stands, the gate's own staging) it also unstages phase-approval.json, docs/LEARNINGS*.md, .claude/settings.json and .github/workflows/ — so outside that window it never carries what post_verify or security_pair would have refused. The next start lands the work verify-gated."
+        },
+        {
+          "id": "heal",
+          "creates": "untracking committed transient signal artifacts: `chore(workflow): untrack transient signal artifacts (phasekit v0.6.5 heal)`",
+          "gates": [],
+          "notes": "removes index entries only; adds no content"
+        },
+        {
+          "id": "squash",
+          "creates": "branch-per-iteration: the squash of the work branch onto the target (git commit-tree)",
+          "gates": [
+            "verify"
+          ],
+          "notes": "the squash judges only a worktree equal to HEAD's tree; its verify gate is answered by the verify memo when one records a green verdict for exactly that tree, else it runs"
+        },
+        {
+          "id": "reentry_merge",
+          "creates": "branch-per-iteration: re-entering an existing work branch that lacks the target's tip, the loop merges the target in (git merge --no-edit; a conflict is aborted and blocks the project instead)",
+          "gates": [],
+          "notes": "records trees both branches already carry; nothing the session wrote"
+        },
+        {
+          "id": "merge_back",
+          "creates": "branch-per-iteration: the merge of the target back into the work branch (git commit-tree)",
+          "gates": [],
+          "notes": "records trees both branches already carry"
+        }
+      ],
+      "post_verify": {
+        "returns": {
+          "0": "commit",
+          "1": "refuse the commit",
+          "4": "light mode (context iteration) only: escalate to a standard iteration, no commit"
+        },
+        "members": [
+          "scope_warning",
+          "spec_change",
+          "learnings_credential_scan"
+        ]
+      },
+      "proven_by": [
+        "tests/test_declared_surface.py::CommitSurfaces"
+      ]
+    },
+    "scope_warning": {
+      "summary": "A post-verify gate member: the staged paths whose `.scaffold/manifest.json` entry has `\"ownership\": \"scaffold\"` are scope hits. Hits are written to artifacts/scope-warning.json {scope_warning: true, files: [<sorted hits>], ts}. In context iteration under light mode the commit is NOT made (return 4, escalation); otherwise a warning is printed and the commit proceeds. No manifest, or no hit: nothing is written.",
+      "manifest_ownership": "scaffold",
+      "record": "artifacts/scope-warning.json",
+      "record_keys": [
+        "scope_warning",
+        "files",
+        "ts"
+      ],
+      "light_iteration_escalates": true,
+      "proven_by": [
+        "tests/test_declared_surface.py::ScopeWarning"
+      ]
+    },
+    "spec_change": {
+      "summary": "A post-verify gate member: when docs/SPEC.md is staged the loop records its numstat in artifacts/spec-change.json {spec_changed: true, added_lines, removed_lines, ts} and proceeds. Never a refusal.",
+      "record": "artifacts/spec-change.json",
+      "record_keys": [
+        "spec_changed",
+        "added_lines",
+        "removed_lines",
+        "ts"
+      ],
+      "proven_by": [
+        "tests/test_declared_surface.py::SpecChange"
+      ]
+    },
+    "learnings_credential_scan": {
+      "summary": "A post-verify gate member (since v0.4.7): every STAGED file whose path matches `staged_files_ere` is grepped (grep -E) with `ere`; any match REFUSES the commit (return 1, the line named on stderr, redacted in the repair turn's capture). `ere` is `patterns` joined with `|`. The same token patterns redact every capture the loop records.",
+      "patterns": [
+        "sk-ant-[A-Za-z0-9_-]{8,}",
+        "AKIA[0-9A-Z]{16}",
+        "gh[pousr]_[A-Za-z0-9]{20,}",
+        "github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}",
+        "-----BEGIN [A-Z ]*PRIVATE KEY-----"
+      ],
+      "token_patterns": [
+        "sk-ant-[A-Za-z0-9_-]{8,}",
+        "AKIA[0-9A-Z]{16}",
+        "gh[pousr]_[A-Za-z0-9]{20,}",
+        "github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}"
+      ],
+      "private_key_pattern": "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+      "ere": "sk-ant-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|-----BEGIN [A-Z ]*PRIVATE KEY-----",
+      "staged_files_ere": "^docs/LEARNINGS[^/]*\\.md$",
+      "effect": "refuse",
+      "proven_by": [
+        "tests/test_declared_surface.py::LearningsCredentialScan"
+      ]
+    },
+    "learnings_size_advisory": {
+      "summary": "At loop start, when docs/LEARNINGS.md is at or over the threshold — whole KiB, bytes // 1024 >= PHASEKIT_LEARNINGS_WARN_KB (default 48) — the loop prints a curation note on stderr. Advisory only.",
+      "env": "PHASEKIT_LEARNINGS_WARN_KB",
+      "default_kb": 48,
+      "kb": "bytes // 1024 (integer division)",
+      "comparison": ">=",
+      "proven_by": [
+        "tests/test_declared_surface.py::LearningsSizeAdvisory"
+      ]
+    },
+    "completion_record": {
+      "summary": "artifacts/project-complete.json across a loop run: at every iteration start the loop removes it (an untracked one is unstaged first) — EXCEPT this iteration's own committed completion while its landing is still in flight, whose committed bytes are kept (restored if the disk copy differs). A deletion already on disk is left. A completion the gate refused is CARRIED (kept on disk, unstaged, claiming nothing until re-written); a carried record nobody re-claimed is removed at session exit and at the next loop start. Between supervisor iterations nothing here changes: the supervisor's intake removes the record.",
+      "removed_at_iteration_start": true,
+      "kept_while_landing": "this iteration's committed completion, while its landing is in flight",
+      "carried_record_dropped": [
+        "session exit",
+        "loop start"
+      ],
+      "proven_by": [
+        "tests/test_declared_surface.py::CompletionRecord",
+        "tests/test_loop_owns_commits.py::ReviewRound3",
+        "tests/test_loop_owns_commits.py::ReviewRound4"
+      ]
+    },
+    "recovery_only_run": {
+      "summary": "MAX_ITERATIONS=0 runs the loop-start recovery (stranded verdicts landed verify-gated) and exits without a single model turn.",
+      "env": "MAX_ITERATIONS",
+      "value": 0,
+      "model_turns": 0,
+    "exit": "3 (the iteration limit reached) unless the recovery landed the project's completion (0), per exit_codes of scripts/run-until-done.sh",
+      "proven_by": [
+        "tests/test_declared_surface.py::RecoveryOnlyRun"
+      ]
+    },
+    "boundary_steps": {
+      "summary": "boundary-state.json `step` and `step_name`, in order (index = step).",
+      "names": [
+        "idle",
+        "approved",
+        "committed",
+        "recorded",
+        "squashed",
+        "merged-back",
+        "armed",
+        "rested"
+      ],
+      "proven_by": [
+        "tests/test_declared_surface.py::BoundarySteps"
+      ]
+    },
+    "container": {
+      "summary": "What scripts/container-setup.sh gives the container. Secrets travel by NAME: `docker run -e NAME` with the value exported into docker's own environment — never on docker's command line, where every host account can read it (since v0.18.2). PHASEKIT_FORWARD_ENV names cross the same way; the reserved names are refused. PHASEKIT_ITERATION_MODE crosses only when set non-empty.",
+      "secrets_forwarded_by_name": [
+        "ANTHROPIC_API_KEY",
+        "GH_TOKEN",
+        "GITHUB_TOKEN"
+      ],
+      "value_on_command_line": false,
+      "forward_env": {
+        "env": "PHASEKIT_FORWARD_ENV",
+        "form": "-e NAME",
+        "reserved_names": [
+          "HOME",
+          "PATH",
+          "CLAUDE_CONFIG_DIR",
+          "IS_SANDBOX"
+        ]
+      },
+      "iteration_mode_only_when_set": true,
+      "claude_config": {
+        "volume_env": "CLAUDE_VOLUME",
+        "volume_default": "scaffold-claude-config",
+        "mount": "/home/node/.claude",
+        "CLAUDE_CONFIG_DIR": "/home/node/.claude"
+      },
+      "capabilities": {
+        "drop": [
+          "ALL"
+        ],
+        "add": [
+          "NET_ADMIN",
+          "NET_RAW",
+          "SETUID",
+          "SETGID"
+        ]
+      },
+      "proven_by": [
+        "tests/test_declared_surface.py::Container",
+        "tests/test_forward_env.py"
+      ]
+    },
+    "hermetic_tests": {
+      "summary": "The hermetic-tests advisory (conventions `hermetic-tests`): tracked files matching `test_path_ere` (minus node_modules/) that match `history_read_ere` (grep -E) are named.",
+      "test_path_ere": "(^|/)(tests?|spec|__tests__)/|\\.(test|spec)\\.[A-Za-z]+$|_test\\.[A-Za-z]+$|(^|/)test_[^/]*\\.py$",
+      "history_read_ere": "(rev-list|git log|['\"]log['\"]).{0,120}(--grep|HEAD([^A-Za-z0-9_]|$))|git show [^ -][^ ]*:|['\"]show['\"],[[:space:]]*[`'\"][^`'\"]*:|git blame|['\"]blame['\"]|git diff [A-Za-z0-9$~^{][^ ]*|['\"]diff['\"],[[:space:]]*[`'\"][^-`'\"]",
+      "proven_by": [
+        "tests/test_declared_surface.py::HermeticTests"
+      ]
+    },
+    "scaffold_reads": {
+      "summary": "The `scaffold-reads` advisory (conventions `declared-surface`): the advisory id, the boundary-state.json field, and the one-line prefix it prints.",
+      "advisory": "scaffold-reads",
+      "record_field": "scaffold_reads",
+    "recorded_at_field": "scaffold_reads_at",
+      "record": "artifacts/boundary-state.json",
+      "entry_keys": [
+        "test",
+        "paths"
+      ],
+      "line_prefix": "ADVISORY scaffold-reads: ",
+      "proven_by": [
+        "tests/test_scaffold_reads.py"
+      ]
+    },
+    "loop_lines": {
+      "summary": "Lines the loop prints that a supervisor may key on: each `prefix` starts the line, `stream` is where it goes: stdout, stderr, or a log file under artifacts/logs/ (the deadline watchdog runs in a background subshell whose output goes to its own log). The armed and cost lines are the `session-cost-lines` convention.",
+      "lines": {
+        "iteration_banner": {
+          "prefix": "=== Iteration ",
+          "stream": "stdout"
+        },
+        "wrapped_up": {
+          "prefix": "Run wrapped up cleanly (",
+          "stream": "stdout"
+        },
+        "deadline_pacing_skip": {
+          "prefix": "deadline pacing: not starting iteration ",
+          "stream": "stdout"
+        },
+        "wrapup_sentinel_skip": {
+          "prefix": "=== Wrap-up requested (sentinel present) — not starting iteration ",
+          "stream": "stdout"
+        },
+        "boundary_stopped": {
+          "prefix": "boundary-state: stopped at step ",
+          "stream": "stderr"
+        },
+        "last_resort_commit": {
+          "prefix": "deadline watchdog: last-resort commit ",
+          "stream": "artifacts/logs/deadline-watchdog.log"
+        },
+        "wrapup_last_resort_commit": {
+          "prefix": "wrap-up fall-through: last-resort commit ",
+          "stream": "stderr"
+        }
+      },
+      "proven_by": [
+        "tests/test_declared_surface.py::LoopLines"
+      ]
+    },
+    "verify_breaker": {
+      "summary": "The pre-commit verify breaker's phase-blocked.json `reason` when the gate failed its attempts.",
+      "reason": "pre-commit verify failed repeatedly",
+      "proven_by": [
+        "tests/test_declared_surface.py::VerifyBreaker"
+      ]
+    },
+    "scaffold_manifest": {
+      "summary": ".scaffold/manifest.json, written by the phasekit engine at every adopt/upgrade: its keys, the per-file keys, the ownership vocabulary and the normalization recipe `sha256` is taken over (`sha256_strict` is the raw bytes). The manifest never lists itself.",
+      "path": ".scaffold/manifest.json",
+      "schema_version": 1,
+      "keys": [
+        "schema_version",
+        "scaffold_version",
+        "scaffold_commit",
+        "origin_url",
+        "profile",
+        "enriched_at",
+        "normalization",
+        "files"
+      ],
+      "file_keys_always": [
+        "path",
+        "ownership",
+        "text",
+        "sha256",
+        "sha256_strict",
+        "overlays",
+        "installed_at"
+      ],
+      "file_keys_optional": [
+        "template_sha",
+        "rendered_from",
+        "local"
+      ],
+      "ownership": [
+        "scaffold",
+        "bootstrap-frozen",
+        "bootstrap-with-template-tracking",
+        "scaffold-template",
+        "scaffold-internal",
+        "scaffold-orphan"
+      ],
+      "normalization_recipe": "lf-trim-trailing-ws-single-final-newline",
+      "proven_by": [
+        "tests/test_declared_surface.py::ScaffoldManifest"
+      ]
+    }
+  },
   "exit_codes": {
     "scripts/run-until-done.sh": {
       "codes": {
@@ -920,6 +1260,14 @@
       },
       "passthrough": null
     },
+    "scripts/phasekit-surface.py": {
+      "codes": {
+        "0": "success: `facts` printed the declared facts; `scaffold-reads` always exits 0 — an advisory, never a refusal (none found prints nothing, or `\"scaffold_reads\": []` with --json)",
+        "1": "`facts` only: no contracts/interface.json with a `facts` section here or in the phasekit install (a project on phasekit before v0.18.3)",
+        "2": "CLI usage error: no verb, or an unknown verb"
+      },
+      "passthrough": null
+    },
     "scripts/container-setup.sh": {
       "codes": {
         "1": "precondition/config failure: docker missing, PHASEKIT_CONTRACTS_MOUNT unusable (not a directory, or no readable index.json), or an unknown command"
@@ -952,7 +1300,7 @@
     ".claude/hooks/deny-dangerous-commands.sh": {
       "codes": {
         "0": "nothing refused — including an empty payload; a parse the hook cannot complete falls back to a narrow regex over the command text (which may refuse), and any other internal failure allows (a hook never wedges a session)",
-        "2": "deny the tool call (PreToolUse hook contract): a dangerous command (git push, a git tag write, git reset --hard, git clean -f with -d, sudo, shred — any session), or, under the loop, a git command that writes this repository's history, refs or index (v0.18.2, the loop-owns-commits convention); ONE line on stderr"
+        "2": "deny the tool call (PreToolUse hook contract): a DESTRUCTIVE command in any session (v0.18.3: git reset --hard; git clean -f with -d; a force or ref-deleting push — --force, -f, --force-with-lease, --delete/-d, --mirror, --prune, a +ref or :ref refspec; git tag -d/-f and git update-ref on refs/tags/; sudo; shred; a recursive rm of the repository's root, a directory above it, or its .git — an ordinary git push or git tag is NOT destructive and an interactive session may run it), or, under the loop, any git push, or a git command that writes this repository's history, refs or index (v0.18.2, the loop-owns-commits convention); ONE line on stderr"
       },
       "passthrough": null
     },

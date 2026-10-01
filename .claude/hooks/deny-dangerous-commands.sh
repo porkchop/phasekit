@@ -2,11 +2,20 @@
 #
 # PreToolUse (Bash) command guard.
 #
-# Two rules, one parse:
+# Two rules, one parse (scope: v0.18.3, queue row 1194's release; Aaron,
+# 2026-09-30):
 #
-#   (1) ALWAYS (any session): the dangerous commands the scaffold never lets a
-#       model run — `git push`, `git tag` (creating or deleting a tag), `git
-#       reset --hard`, `git clean` with -f and -d, `sudo`, `shred`.
+#   (1) EVERY SESSION (the loop's and an interactive one): the truly
+#       destructive commands — `git reset --hard`; `git clean` with -f and -d
+#       (-fd, -fdx, …); a FORCE push of any ref (`--force`, `-f`,
+#       `--force-with-lease`, a `+ref` refspec) and every other push that
+#       deletes or overwrites remote refs (`--delete`/`-d`, a `:ref` refspec,
+#       `--mirror`, `--prune`); deleting or overwriting a tag (`git tag -d` /
+#       `-f`, `git update-ref` on refs/tags/); `sudo`; `shred`; a recursive
+#       `rm` of this repository's root (or anything above it) or of its
+#       `.git`. Ordinary writes — a plain `git push`, `git tag v1`, a commit —
+#       are NOT on this list: an operator session pushing an
+#       `operator-<topic>` branch is the operator lane working.
 #
 #   (2) UNDER THE LOOP ONLY (v0.18.2, queue row 1233; every session prompt
 #       states it as "The loop owns every commit"): git commands that write
@@ -17,15 +26,23 @@
 #       -D, -m, …), update-ref, update-index, read-tree, symbolic-ref
 #       (writing), worktree (except list), the write forms of notes, replace,
 #       reflog, submodule, remote, bisect and sparse-checkout, apply
-#       --index/--cached, prune, filter-branch. Read-only git (status, diff,
-#       log, show, grep, blame, ls-files, rev-parse, …) is allowed. Why:
-#       phasekit always meant the wrapper to commit, but nothing enforced it;
-#       a model that committed the completion record itself made the landing
-#       walk read "recorded" as done over work that commit did not carry. The
-#       loop's OWN git calls are unaffected — they run outside the model's
-#       tool calls. An interactive session (no loop env) is a human's: rule
-#       (2) is inert there, exactly like require-verdict.sh and
-#       wrapup-nudge.sh.
+#       --index/--cached, prune, filter-branch — and ANY `git push` (from any
+#       repository: the loop is the only thing that publishes). Read-only git
+#       (status, diff, log, show, grep, blame, ls-files, rev-parse, …) is
+#       allowed. Why: phasekit always meant the wrapper to commit, but nothing
+#       enforced it; a model that committed the completion record itself made
+#       the landing walk read "recorded" as done over work that commit did
+#       not carry. The loop's OWN git calls are unaffected — they run outside
+#       the model's tool calls. An interactive session is a human's: rule (2)
+#       is inert there, exactly like require-verdict.sh and wrapup-nudge.sh.
+#
+# "Under the loop" = the loop's two exported variables, PHASEKIT_ARTIFACTS_DIR
+# and PHASEKIT_ITER_MARKER (run-until-done.sh exports both before its first
+# model turn; nothing else sets them), are both NON-EMPTY. Unlike the Stop
+# hooks this guard does not also require the two PATHS to exist: the model's
+# own tool calls can delete a /tmp marker or move artifacts/, and that must
+# never turn the loop's rule off. The variables themselves are fixed by the
+# harness when the session starts; no tool call can change them.
 #
 # What the harness gives a PreToolUse hook: the JSON payload on STDIN
 # ({tool_input: {command}, cwd, …}) — probed in scaffold-runner, claude
@@ -61,17 +78,23 @@ _payload="$(cat 2>/dev/null)" || _payload=""
 [[ -n "$_payload" ]] || exit 0
 
 _loop=0
-if [[ -n "${PHASEKIT_ARTIFACTS_DIR:-}" && -d "${PHASEKIT_ARTIFACTS_DIR:-}" \
-      && -n "${PHASEKIT_ITER_MARKER:-}" && -f "${PHASEKIT_ITER_MARKER:-}" ]]; then
+if [[ -n "${PHASEKIT_ARTIFACTS_DIR:-}" && -n "${PHASEKIT_ITER_MARKER:-}" ]]; then
   _loop=1
 fi
 
+# The regexes that stand in when the parse cannot run (no python3) or fails
+# (python's fallback below reads these same two, so they cannot drift). GNU
+# ERE, case-sensitive (a shell's command names are).
+PK_GUARD_DESTRUCTIVE_RE='(^|[^A-Za-z0-9_./-])(git\s+((-c|-C)\s+\S+\s+)*(reset\s+--har?d?|clean\s+-\w*(f\w*d|d\w*f)|push(\s[^;&|#]*)?\s(--for|--mir|--del|--pru|-\w*[fd]\b|\+|:\S)|tag\s+(-\w*[df]|--del|--for))|sudo\s|shred\s|rm\s+(\S+\s+)*-\w*[rR]\w*\s+(\S+\s+)*(\S*/)?\.git(\s|$|/(objects|refs)))'
+PK_GUARD_LOOP_RE='(^|[^a-z0-9_./-])git(\s+(-c|-C|--git-dir|--work-tree)\s+\S+|\s+--[a-z-]+(=\S+)?)*\s+(commit|commit-tree|add|rm|mv|reset|restore|switch|stash|merge|rebase|cherry-pick|revert|am|pull|fetch|push|send-pack|subtree|update-ref|update-index|read-tree|worktree|checkout|tag|filter-branch)(\s|$|[;&|)<>])'
+export PK_GUARD_DESTRUCTIVE_RE PK_GUARD_LOOP_RE
+
 _deny() {
-  # $1 = legacy | loop, $2 = what matched
+  # $1 = destructive | loop, $2 = what matched
   if [[ "$1" == loop ]]; then
     echo "phasekit: the loop owns every commit — \`$2\` writes this repository's history, refs or index, so it is refused; write your verdict instead (artifacts/phase-update.json, phase-approval.json or project-complete.json) and the loop commits it, verify-gated." >&2
   else
-    echo "Blocked dangerous command pattern: $2" >&2
+    echo "Blocked dangerous command pattern: $2 — destructive, so refused in every session (an ordinary write such as a plain git push is not)." >&2
   fi
   exit 2
 }
@@ -83,11 +106,10 @@ _fallback() {
     cmd="$(jq -r '.tool_input.command // empty' <<<"$_payload" 2>/dev/null)" || cmd=""
     [[ -n "$cmd" ]] || cmd="$_payload"
   fi
-  lc="$(printf '%s' "$cmd" | tr '[:upper:]' '[:lower:]')"
-  for pat in "git push" "git reset --hard" "git clean -fd" "sudo " "shred "; do
-    if printf '%s' "$lc" | grep -Fq -- "$pat"; then _deny legacy "$pat"; fi
-  done
-  if [[ "$_loop" == 1 ]] && printf '%s' "$lc" | grep -Eq '(^|[^a-z0-9_./-])git([[:space:]]+(-c|-C|--git-dir|--work-tree)[[:space:]]+[^[:space:]]+|[[:space:]]+--[a-z-]+(=[^[:space:]]+)?)*[[:space:]]+(commit|commit-tree|add|rm|mv|reset|restore|switch|stash|merge|rebase|cherry-pick|revert|am|pull|fetch|update-ref|update-index|read-tree|worktree|checkout|tag|filter-branch)([[:space:]]|$)'; then
+  lc="$cmd"
+  pat="$(printf '%s' "$lc" | grep -oE -- "$PK_GUARD_DESTRUCTIVE_RE" 2>/dev/null | head -n1)" || pat=""
+  if [[ -n "$pat" ]]; then _deny destructive "${pat#"${pat%%[A-Za-z]*}"}"; fi
+  if [[ "$_loop" == 1 ]] && printf '%s' "$lc" | grep -Eq -- "$PK_GUARD_LOOP_RE"; then
     _deny loop "git (write)"
   fi
   exit 0
@@ -96,7 +118,7 @@ _fallback() {
 command -v python3 >/dev/null 2>&1 || _fallback
 
 read -r -d '' _GUARD_PY <<'GUARD_PY'
-import json, os, re, shlex, subprocess, sys
+import fnmatch, json, os, re, shlex, subprocess, sys
 
 raw = sys.stdin.read()
 LOOP = os.environ.get("PK_GUARD_LOOP") == "1"
@@ -243,6 +265,9 @@ def ansi_c(text):
         return shlex.quote(v)
     return re.sub(r"\$'((?:[^'\\]|\\.)*)'", dec, text)
 
+# `\(` `'('` `")"` are WORDS (find's grouping), never a subshell
+QUOTED_PARENS = re.compile(r'''(?<!\S)(?:\\([()])|'([()])'|"([()])")(?!\S)''')    # a word of its own only (round 6)
+
 def tokens(text):
     text = ansi_c(text)
     text = text.replace("\\\n", " ")
@@ -251,6 +276,7 @@ def tokens(text):
     # checked on their own (a literal in single quotes is a rare false
     # positive, never a silent pass)
     subs = substitutions(text)
+    text = QUOTED_PARENS.sub(lambda m: " __LP__ " if (m.group(1) or m.group(2) or m.group(3)) == "(" else " __RP__ ", text)
     lex = shlex.shlex(text.replace("\n", " ; ").replace("`", " ; "), posix=True, punctuation_chars=";&|()<>")
     lex.whitespace_split = True
     lex.commenters = ""
@@ -325,8 +351,10 @@ def segments(toks):
             cur = []; i += 1; continue
         if t in ("(", ")"):
             if t == "(" and cur and cur[-1].endswith("$"):
-                cur[-1] = cur[-1][:-1]
-                if not cur[-1]:
+                # `$(`: a bare `$` goes; a glued word (`../$(…)`, `./$(…)`) keeps
+                # its `$`, so it stays UNRESOLVABLE — never the prefix alone
+                # (review round 5: `cd ../$(…)` read as `cd ..`)
+                if cur[-1] == "$":
                     cur.pop()
             if cur:
                 yield cur, None
@@ -365,10 +393,20 @@ def unwrap(words, env):
         b = os.path.basename(w0)
         if ASSIGN.match(w0):
             k, v = w0.split("=", 1); env[k] = v; words = words[1:]; continue
+        if w0 == "function" and len(words) > 1:
+            # `function f { …; }`: the body's words follow the name (round 8)
+            words = words[2:]; continue
+        if w0 == "time" and words[1:2] in (["-p"], ["--"]):
+            words = words[2:]; continue
+        if w0 == "time" and len(words) > 1 and words[1].startswith("-"):
+            # `\time -f %e …` is GNU time (the keyword takes only -p)
+            words = words[skip_opts(words, 1, ("-f", "-o", "--format", "--output")):]; continue
+        if w0 == "--" and len(words) > 1:
+            words = words[1:]; continue     # `time -p -- cmd`
         if w0 in KEYWORDS:
             words = words[1:]; continue
         if b == "sudo":
-            raise Deny("legacy", "sudo ")
+            raise Deny("destructive", "sudo")
         if b == "env":
             j = 1
             while j < len(words):
@@ -403,7 +441,7 @@ def unwrap(words, env):
         if b in ("command", "builtin", "exec", "nohup", "setsid", "chronic", "unbuffer"):
             words = words[skip_opts(words, 1):]; continue
         if b in ("nice", "ionice", "stdbuf", "time"):
-            words = words[skip_opts(words, 1, ("-n", "-c", "-p", "-i", "-o", "-e")):]; continue
+            words = words[skip_opts(words, 1, ("-n", "-c", "-p", "-i", "-o", "-e", "-f")):]; continue
         if b == "timeout":
             words = words[skip_opts(words, 1, ("-s", "-k", "--signal", "--kill-after")) + 1:]; continue
         if b == "flock":
@@ -432,7 +470,7 @@ KNOWN_SUBS = {"status", "diff", "log", "show", "grep", "blame", "ls-files", "ls-
 # git options whose value is the next word (so it is never read as a name)
 OPT_ARG = {"-m", "--message", "-F", "--file", "-C", "-c", "--reuse-message", "--reedit-message", "--author",
            "--date", "-t", "--template", "--format", "--sort", "--contains", "--no-contains", "--merged",
-           "--no-merged", "--points-at", "--column", "-u", "--local-user", "--set-upstream-to", "--track"}
+           "--no-merged", "--points-at", "-u", "--local-user", "--set-upstream-to", "--track"}
 
 def positionals(rest):
     out, skip = [], False
@@ -461,6 +499,13 @@ def git_writes(sub, rest):
     if sub == "stash":
         return None if pos and pos[0] in ("list", "show") else "stash"
     if sub == "branch":
+        opts, skip = [], False
+        for a in rest:                      # an option's value is not an option
+            if skip:
+                skip = False; continue
+            if a.startswith("-"):
+                opts.append(a)
+                skip = a in OPT_ARG
         for o in opts:
             name = o.split("=", 1)[0]
             if name in ("--delete", "--force", "--move", "--copy", "--set-upstream-to", "--unset-upstream",
@@ -477,9 +522,10 @@ def git_writes(sub, rest):
         if any(n in ("-d", "--delete", "-a", "--annotate", "-s", "--sign", "-f", "--force", "-m", "--message",
                      "-F", "--file", "-u", "--local-user", "-e", "--edit") for n in names):
             return "tag"
+        # only these put `git tag` in list mode; --sort/--format/--column/-i
+        # with a name still CREATE the tag
         listing = any(n in ("-l", "--list", "-v", "--verify", "--contains", "--no-contains", "--points-at",
-                            "--merged", "--no-merged", "--sort", "--format", "--column", "--no-column",
-                            "--color", "--no-color", "-i", "--ignore-case") or re.fullmatch(r"-n\d*", n)
+                            "--merged", "--no-merged") or re.fullmatch(r"-n\d*", n)
                       for n in names)
         return "tag" if pos and not listing else None
     first = pos[0] if pos else ""
@@ -505,17 +551,84 @@ def git_writes(sub, rest):
         return "apply --index"
     return None
 
-def legacy_git(sub, rest):
+CONFIGS = []    # the `-c` values of the git command being judged
+
+PUSH_OPT_ARG = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}
+
+def long_is(opt, *names):
+    """git accepts any unambiguous PREFIX of a long option (`--del` is
+    `--delete`); an ambiguous one git refuses itself, so a prefix of a
+    destructive name is treated as that name."""
+    o = opt.split("=", 1)[0]
+    return len(o) > 2 and any(n.startswith(o) for n in names)
+
+MIRROR_CONFIG = re.compile(r"^remote\.[^=]+\.(mirror($|=(true|yes|on|-?[1-9][0-9]*)$)|push=[+:])", re.I)
+
+def destructive_push(rest):
+    """A push that deletes or overwrites remote refs, named; None = an ordinary push."""
+    pos, skip = [], False
+    for a in rest:
+        if skip:
+            skip = False; continue
+        if a.startswith("-") and a != "-":
+            name = a.split("=", 1)[0]
+            if name.startswith("--") and long_is(name, "--force", "--force-with-lease", "--mirror",
+                                                 "--delete", "--prune"):
+                return "git push " + name
+            if not a.startswith("--"):
+                for ch in a[1:]:
+                    if ch == "o":
+                        break           # -o<option>: the rest is its value
+                    if ch in "fd":
+                        return "git push -" + ch
+            skip = a in PUSH_OPT_ARG
+            continue
+        pos.append(a)
+    for ref in pos[1:]:                 # pos[0] is the remote
+        if ref.startswith("+") and ref != "+":     # a lone `+` is find -exec's terminator
+            return "git push +<ref> (force)"
+        if ref.startswith(":") and ref != ":":        # a lone `:` is the matching push
+            return "git push :<ref> (delete)"
+    return None
+
+def destructive_git(sub, rest):
+    """Rule (1): what `git <sub> <rest>` destroys, named; None = not destructive."""
     opts = [a for a in rest if a.startswith("-")]
-    if sub == "push":
-        return "git push"
-    if sub == "tag" and git_writes("tag", rest):
-        return "git tag"
-    if sub == "reset" and "--hard" in rest:
+    if sub in ("push", "send-pack"):
+        return destructive_push(rest)
+    if sub == "tag":
+        skip = False
+        for o in rest:
+            if skip or not o.startswith("-") or o == "-":
+                skip = False; continue
+            skip = o in OPT_ARG                 # `--sort -v:refname`: a value, not flags
+            if o.startswith("--") and long_is(o, "--delete", "--force"):
+                return "git tag " + o.split("=", 1)[0]
+            if not o.startswith("--"):
+                for ch in o[1:]:
+                    if ch in "muFn":
+                        break           # -m<msg>, -u<key>, -F<file>, -n<num>: the rest is a value
+                    if ch in "df":
+                        return "git tag -" + ch
+        return None
+    if sub == "update-ref" and any(r.startswith("refs/tags/") for r in positionals(rest)):
+        return "git update-ref refs/tags/…"
+    if sub == "reset" and any(o.startswith("--") and long_is(o, "--hard") for o in opts):
         return "git reset --hard"
     if sub == "clean":
-        flags = "".join(o[1:] for o in opts if not o.startswith("--"))
-        if ("f" in flags or "--force" in opts) and "d" in flags:
+        flags = ""
+        for o in opts:
+            if o.startswith("--"):
+                continue
+            for ch in o[1:]:
+                if ch == "e":
+                    break           # -e<pattern>: the rest is its value
+                flags += ch
+        force = "f" in flags or any(o.startswith("--") and long_is(o, "--force") for o in opts) \
+            or any(re.match(r"(?i)clean\.requireforce=(false|no|off|0)$", c) for c in CONFIGS)
+        dry = "n" in flags or any(o.startswith("--") and long_is(o, "--dry-run") for o in opts)
+        dirs = "d" in flags
+        if force and dirs and not dry:
             return "git clean -fd"
     return None
 
@@ -577,9 +690,12 @@ def check_git(words, st, env, depth):
                 exp = alias.split()
             check_git(["git"] + args[:i] + exp + rest, st, env, depth + 1)
             return
-    leg = legacy_git(sub, rest)
-    if leg:
-        raise Deny("legacy", leg)
+    CONFIGS[:] = configs
+    bad = destructive_git(sub, rest)
+    if not bad and sub == "push" and any(MIRROR_CONFIG.match(c) for c in configs):
+        bad = "git -c remote.<name>.mirror/push=+… push"
+    if bad:
+        raise Deny("destructive", bad)
     if sub == "init":
         tgt = next((r for r in rest if not r.startswith("-")), ".")
         st.new_repos.add(expand(tgt, cdir))
@@ -591,7 +707,11 @@ def check_git(words, st, env, depth):
             st.aliases[vals[0][len("alias."):]] = " ".join(vals[1:])
     if not LOOP:
         return
+    if sub in ("push", "send-pack") or (sub == "subtree" and "push" in rest):
+        raise Deny("loop", "git " + sub)    # from any repository: only the loop publishes
     what = git_writes(sub, rest)
+    if not what and sub == "subtree" and set(rest) & {"add", "merge", "pull", "split"}:
+        what = "subtree"
     if not what:
         return
     what = "git " + what
@@ -627,6 +747,122 @@ def check_git(words, st, env, depth):
         return              # another repository, or none: not this one
     raise Deny("loop", what)
 
+_PROTECTED = []
+def protected():
+    """(this repository's top level, its git dirs) — what a recursive rm must never reach."""
+    if not _PROJECT:
+        project()
+    if not _PROTECTED:
+        top, gits = None, set()
+        art = os.environ.get("PHASEKIT_ARTIFACTS_DIR")
+        for d in ([os.path.dirname(art.rstrip("/"))] if art else []) + [os.environ.get("CLAUDE_PROJECT_DIR"), start]:
+            if d and os.path.isdir(d):
+                top = git_out(["rev-parse", "--show-toplevel"], d)
+                if top:
+                    g = git_out(["rev-parse", "--absolute-git-dir"], d)
+                    gits = {os.path.realpath(x) for x in (g, _PROJECT[0], os.path.join(top, ".git")) if x}
+                    top = os.path.realpath(top)
+                    break
+        _PROTECTED.append((top, gits))
+    return _PROTECTED[0]
+
+def _under(path, root):
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+UNSET_VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::?-)?\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+# set by bash itself, never exported to the hook (review round 10)
+SHELL_SET = {"RANDOM", "HOSTNAME", "UID", "EUID", "PPID", "BASHPID", "SECONDS", "EPOCHSECONDS",
+             "EPOCHREALTIME", "OSTYPE", "MACHTYPE", "HOSTTYPE", "BASH", "BASH_VERSION", "LINENO",
+             "SRANDOM", "GROUPS", "HISTFILE", "IFS", "PS1", "PS2", "PS4", "SHELLOPTS", "BASHOPTS",
+             "OPTIND", "OPTARG", "REPLY", "PIPESTATUS", "FUNCNAME", "DIRSTACK", "COLUMNS", "LINES"}
+MAY_BIND = re.compile(r"(^|[\s;&|(])(source|\.|eval|select|getopts|read|mapfile|readarray)(?=[\s;&|)]|$)|printf\s+-v")
+
+def empty_unset(word, st):
+    """A variable the shell cannot have (not in the environment, never bound
+    in this command) is EMPTY there: `rm -rf "$OUT"/*` with OUT unset is
+    `rm -rf /*` (review round 8). Applied only when that makes the target an
+    ABSOLUTE path — the case that destroys; anything else stays unresolved
+    (review round 9: `rm -rf "$tmp"` with tmp unset removes nothing). $PWD /
+    $OLDPWD are the tracked cwd."""
+    text = CMD_TEXT[0]
+    def bound(name):
+        if name in os.environ:
+            return True
+        # quote removal glues `"$d"_old` into `$d_old`: any bound PREFIX counts
+        for k in range(1, len(name) + 1):
+            n = name[:k]
+            if n in os.environ or re.search(r"(^|[\s;&|(])" + re.escape(n) + r"=", text) \
+                    or re.search(r"\b(for|local|declare|export|readonly|typeset)\b[^;&|]*\b" + re.escape(n) + r"\b", text):
+                return True
+        return False
+    def sub(m):
+        name = m.group(1) or m.group(2)
+        if name in ("PWD", "OLDPWD"):
+            v = st.cwd if name == "PWD" else st.oldpwd
+            return v if v else "$__unknown"     # the tracked dir, never the hook's own (round 10)
+        if name in SHELL_SET or MAY_BIND.search(text) or bound(name):
+            return m.group(0)
+        return ""
+    out = UNSET_VAR.sub(sub, word)
+    if out != word and "$" not in out and not out.startswith("/"):
+        return word         # emptied to a relative path (or nothing): not judged
+    return out
+
+CMD_TEXT = [""]
+
+def rm_destroys_repo(words, st):
+    """A recursive rm whose target is this repository's root, a directory
+    above it, or its .git (or .git/objects|refs), named; None otherwise. A
+    variable the command cannot have set is judged EMPTY when that makes the
+    target absolute (`"$OUT"/*` → `/*`, empty_unset); any other target the
+    parse cannot resolve (`$(…)`, a variable that may be set) is not judged."""
+    flags, targets, ended = set(), [], False
+    for a in words[1:]:
+        if not ended and a == "--":
+            ended = True; continue
+        if not ended and a.startswith("--"):
+            flags |= {"r"} if len(a) > 2 and "--recursive".startswith(a) else set()
+            continue
+        if not ended and a.startswith("-") and a != "-":
+            flags |= set(a[1:].lower()); continue
+        targets.append(a)
+    if "r" not in flags:
+        return None
+    top, gits = protected()
+    if not top:
+        return None
+    for t in targets:
+        raw = t
+        t = empty_unset(t, st)
+        t = t.rstrip("/") or t              # `../*/` is `../*` (the slash only selects directories)
+        glob = any(c in t for c in "*?[")
+        base = os.path.basename(t.rstrip("/")) if glob else None
+        path = expand(os.path.dirname(t) or "." if glob else t, st.cwd)
+        if path is None:
+            continue
+        if glob:
+            path = os.path.realpath(path)
+            # `rm -rf *` / `.*` / `.g*` in the top level reaches the tree or
+            # .git; a glob in a directory ABOVE it (`../*`, `/*`) reaches it all
+            if path == top and (base in ("*", "./*") or (base.startswith(".") and fnmatch.fnmatchcase(".git", base))):
+                return "rm -r " + t + " (this repository)"
+            if path != top and _under(top, path):
+                comp = os.path.relpath(top, path).split(os.sep)[0]
+                if fnmatch.fnmatchcase(comp, base) and (base.startswith(".") or not comp.startswith(".")):
+                    return "rm -r " + t + " (a directory above this repository)"
+            continue
+        if os.path.islink(path) and not raw.endswith("/"):
+            continue            # rm removes the link, never what it points at (`link/` follows it)
+        path = os.path.realpath(path)
+        if _under(top, path):
+            return "rm -r " + t + " (this repository's root)"
+        for g in gits:
+            # .git itself, or its object store / refs; a lock file or a
+            # stale rebase-merge/ inside it is ordinary recovery
+            if path == g or _under(path, os.path.join(g, "objects")) or _under(path, os.path.join(g, "refs")):
+                return "rm -r " + t + " (this repository's .git)"
+    return None
+
 def check_words(words, st, depth):
     env = {}
     herestrings = [w[len(HERESTR):] for w in words if w.startswith(HERESTR)]
@@ -640,7 +876,11 @@ def check_words(words, st, depth):
     w0 = words[0]
     b = os.path.basename(w0)
     if b == "shred":
-        raise Deny("legacy", "shred ")
+        raise Deny("destructive", "shred")
+    if b == "rm":
+        hit = rm_destroys_repo(words, st)
+        if hit:
+            raise Deny("destructive", hit)
     if b in ("cd", "pushd", "popd"):
         prev = st.cwd
         tgt = next((w for w in words[1:] if not w.startswith("-") and not w.startswith("+")), None)
@@ -658,6 +898,20 @@ def check_words(words, st, depth):
         return
     if b == "git":
         check_git(words, st, env, depth)
+        return
+    k = 1
+    while k < len(words) and words[k].startswith("-"):
+        k += 2 if words[k] in GIT_OPT_WITH_ARG else 1
+    if LOOP and ("$" in w0 or "`" in w0) and k < len(words) and (words[k] in KNOWN_SUBS or words[k] in ALWAYS_WRITES):
+        # `$G push`, `${GIT:-git} commit`, `"$(which git)" push`: a command
+        # word the parse cannot resolve, followed by a git subcommand, is
+        # judged as git under the loop (a false refusal of `$UV add` beats a
+        # silent push; interactive sessions are never judged this way)
+        check_git(["git"] + words[1:], st, env, depth)
+        return
+    if b.startswith("git-") and len(b) > 4:
+        # git's own programs (/usr/lib/git-core/git-push) are `git <sub>`
+        check_git(["git", b[4:]] + words[1:], st, env, depth)
         return
     if b in SHELLS:
         j = 1
@@ -679,6 +933,53 @@ def check_words(words, st, depth):
         check_text(" ".join(words[1:]), st, depth + 1)
         return
     if b == "find":
+        # `find <dir> -delete` with no filtering predicate (only depth/mount
+        # options) removes everything under <dir>; `find . -name x -delete`
+        # is ordinary cleanup
+        j = 1
+        while j < len(words) and (words[j] in ("-L", "-P", "-H") or re.fullmatch(r"-O\d*", words[j])
+                                  or words[j] == "-D"):
+            j += 2 if words[j] == "-D" else 1
+        targets = []
+        while j < len(words) and not words[j].startswith("-") and words[j] not in ("(", "!", "__LP__"):
+            targets.append(words[j]); j += 1
+        # a filter counts only BEFORE -delete (find evaluates in order); an
+        # -o at the top level may take an unfiltered branch; a group filters
+        # when each of its -o alternatives does
+        NOFILTER = ("-depth", "-xdev", "-mount", "-ignore_readdir_race", "-print", "-print0", "-true",
+                    "-ls", "-a", "-and")
+        def filters(seq):
+            alts, cur, depth, k = [], [], 0, 0
+            while k < len(seq):
+                w = seq[k]
+                if w in ("(", "__LP__"):
+                    depth += 1; cur.append(w)
+                elif w in (")", "__RP__"):
+                    depth -= 1; cur.append(w)
+                elif w in ("-o", "-or", ",") and depth == 0:
+                    alts.append(cur); cur = []
+                elif w in ("-mindepth", "-maxdepth") and depth == 0:
+                    k += 1
+                else:
+                    cur.append(w)
+                k += 1
+            alts.append(cur)
+            def alt_filters(a):
+                if not a:
+                    return False
+                if a[0] in ("(", "__LP__") and a[-1] in (")", "__RP__"):
+                    return filters(a[1:-1])
+                return any(w not in NOFILTER and w not in ("(", ")", "__LP__", "__RP__") for w in a)
+            return all(alt_filters(a) for a in alts)
+        k = j
+        while k < len(words) and words[k] != "-delete":
+            k += 1
+        preds = ["filtered"] if filters(words[j:k]) else []
+        if "-delete" in words and not preds:
+            for w in targets or ["."]:
+                hit = rm_destroys_repo(["rm", "-r", w], st)
+                if hit:
+                    raise Deny("destructive", "find " + w + " -delete" + hit[hit.index(" (", 5):])
         for j, w in enumerate(words):
             if w in ("-exec", "-execdir", "-ok", "-okdir"):
                 check_words(words[j + 1:], st.child(), depth + 1)
@@ -757,11 +1058,11 @@ def check_text(text, st, depth=0):
     for body in bodies:
         check_text(body, st.child(), depth + 1)
 
-FALLBACK_RE = re.compile(r"(^|[^a-z0-9_./-])git(\s+(-c|-C|--git-dir|--work-tree)\s+\S+|\s+--[a-z-]+(=\S+)?)*\s+"
-                         r"(commit|commit-tree|add|rm|mv|reset|restore|switch|stash|merge|rebase|cherry-pick|revert|am|"
-                         r"pull|fetch|update-ref|update-index|read-tree|worktree|checkout|tag|filter-branch)(\s|$)", re.I)
-LEGACY_RE = re.compile(r"(^|[^a-z0-9_./-])(git\s+push|git\s+reset\s+--hard|git\s+clean\s+-fd|sudo\s|shred\s)", re.I)
+# the same two regexes the shell fallback uses (exported above): one source
+FALLBACK_RE = re.compile(os.environ.get("PK_GUARD_LOOP_RE", "$^"))
+DESTRUCTIVE_RE = re.compile(os.environ.get("PK_GUARD_DESTRUCTIVE_RE", "$^"))
 
+CMD_TEXT[0] = cmd
 try:
     check_text(cmd, State(os.path.realpath(start) if os.path.isdir(start) else start))
     print("OK")
@@ -775,9 +1076,9 @@ except Exception:
         text = "\n".join([text] + bodies)
     except Exception:
         text = cmd
-    m = LEGACY_RE.search(text)
+    m = DESTRUCTIVE_RE.search(text)
     if m:
-        print("DENY\tlegacy\t%s" % re.sub(r"\s+", " ", m.group(2)).strip())
+        print("DENY\tdestructive\t%s" % re.sub(r"\s+", " ", m.group(2)).strip())
     elif LOOP and FALLBACK_RE.search(text):
         print("DENY\tloop\tgit (write)")
     else:

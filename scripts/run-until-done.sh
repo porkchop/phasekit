@@ -1126,7 +1126,7 @@ run_verify_gate() {
       cost_sample "g_$memo_tier" "$verify_elapsed"
     fi
   fi
-  if [[ "${VERIFY_INVOKER:-loop}" != model ]]; then hermetic_tests_advisory; fi
+  if [[ "${VERIFY_INVOKER:-loop}" != model ]]; then hermetic_tests_advisory; scaffold_reads_advisory; fi
 
   # Verify-budget advisory. v0.18.0: under a session bound it is MEASURED —
   # the full tier's P90 against 12.5% of the bound (the F4 threshold), once
@@ -2440,7 +2440,7 @@ boundary_begin() {
       step: 0, step_name: "idle", step_at: $now, began_at: $now,
       sha_at_step: {}, deploy: null, killed_after: null, killed_mode: null, killed_at: null,
       verify_memo: (.verify_memo // null), verify_red: (.verify_red // null),
-      work_base: (.work_base // null),
+      work_base: (.work_base // null), scaffold_reads: (.scaffold_reads // null), scaffold_reads_at: (.scaffold_reads_at // null),
       previous: (if (.step // 0) > 0 then (del(.verify_memo) | del(.previous)) else (.previous // null) end)
     } + (if (.unlanded // null) != null and $ucc != "" and ((.unlanded.completion_commit // "") == $ucc)
             and (if $iteration != null and (.iteration // null) != null then .iteration == $iteration
@@ -4167,7 +4167,8 @@ hermetic_tests_advisory() {
   # A history read, in a test's own words: rev-list / log with --grep or a
   # HEAD ref; `show <rev>:<path>` (a shell form, or a quoted argument
   # holding "rev:path"); blame; `diff <rev>`. HEAD must stand alone
-  # (HEAD_COUNT is a name, not a ref — review round 1).
+  # (HEAD_COUNT is a name, not a ref — review round 1). Declared as
+  # contracts/interface.json facts.hermetic_tests (v0.18.3).
   re=$'(rev-list|git log|[\'"]log[\'"]).{0,120}(--grep|HEAD([^A-Za-z0-9_]|$))|git show [^ -][^ ]*:|[\'"]show[\'"],[[:space:]]*[`\'"][^`\'"]*:|git blame|[\'"]blame[\'"]|git diff [A-Za-z0-9$~^{][^ ]*|[\'"]diff[\'"],[[:space:]]*[`\'"][^-`\'"]'
   hits="$(cd "$ROOT_DIR" && git ls-files 2>/dev/null \
           | grep -E '(^|/)(tests?|spec|__tests__)/|\.(test|spec)\.[A-Za-z]+$|_test\.[A-Za-z]+$|(^|/)test_[^/]*\.py$' \
@@ -4177,6 +4178,32 @@ hermetic_tests_advisory() {
   n="$(printf '%s\n' "$hits" | wc -l | tr -d ' ')"
   first="$(printf '%s\n' "$hits" | head -n 5 | paste -sd, - | sed 's/,/, /g')"
   echo "ADVISORY: $n test files appear to read git history ($first$( [[ "$n" -gt 5 ]] && echo ", …")) — a test reads the tree and declared fixtures, never the project's history; a fact about the past is an evidence file (artifacts/iterations/<N>/<phase>.json). See docs/QUALITY_GATES.md \"Hermetic tests\" (a test over a scratch repository it builds itself is fine). Advisory only: the gate is unchanged."
+  return 0
+}
+
+scaffold_reads_advisory() {
+  # v0.18.3 (queue row 1194; docs/QUALITY_GATES.md "Tests read the declared
+  # surface"): a test reads the project's tree and phasekit's DECLARED
+  # surface, never scaffold-owned files. Adopted, not enforced — like the
+  # hermetic advisory above: once per session, after the gate, the loop names
+  # the test files that read a scaffold-owned file and RECORDS them
+  # (boundary-state.json `scaffold_reads`, [] when none) so a supervisor can
+  # act on and count them. Never a red gate, never a refusal; any failure of
+  # the scan is silent (nothing recorded).
+  [[ "${SCAFFOLD_READS_ADVISED:-0}" == 1 ]] && return 0
+  SCAFFOLD_READS_ADVISED=1
+  local tool="$ROOT_DIR/scripts/phasekit-surface.py" j line
+  [[ -f "$tool" ]] || return 0
+  # scaffold_reads_at says when; a scan that failed records null (never a
+  # stale list mistaken for a current one)
+  j="$(cd "$ROOT_DIR" && timeout 60 python3 "$tool" scaffold-reads --json . 2>/dev/null)" || j=""
+  if ! jq -e '(.scaffold_reads | type) == "array"' <<<"$j" >/dev/null 2>&1; then
+    _boundary_write '.scaffold_reads = null | .scaffold_reads_at = $now'
+    return 0
+  fi
+  _boundary_write '.scaffold_reads = $r | .scaffold_reads_at = $now' --argjson r "$(jq -c '.scaffold_reads' <<<"$j")"
+  line="$(jq -r '.line // ""' <<<"$j" 2>/dev/null)" || line=""
+  if [[ -n "$line" ]]; then echo "$line"; fi
   return 0
 }
 
@@ -5615,7 +5642,7 @@ OVERRIDE the standard operating rules below wherever they conflict:
   contract, or dependency changes; multi-surface edits; unclear acceptance),
   write artifacts/phase-blocked.json and stop. Escalation to a standard
   full-ceremony run is automatic — do not grind.
-- The loop owns every commit: never run git commands that write history, refs or the index (commit, add, rm, mv, reset, restore, checkout, switch, stash, merge, rebase, cherry-pick, revert, tag, branch -f/-D, update-ref, worktree) — the command guard refuses them. Write your verdict artifact; the loop commits it, verify-gated. To undo an edit of your own, edit the file back (`git show HEAD:<path> > <path>` restores the committed bytes).
+- The loop owns every commit: never run git commands that write history, refs or the index (commit, add, rm, mv, reset, restore, checkout, switch, stash, merge, rebase, cherry-pick, revert, tag, branch -f/-D, update-ref, worktree, push) — the command guard refuses them. Write your verdict artifact; the loop commits it, verify-gated. To undo an edit of your own, edit the file back (`git show HEAD:<path> > <path>` restores the committed bytes).
 - Scratch files go in artifacts/scratch/ (ignored, never committed, cleared when an iteration starts) or /tmp — never elsewhere in the tree: the loop commits everything else it finds.
 === END LIGHT MODE OVERRIDES ===
 
@@ -5761,7 +5788,7 @@ Do, in order:
    green verdict is REUSED by that commit instead of run again — so change
    nothing after it. If it is red, fix and run it again.
 
-The loop owns every commit: never run git commands that write history, refs or the index (commit, add, rm, mv, reset, restore, checkout, switch, stash, merge, rebase, cherry-pick, revert, tag, branch -f/-D, update-ref, worktree) — the command guard refuses them. Write your verdict artifact; the loop commits it, verify-gated. To undo an edit of your own, edit the file back (`git show HEAD:<path> > <path>` restores the committed bytes).
+The loop owns every commit: never run git commands that write history, refs or the index (commit, add, rm, mv, reset, restore, checkout, switch, stash, merge, rebase, cherry-pick, revert, tag, branch -f/-D, update-ref, worktree, push) — the command guard refuses them. Write your verdict artifact; the loop commits it, verify-gated. To undo an edit of your own, edit the file back (`git show HEAD:<path> > <path>` restores the committed bytes).
 Scratch files go in artifacts/scratch/ (ignored, never committed, cleared when an iteration starts) or /tmp — never elsewhere in the tree: the loop commits everything else it finds.
 REVIEW_EOF
   echo "Light mode: final review pass on the default model before the final commit."
@@ -6478,7 +6505,7 @@ Decide what the work in the tree is, and write exactly one artifact:
 
 Inspect the tree first (git status, git diff), then write the artifact. Do not
 start new work.
-The loop owns every commit: never run git commands that write history, refs or the index (commit, add, rm, mv, reset, restore, checkout, switch, stash, merge, rebase, cherry-pick, revert, tag, branch -f/-D, update-ref, worktree) — the command guard refuses them. Write your verdict artifact; the loop commits it, verify-gated. To undo an edit of your own, edit the file back (`git show HEAD:<path> > <path>` restores the committed bytes).
+The loop owns every commit: never run git commands that write history, refs or the index (commit, add, rm, mv, reset, restore, checkout, switch, stash, merge, rebase, cherry-pick, revert, tag, branch -f/-D, update-ref, worktree, push) — the command guard refuses them. Write your verdict artifact; the loop commits it, verify-gated. To undo an edit of your own, edit the file back (`git show HEAD:<path> > <path>` restores the committed bytes).
 VERDICT_RETRY_EOF
     vrc=0
     turn_started_at="$(date +%s)"

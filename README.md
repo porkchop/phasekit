@@ -267,9 +267,7 @@ Agent definitions live in `.claude/agents/`. The `autonomous-product-builder` sk
 
 ### Safety hooks
 
-The `deny-dangerous-commands` hook (`.claude/hooks/deny-dangerous-commands.sh`) runs as a `PreToolUse` hook on all `Bash` calls in interactive mode. It blocks dangerous operations like `rm -rf /`, `chmod 777`, etc.
-
-In containerized mode with `bypassPermissions`, hooks are bypassed — the container's network firewall and isolation are the safety boundary instead.
+The `deny-dangerous-commands` hook (`.claude/hooks/deny-dangerous-commands.sh`) runs as a `PreToolUse` hook on every `Bash` call, interactive or containerized (hooks still run under `bypassPermissions`). In every session it refuses the destructive commands — `git reset --hard`, `git clean -fd`, force or ref-deleting pushes, tag deletion/overwrite, `sudo`, `shred`, a recursive `rm` of the repository root or its `.git`. Under the loop it also refuses every git write to the repository and any `git push` (the loop owns every commit); an interactive session may push and commit normally. See docs/QUALITY_GATES.md "The loop owns every commit".
 
 **Rule: never make project settings permissive to support autonomous mode.** Use local settings or CLI flags instead.
 
