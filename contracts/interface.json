@@ -1009,7 +1009,7 @@
         "AKIA[0-9A-Z]{16}",
         "gh[pousr]_[A-Za-z0-9]{20,}",
         "github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}",
-        "-----BEGIN [A-Z ]*PRIVATE KEY-----"
+        "\u002d\u002d\u002d\u002d\u002dBEGIN [A\u002dZ ]*PRIVATE KEY\u002d\u002d\u002d\u002d\u002d"
       ],
       "token_patterns": [
         "sk-ant-[A-Za-z0-9_-]{8,}",
@@ -1017,8 +1017,8 @@
         "gh[pousr]_[A-Za-z0-9]{20,}",
         "github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}"
       ],
-      "private_key_pattern": "-----BEGIN [A-Z ]*PRIVATE KEY-----",
-      "ere": "sk-ant-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|-----BEGIN [A-Z ]*PRIVATE KEY-----",
+      "private_key_pattern": "\u002d\u002d\u002d\u002d\u002dBEGIN [A\u002dZ ]*PRIVATE KEY\u002d\u002d\u002d\u002d\u002d",
+      "ere": "sk-ant-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|\u002d\u002d\u002d\u002d\u002dBEGIN [A\u002dZ ]*PRIVATE KEY\u002d\u002d\u002d\u002d\u002d",
       "staged_files_ere": "^docs/LEARNINGS[^/]*\\.md$",
       "effect": "refuse",
       "proven_by": [

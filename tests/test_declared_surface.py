@@ -468,5 +468,30 @@ class TheSurfaceIsPrintable(unittest.TestCase):
                         self.assertIn(f"\nclass {cls}(", (REPO_ROOT / path).read_text(), ref)
 
 
+class TheContractCarriesNoKeyMaterialText(unittest.TestCase):
+    """v0.18.4: the declared surface ships in every project and is pushed through
+    Foundry's mirror, whose secret scan HOLDS a range that adds a private-key
+    header (its pattern list is foundry-orchestrator's orchestrator/secret_lint.py;
+    the v0.18.3 upgrade commits would have held seven mirrors). The facts keep
+    the exact pattern — JSON decodes `\\u002d` to `-` — but the FILE's bytes never
+    spell the header out."""
+
+    def test_no_private_key_header_in_the_raw_bytes(self):
+        raw = MANIFEST.read_text()
+        self.assertNotIn("-----BEGIN", raw)
+        self.assertNotIn("-----END", raw)
+        # the shapes a mirror's secret scan keys on (review: the line pattern
+        # is just the header word followed by dashes, BEGIN or END)
+        self.assertIsNone(re.search(r"PRIVATE KEY-", raw))
+        self.assertIsNone(re.search(r"sk-ant-[A-Za-z0-9_-]{8,}", raw))
+        self.assertIsNone(re.search(r"AKIA[0-9A-Z]{16}", raw))
+        self.assertIsNone(re.search(r"gh[pousr]_[A-Za-z0-9]{20,}", raw))
+
+    def test_the_decoded_pattern_is_still_the_loops(self):
+        F = FACTS["learnings_credential_scan"]
+        self.assertTrue(F["private_key_pattern"].startswith("-----BEGIN "))
+        self.assertTrue(F["ere"].endswith(F["private_key_pattern"]))
+
+
 if __name__ == "__main__":
     unittest.main()
