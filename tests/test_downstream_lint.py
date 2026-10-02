@@ -19,6 +19,7 @@ strictest fleet consumer's own config.
 """
 
 from __future__ import annotations
+import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
 
 import ast
 import importlib.util

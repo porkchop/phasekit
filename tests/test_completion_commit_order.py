@@ -16,6 +16,7 @@ Run from the repo root: `python3 -m unittest tests.test_completion_commit_order`
 import os
 import subprocess
 import unittest
+import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "run-until-done.sh")

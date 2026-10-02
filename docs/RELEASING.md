@@ -79,6 +79,24 @@ consumers', so an "upgrade the syntax" autofix aimed at a newer target (e.g.
 `datetime.UTC`, 3.11+) must be answered with a floor-compatible rewrite, not
 taken.
 
+## Pre-tag: the suite leaves its TMPDIR empty (v0.18.5)
+
+A full suite run used to leave ~1,226 empty `tmp.*` files in `$TMPDIR`
+(the loop's bare `mktemp` sites, the tests' own temporaries); release
+sessions run it repeatedly on one host, and on 2026-10-01 that was 122k
+files in /tmp. Each test now runs under its own TMPDIR inside one directory
+the harness removes (`tests/_suite_tmp.py`, imported by every test module),
+and the loop keeps its temporaries in one directory its EXIT trap removes.
+Run the full suite once under a fresh TMPDIR and check it is empty:
+
+```bash
+t=$(mktemp -d) && TMPDIR=$t python3 -m unittest discover -s tests -p 'test_*.py' > /tmp/suite.log 2>&1; \
+  echo "suite rc=$?"; find "$t" -mindepth 1 | head; rmdir "$t" && echo TMPDIR-EMPTY
+```
+
+A new test module needs the one line `import _suite_tmp  # noqa: F401`;
+`tests/test_suite_tmpdir.py` refuses a module without it.
+
 ## Pre-tag: the release note names every loop surface it moved (v0.16.0)
 
 A downstream project may pin a loop internal in its own tests — xmeo-v3 pinned

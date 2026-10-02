@@ -60,6 +60,7 @@ import traceback
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOOP_SCRIPT = REPO_ROOT / "scripts" / "run-until-done.sh"

@@ -556,7 +556,7 @@ Why (queue row 1194): downstream tests that parsed the vendored loop's bash bodi
 - "Every commit path reaches the post-verify gates": read `facts.commit_surfaces`, never a function body.
 - A test that RUNS a scaffold script (the project's gate, `phasekit verify`) is not reading it; this rule is about parsing its text.
 
-The rule is adopted, not enforced (enforcement would refuse, and a refusal is a stall). The `scaffold-reads` advisory names offenders: after the gate the loop prints, once per session, `ADVISORY scaffold-reads: N test file(s) read scaffold-owned files (…first 5…)` and records every offender in `artifacts/boundary-state.json` `scaffold_reads` (`[{"test": <file>, "paths": [<scaffold-owned paths it reads>]}]`); `phasekit check` prints the same advisory (its exit code is unchanged) and `phasekit scaffold-reads --json` prints the record. Never a red gate.
+The rule is adopted, not enforced (enforcement would refuse, and a refusal is a stall). The `scaffold-reads` advisory names offenders: after the gate the loop prints, once per session, `ADVISORY scaffold-reads: N test file(s) read scaffold-owned files (…first 5…)` and records every offender in `artifacts/boundary-state.json` `scaffold_reads` (`[{"test": <file>, "paths": [<scaffold-owned paths it reads>]}]`); `phasekit check` prints the same advisory (its exit code is unchanged) and `phasekit scaffold-reads --json` prints the record. Never a red gate. A read is decided on the test's code (v0.18.5): a scaffold path inside a string (a planted code sample), a comment, a list of forbidden paths or an expected value is data, so a guard test that refuses scaffold reads is not itself named.
 
 ### Stack profiles seed a real gate (v0.5.0)
 

@@ -11,6 +11,7 @@ Same harness as test_contracts_mount_v070: the real script against a stub
 `docker` that records argv.
 """
 from __future__ import annotations
+import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
 
 import os
 import stat

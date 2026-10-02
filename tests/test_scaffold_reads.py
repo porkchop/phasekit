@@ -21,8 +21,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOL = REPO_ROOT / "scripts" / "phasekit-surface.py"
@@ -189,6 +191,155 @@ class Facts(_Scratch):
         del old["facts"]
         root = self.make({"contracts/interface.json": json.dumps(old)})
         self.assertEqual(self._facts(root).returncode, 1)
+
+
+# v0.18.5 (Aaron 2026-10-02, rider 1): a path that is only DATA is not a read.
+# xmeo-v3's guard test tests/tooling/scaffold-read-surface.test.ts FORBIDS
+# scaffold reads; it plants scaffold paths as code samples inside strings, in
+# a forbidden-path list and in expected values, and v0.18.4 flagged it for
+# five paths — each false positive files a "switch 1 test file" fix row.
+XMEO_GUARD = REPO_ROOT / "tests" / "fixtures" / "scaffold-reads" / "xmeo-scaffold-read-surface.test.ts"
+XMEO_SCAFFOLD = SCAFFOLD + [".devcontainer/Dockerfile", ".devcontainer/init-firewall.sh",
+                            "docs/EXECUTION_MODES.md", ".claude/hooks/require-verdict.sh"]
+
+DATA_ONLY = {
+    # the shapes of the xmeo guard, one per file
+    "tests/tooling/planted.test.ts":
+        "const planted = [...lines, \"    const leak = read('.devcontainer/init-firewall.sh');\"].join('\\n');\n",
+    "tests/tooling/forbidden-list.test.ts":
+        "for (const p of ['.devcontainer/init-firewall.sh', 'docs/QUALITY_GATES.md']) {\n"
+        "  expect(owned.has(p), p).toBe(true);\n}\n",
+    "tests/tooling/expected.test.ts":
+        "expect(forbiddenReads(planted, owned, constants)).toEqual(['.devcontainer/init-firewall.sh']);\n",
+    "tests/tooling/table.test.ts":
+        "const PLANTED = [\n  ['a read() helper', \"expect(read('docs/QUALITY_GATES.md')).not.toContain('x');\", "
+        "'docs/QUALITY_GATES.md'],\n  ['resolve() segments',\n"
+        "   \"readFileSync(resolve(repoRoot, '.devcontainer', 'Dockerfile'), 'utf8');\",\n"
+        "   '.devcontainer/Dockerfile'],\n];\n",
+    "tests/tooling/template.test.ts":
+        "const LOOP = 'scripts/run-until-done.sh';\n"
+        "const planted = `${libText}\\nconst x = readFileSync(resolve(repoRoot, '${LOOP}'), 'utf8');`;\n"
+        "expect(forbiddenReads(planted, owned, pathConstants(planted))).toEqual([LOOP]);\n",
+    "tests/tooling/comment.test.ts":
+        "// reads .devcontainer/init-firewall.sh no more\n/* read('docs/QUALITY_GATES.md') */\n"
+        "const c = read('contracts/interface.json');\n",
+    # a regex literal with quotes in it opens no string
+    "tests/tooling/regex.test.ts":
+        "const LITERAL = /^(['\"`])([^'\"`$]*)\\1$/;\nconst s = \"read('CONTINUE_PROMPT.txt')\";\n",
+    # Python: a docstring, a tuple of paths, a constructor, an expectation
+    "tests/test_data_py.py":
+        'def test_d():\n    """open("scripts/run-until-done.sh") is what we refuse"""\n'
+        '    e = ScaffoldRead("tests/t.py", "scripts/run-until-done.sh")\n'
+        '    r = _reads(("tests/x.py", ("docs/QUALITY_GATES.md",)))\n'
+        '    assert "docs/QUALITY_GATES.md" in load_report(path)\n'
+        '    FORBIDDEN = ["cat scripts/run-until-done.sh"]\n',
+    # shell: a heredoc fixture, an echo, a comment
+    "tests/data_test.sh":
+        "cat > fixture.sh <<'EOF'\ncat scripts/run-until-done.sh\nEOF\n"
+        "echo \"grep x CONTINUE_PROMPT.txt\"\n"
+        "true # source scripts/container-setup.sh\n",
+    # review MINOR 3: a name that only contains the letters, and a write
+    "tests/test_not_reads.py":
+        'def test_n():\n    assert already_installed("scripts/run-until-done.sh")\n'
+        '    open(os.path.join(tmp, "scripts", "container-setup.sh"), "w").write("x")\n',
+    # review MAJOR 1: $'…' takes escapes, so the next line's quote is not flipped
+    "tests/ansi_test.sh": "echo $'it\\'s'\necho 'never cat scripts/run-until-done.sh here'\n",
+}
+
+READS = {
+    # TS: the xmeo shapes, written as CODE — real reads
+    "tests/tooling/real-resolve.test.ts":
+        "const t = readFileSync(resolve(repoRoot, '.devcontainer', 'Dockerfile'), 'utf8');\n",
+    "tests/tooling/real-const.test.ts":
+        "const scriptPath = resolve(__dirname, '../../.devcontainer/init-firewall.sh');\n"
+        "const source = readFileSync(scriptPath, 'utf8');\n",
+    "tests/tooling/real-expect.test.ts":
+        "expect(read('docs/QUALITY_GATES.md')).not.toContain('x');\n",
+    "tests/tooling/real-template.test.ts":
+        "const t = readFileSync(`${root}/scripts/run-until-done.sh`, 'utf8');\n",
+    "tests/tooling/real-exec.test.ts": "const t = execSync('cat CONTINUE_PROMPT.txt').toString();\n",
+    "tests/tooling/after-regex.test.ts":
+        "const LITERAL = /^(['\"`])$/;\nconst doc = readText('docs/EXECUTION_MODES.md');\n",
+    # Python: argv, a command line, a member read on joined pieces, a call over lines
+    "tests/test_argv.py":
+        'import subprocess\ndef test_a():\n'
+        '    subprocess.run(["grep", "-n", "x", "scripts/run-until-done.sh"], check=True)\n',
+    "tests/test_cmdline.py":
+        'import subprocess\nout = subprocess.check_output("cat CONTINUE_PROMPT.txt", shell=True)\n',
+    "tests/test_member.py":
+        'text = (ROOT / "scripts" / "container-setup.sh").read_text()\n',
+    "tests/test_multiline.py":
+        'import os\ns = open(\n    os.path.join(ROOT, "docs", "QUALITY_GATES.md"),\n    encoding="utf-8",\n).read()\n',
+    # shell: source, `.`, a variable
+    "tests/source_test.sh": 'source "$ROOT/scripts/container-setup.sh"\n. .claude/hooks/require-verdict.sh\n',
+    "tests/var_test.sh": 'LOOP="$ROOT/scripts/run-until-done.sh"\ngrep -c x "$LOOP"\n',
+    # review MAJOR 1: a substitution inside double quotes or an unquoted heredoc runs
+    "tests/subst_test.sh":
+        "body=\"$(sed -n '/^foo()/,/^}/p' \"$ROOT/scripts/run-until-done.sh\")\"\n",
+    "tests/heredoc_subst_test.sh":
+        'cat <<EOF\ncount: $(grep -c x "$ROOT/CONTINUE_PROMPT.txt")\nEOF\n',
+    "tests/parity_test.sh":
+        'x="$(grep "don\'t" "$LOG")"\ngrep -q foo "$ROOT/docs/QUALITY_GATES.md"\n'
+        "echo 'never cat scripts/container-setup.sh here'\n",
+    # review MINOR 4: an unquoted shell binding
+    "tests/unquoted_test.sh": "LOOP=$ROOT/scripts/run-until-done.sh\ngrep -q foo \"$LOOP\"\n",
+}
+READS_EXPECTED = {
+    "tests/tooling/real-resolve.test.ts": [".devcontainer/Dockerfile"],
+    "tests/tooling/real-const.test.ts": [".devcontainer/init-firewall.sh"],
+    "tests/tooling/real-expect.test.ts": ["docs/QUALITY_GATES.md"],
+    "tests/tooling/real-template.test.ts": ["scripts/run-until-done.sh"],
+    "tests/tooling/real-exec.test.ts": ["CONTINUE_PROMPT.txt"],
+    "tests/tooling/after-regex.test.ts": ["docs/EXECUTION_MODES.md"],
+    "tests/test_argv.py": ["scripts/run-until-done.sh"],
+    "tests/test_cmdline.py": ["CONTINUE_PROMPT.txt"],
+    "tests/test_member.py": ["scripts/container-setup.sh"],
+    "tests/test_multiline.py": ["docs/QUALITY_GATES.md"],
+    "tests/source_test.sh": [".claude/hooks/require-verdict.sh", "scripts/container-setup.sh"],
+    "tests/var_test.sh": ["scripts/run-until-done.sh"],
+    "tests/subst_test.sh": ["scripts/run-until-done.sh"],
+    "tests/heredoc_subst_test.sh": ["CONTINUE_PROMPT.txt"],
+    "tests/parity_test.sh": ["docs/QUALITY_GATES.md"],
+    "tests/unquoted_test.sh": ["scripts/run-until-done.sh"],
+}
+
+
+class LiteralsAreNotReads(_Scratch):
+    """Red on v0.18.4: the xmeo guard and every DATA_ONLY file were flagged."""
+
+    def make_x(self, files):
+        root = self.make(files)
+        (root / ".scaffold" / "manifest.json").write_text(manifest(XMEO_SCAFFOLD))
+        return root
+
+    def test_xmeos_guard_that_forbids_scaffold_reads_is_not_flagged(self):
+        root = self.make_x({"tests/tooling/scaffold-read-surface.test.ts": XMEO_GUARD.read_text()})
+        self.assertEqual(self.reads(root)["scaffold_reads"], [])
+
+    def test_a_planted_sample_a_forbidden_list_or_an_expected_value_is_data(self):
+        out = self.reads(self.make_x(DATA_ONLY))
+        self.assertEqual(out["scaffold_reads"], [], json.dumps(out["scaffold_reads"], indent=1))
+
+    def test_the_same_shapes_written_as_code_are_still_reads(self):
+        out = self.reads(self.make_x(READS))
+        self.assertEqual({e["test"]: e["paths"] for e in out["scaffold_reads"]}, READS_EXPECTED)
+
+    def test_unbalanced_brackets_stay_linear(self):
+        # review MINOR 2: an unclosed read call spans to the end of the file;
+        # v0.18.5's first build took 11 s on these 17 KB
+        text = "const LOOP = 'scripts/run-until-done.sh';\n" + "".join(
+            f"x{i} = parseInt([LOOP]\n" for i in range(800))
+        root = self.make_x({"tests/tooling/unbalanced.test.ts": text})
+        t0 = time.monotonic()
+        self.reads(root)
+        self.assertLess(time.monotonic() - t0, 5.0)
+
+    def test_a_guard_beside_a_real_read_names_only_the_read(self):
+        guard = XMEO_GUARD.read_text() + "\nconst leak = read('docs/QUALITY_GATES.md');\n"
+        root = self.make_x({"tests/tooling/scaffold-read-surface.test.ts": guard})
+        self.assertEqual(self.reads(root)["scaffold_reads"],
+                         [{"test": "tests/tooling/scaffold-read-surface.test.ts",
+                           "paths": ["docs/QUALITY_GATES.md"]}])
 
 
 class PhasekitCheck(_Scratch):

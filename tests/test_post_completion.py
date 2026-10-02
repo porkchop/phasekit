@@ -34,6 +34,7 @@ import subprocess
 import time
 import unittest
 from pathlib import Path
+import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
 
 _spec = importlib.util.spec_from_file_location(
     "pk_boundary_harness_pc", Path(__file__).resolve().parent / "test_boundary_state.py")

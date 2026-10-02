@@ -17,6 +17,7 @@ runs of the real bash loop against a stub run-phase.sh.
 import os
 import subprocess
 import unittest
+import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
 
 try:  # discover-style (CI: -s tests puts tests/ on sys.path)
     from test_run_until_done_v060 import LoopHarness, VERIFY_OK

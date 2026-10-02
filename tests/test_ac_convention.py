@@ -17,6 +17,7 @@ Run from the repo root: `python3 -m unittest tests.test_ac_convention`
 import json
 import unittest
 from pathlib import Path
+import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = REPO_ROOT / "contracts" / "interface.json"

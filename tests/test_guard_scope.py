@@ -26,6 +26,7 @@ import os
 import shutil
 import unittest
 from pathlib import Path
+import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
 
 _spec = importlib.util.spec_from_file_location(
     "pk_loop_owns_commits_scope", Path(__file__).resolve().parent / "test_loop_owns_commits.py")

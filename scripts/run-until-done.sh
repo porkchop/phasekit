@@ -2977,13 +2977,40 @@ _deferral_key_jq() {
 JQ_DEFS
 }
 
+_completion_key_order_jq() {
+  # v0.18.5 (rider 3): the ONE key order of artifacts/project-complete.json —
+  # `iteration` first, then the other scalar keys, then the arrays and
+  # objects; keys and values unchanged, and nothing moves inside a value. The
+  # record carries the full open deferral set (v0.18.0); on xmeo it reached
+  # 382 KB with `iteration` appended after a ~218 KB `deferrals`, and the
+  # orchestrator's landing reader, then capped at 256 KB, never found it
+  # (2026-10-01: xmeo stalled ~9 h). A prefix reader now finds every scalar
+  # at once. Applied by every loop writer of the record: the shared rewrite
+  # below and the step-3 synthesizer.
+  cat <<'JQ_DEFS'
+    def completion_key_order:
+      if type != "object" then .
+      else to_entries as $e
+        | ([$e[] | select(.key == "iteration")]
+           + [$e[] | select(.key != "iteration" and ((.value | type) as $t | $t != "array" and $t != "object"))]
+           + [$e[] | select(.key != "iteration" and ((.value | type) as $t | $t == "array" or $t == "object"))])
+        | reduce .[] as $x ({}; .[$x.key] = $x.value)
+      end;
+JQ_DEFS
+}
+
 _rewrite_json_keeping_mtime() {
   # $1 = file, $2 = new content. Replaces the file atomically (tmp under
   # artifacts/logs/, never swept by `git add -A`) and KEEPS ITS MTIME: a
   # rewrite by the loop is not the session writing a verdict, so it must
   # never make a stale record read as fresh (artifact_written_this_iteration,
   # the Stop hook) — nor a fresh one as stale. No-op when unchanged.
+  # v0.18.5: a completion record leaves here in its one key order.
   local file="$1" content="$2" tmp
+  if [[ "$(basename "$file")" == project-complete.json ]]; then
+    content="$(jq "$(_completion_key_order_jq) completion_key_order" <<<"$content" 2>/dev/null)" || content="$2"
+    [[ -n "$content" ]] || content="$2"
+  fi
   cmp -s <(printf '%s\n' "$content") "$file" && return 1
   tmp="$ARTIFACTS_DIR/logs/.rewrite.$BASHPID.tmp"
   mkdir -p "$ARTIFACTS_DIR/logs" 2>/dev/null || true
@@ -4262,7 +4289,8 @@ _boundary_synthesize_completion() {
   # claims nothing to a supervisor — completed_at stayed null for every
   # loop-synthesized completion and the consumer's own commit gate refused
   # the commit this step was landing. `null` only when the approval has none.
-  jq '{
+  # v0.18.5: written in the record's one key order (_completion_key_order_jq).
+  jq "$(_completion_key_order_jq)"' {
       done: true,
       summary: ("Project complete — final phase " + ((.phase // "unknown") | tostring) + " approved: " + ((.summary // "") | tostring)),
       suggested_commit_message: ("chore(workflow): project completion record (final phase " + ((.phase // "unknown") | tostring) + " approved)"),
@@ -4270,7 +4298,7 @@ _boundary_synthesize_completion() {
       final_phase: (.phase // "unknown"),
       iteration: (.iteration // null),
       recorded_by: "phasekit run-until-done.sh — boundary-state step 3 (the approval carried final_phase: true and no completion record existed)"
-    }' "$ap" > "$ARTIFACTS_DIR/project-complete.json" 2>/dev/null || return 1
+    } | completion_key_order' "$ap" > "$ARTIFACTS_DIR/project-complete.json" 2>/dev/null || return 1
   echo "boundary-state: the approval carries final_phase: true and no completion record exists — recorded artifacts/project-complete.json from it (step 3)."
   return 0
 }
@@ -5450,8 +5478,34 @@ run_until_done_exit_trap() {
     [[ "${TOOK_CONTROL:-0}" == 1 ]] && _exit=took-control
     cost_session_update "$COST_SESSION_ID" "$(jq -cn --arg e "$_exit" --arg p "${passes_done:-0}" '{exit: $e, passes: ($p | tonumber)}')" || true
   fi
+  # v0.18.5: last, after every reap above — the loop's temporaries go with it
+  # (only from the shell that made them; a subshell never removes them).
+  if [[ -n "${PK_LOOP_TMP:-}" && "$BASHPID" == "${PK_LOOP_TMP_OWNER:-}" ]]; then
+    rm -rf -- "$PK_LOOP_TMP" 2>/dev/null || true
+  fi
 }
 trap run_until_done_exit_trap EXIT
+
+# v0.18.5 (rider 2): the loop's temporaries live in ONE private directory
+# that the EXIT trap above removes. Every bare `mktemp` below — about twenty
+# sites, and any added later — goes through this function into it; a child
+# process (the model, the gate, a hook) keeps the TMPDIR it was given. In a
+# container /tmp dies with the run, but the suite drives this loop hundreds
+# of times on a host, and each run used to leave its marker and scratch files
+# in $TMPDIR (2026-10-01: ~1,226 per suite run, 122k in one host's /tmp).
+# A hard kill skips every trap; the directory it leaves is one, not a flood.
+PK_LOOP_TMP="$(command mktemp -d "${TMPDIR:-/tmp}/phasekit-loop.XXXXXXXX" 2>/dev/null)" || PK_LOOP_TMP=""
+# absolute, so the loop's own `cd`s cannot strand it (a relative TMPDIR; review MINOR 5)
+if [[ -n "$PK_LOOP_TMP" ]]; then PK_LOOP_TMP="$(cd "$PK_LOOP_TMP" 2>/dev/null && pwd)" || PK_LOOP_TMP=""; fi
+PK_LOOP_TMP_OWNER="$BASHPID"
+mktemp() {
+  # ${…:-}: a test that extracts the loop's functions runs this without the setup above
+  if [[ -n "${PK_LOOP_TMP:-}" && -d "${PK_LOOP_TMP:-}" ]]; then
+    TMPDIR="$PK_LOOP_TMP" command mktemp "$@"
+  else
+    command mktemp "$@"
+  fi
+}
 
 wrapup_commit() {
   # Soft wrap-up (v0.6.0). When the outer supervisor signals imminent shutdown
