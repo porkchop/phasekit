@@ -6459,7 +6459,10 @@ while [[ "$iteration" -le "$MAX_ITERATIONS" ]]; do
 
   # First attempt of iteration 1 in `new` mode uses fresh-session semantics;
   # retries (and every later iteration) use `continue` so they resume the
-  # session that was just established rather than starting a new one.
+  # session that was just established rather than starting a new one — BY ID
+  # (v0.18.8: run-phase.sh records the first turn's session id and resumes
+  # exactly that conversation; never `claude -c`, whose "most recent
+  # conversation" could be another project's).
   rc=0
   turn_started_at="$(date +%s)"
   if [[ "$iteration" -eq 1 && "$CLAUDE_MODE" == "new" && "$retries_used" -eq 0 ]]; then

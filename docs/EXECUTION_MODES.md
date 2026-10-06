@@ -53,9 +53,9 @@ These scripts pass `--permission-mode bypassPermissions` to Claude. This flag on
 ### Environment variables
 | Variable | Default | Purpose |
 |---|---|---|
-| `CLAUDE_MODE` | `new` | Set to `continue` to resume a previous session. Honored both for direct `run-until-done.sh` invocation and when forwarded through `container-setup.sh run`. |
+| `CLAUDE_MODE` | `new` | Set to `continue` to resume this project's last recorded conversation by id (`artifacts/logs/claude-session-id`; a new session that re-anchors from the tree when there is none). Honored both for direct `run-until-done.sh` invocation and when forwarded through `container-setup.sh run`. See "Session continuity" below. |
 | `MAX_ITERATIONS` | `50` | Maximum phase iterations for `run-until-done.sh` |
-| `PHASEKIT_ITER_RETRY` | `1` | Per-iteration retry budget when the `claude` CLI exits non-zero (e.g. an API-side content-filter trip mid-response, a 5xx, or a transient network failure). Retries reuse the current session via `continue` mode and do not advance the iteration counter. Set to `0` to disable. |
+| `PHASEKIT_ITER_RETRY` | `1` | Per-iteration retry budget when the `claude` CLI exits non-zero (e.g. an API-side content-filter trip mid-response, a 5xx, or a transient network failure). Retries resume the run's conversation by id (`continue` mode) and do not advance the iteration counter. Set to `0` to disable. |
 | `PHASEKIT_TRACE` | (unset) | Set to `1` to enable `set -x` xtrace in the wrapper scripts (`container-setup.sh`, `run-until-done.sh`, `run-phase.sh`). Every shell command is printed before execution — loud, but useful when diagnosing why the loop took an unexpected branch. Forwarded into the container by `container-setup.sh run`. |
 | `AUTO_PUSH` | (unset) | Set to `1` to push after each phase commit. Useful when the project needs CI to fire on each phase, github-pages-as-progress-mirror, or deploy previews. Pushes to the current branch's upstream (`git push` with no args). Push failures are non-fatal — the loop continues; the commit is already local. |
 | `PHASEKIT_ITERATION_MODE` | `standard` | Set to `light` for the reduced-ceremony loop (v0.6.0) — see "Light execution mode" below. Set per-session by the outer supervisor (forwarded into the container like `ANTHROPIC_MODEL`); never a committed setting. |
@@ -66,6 +66,30 @@ These scripts pass `--permission-mode bypassPermissions` to Claude. This flag on
 | `PHASEKIT_CONTRACTS_SKIP` | (unset) | Set to `1` to bypass the cross-project contracts gate for one run (v0.7.0). Deliberately separate from `VERIFY_SKIP`, which does **not** disable it: VERIFY_SKIP is the routine hatch for red TDD commits, and letting it also switch off contract authenticity would disarm the gate exactly when a red gate applies the pressure to cheat. Announces itself on stderr; operator-only, never a committed setting. |
 | `SSH_AUTH_SOCK` | (host's value) | When invoked via `container-setup.sh run`, the host's SSH agent socket is forwarded into the container so `git push` to SSH remotes works. Run `ssh-add` on the host first. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | (unset) | Passed through to the container if set, for HTTPS-remote push workflows that use a Personal Access Token. |
+
+### Session continuity (v0.18.8)
+
+A run is ONE conversation. Its first turn starts a new session — the id is chosen up front
+(`claude --session-id`) and recorded in `artifacts/logs/claude-session-id` before the model
+starts — and every later turn (the next iteration, a CLI retry, the no-verdict request)
+resumes that id with `claude --resume <id>`. The loop never uses `claude -c`: "the most recent
+conversation in this directory" is not this run's conversation when several projects share one
+config volume and one `/workspace` path (2026-10-06: three xmeo-v3 turns had resumed
+foundry-orchestrator sessions). After each turn, the id the CLI reports in its `system`/`init`
+event is recorded (it wins if the two ever differ).
+
+Fail safe, never another conversation: when there is no usable recorded id, or the CLI cannot
+honour the resume (exit 1, no `init`, and the CLI's "No conversation found with session ID" —
+an id from elsewhere, a transcript directory that was lost), the turn starts a NEW session whose
+prompt first says so
+and points it back at the tree (`artifacts/session-handoff.json`, `docs/PHASES.md`, `git
+status`/`diff`/`log`); both attempts stay in the turn's logs. Nothing else is read that way: a
+turn ended by a signal, an auth or credit failure (the run's conversation is kept for the
+retry), or a refusal after the loop began taking the session back (the wrap-up sentinel
+`artifacts/wrapup-requested`, a take-control or completion yield) — a turn the loop ended stays
+ended. The light-mode final review is a side conversation: a new session that records
+nothing. `CLAUDE_MODE=continue` at a run's start resumes the last run's recorded conversation the
+same way. The id file is the loop's own state: never committed, never in `git status`.
 
 ### Visibility and logs
 

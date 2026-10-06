@@ -78,40 +78,53 @@ COMMAND="${1:-build}"
 # way to name it. Must match DEFAULT_MOUNT_DIR in scripts/phasekit-contracts.py.
 CONTRACTS_CONTAINER_DIR="/contracts"
 
-# Per-project auto-memory (v0.18.7). Every project is mounted at /workspace and
-# every session shares one config volume, so Claude Code's auto-memory —
-# <config>/projects/-workspace/memory/, keyed by the working directory — was
-# ONE directory for every project: each project's sessions read and wrote the
-# others' notes (2026-10-06: 531 files, 2.5 MB, written by the whole fleet).
-# The volume is shared by concurrent sessions, so a symlink inside it cannot
-# send different containers to different places. Instead each session gets
-# its own directory of the same volume MOUNTED over that path (docker's
-# volume-subpath, Docker >= 26 / API 1.45): project-memory/<key>, where <key>
-# is this checkout's directory name. /workspace, the volume and
-# CLAUDE_CONFIG_DIR are unchanged, and a host session never runs this script.
+# Per-project session directory (v0.18.8; auto-memory alone since v0.18.7).
+# Every project is mounted at /workspace and every session shares one config
+# volume, so Claude Code's per-directory state — <config>/projects/-workspace/:
+# the session transcripts (<id>.jsonl), each session's own files, and the
+# auto-memory (memory/) — was ONE directory for every project. Transcripts
+# were the dangerous half: `claude -c` resumes "the most recent conversation
+# in this directory", so one project's later turn could resume ANOTHER
+# project's conversation (2026-10-06: 15 of 585 attributable transcripts held
+# two projects' turns, interleaved by concurrent sessions appending to one
+# file). The loop now resumes by explicit id (scripts/run-phase.sh); this is
+# the storage half: each session gets its own directory of the same volume
+# MOUNTED over that whole path (docker's volume-subpath, Docker >= 26 /
+# API 1.45): project-sessions/<key>, where <key> is this checkout's directory
+# name. /workspace, the volume and CLAUDE_CONFIG_DIR are unchanged, and a host
+# session never runs this script.
 #
-# The shared directory stays where it is, as the legacy copy: never moved,
-# never deleted. A project's own directory is seeded with a copy of it the
-# first time the project runs (atomically: a killed seed leaves no half
-# directory), and the copies diverge from then on. Own memory or none, never
-# another project's: when the directory cannot be prepared, or docker is too
-# old for a subpath, the session gets an empty throwaway memory (tmpfs) and a
-# warning. The key is the directory NAME, so two checkouts with one name share
-# a memory (the fleet keeps one checkout per project under one directory).
+# Nothing is moved or deleted. The shared directory stays where it is, as the
+# legacy copy (its transcripts are never resumed again — the loop resumes by
+# id, and a project's id names a conversation in its own directory). A
+# project's own directory is created the first time it runs, atomically (a
+# killed seed leaves no half directory), with its memory/ CARRIED OVER: a copy
+# of v0.18.7's project-memory/<key> when the project has one, else of the
+# shared memory. project-memory/<key> stays in place too. Own directory or
+# none, never another project's: when it cannot be prepared, or docker is too
+# old for a subpath, the session gets an empty throwaway directory (tmpfs:
+# transcripts and memory last the container's life — the loop's later turns
+# still resume within it, and the next run starts fresh) and a warning. The
+# key is the directory NAME, so two checkouts with one name share a directory
+# (the fleet keeps one checkout per project under one directory).
 CLAUDE_CONFIG_CONTAINER_DIR="/home/node/.claude"
-CLAUDE_MEMORY_CONTAINER_DIR="$CLAUDE_CONFIG_CONTAINER_DIR/projects/-workspace/memory"
+CLAUDE_PROJECT_CONTAINER_DIR="$CLAUDE_CONFIG_CONTAINER_DIR/projects/-workspace"
+PROJECT_SESSIONS_SUBDIR="project-sessions"
+# v0.18.7's per-project memory: read once, to carry a project's memory over.
 PROJECT_MEMORY_SUBDIR="project-memory"
-PROJECT_MEMORY_MIN_API="1.45"
+PROJECT_SESSIONS_MIN_API="1.45"
 # Run by `sh` in a throwaway container: $1 = the key, $2 = where the config
-# volume is mounted. Prints `seeded` or `exists`.
-PROJECT_MEMORY_SEED_SH='set -eu
+# volume is mounted. Prints `seeded:<project-memory|shared|none>` (where the
+# memory came from) or `exists`.
+PROJECT_SESSIONS_SEED_SH='set -eu
 key=$1; vol=$2
-legacy="$vol/projects/-workspace/memory"
-base="$vol/'"$PROJECT_MEMORY_SUBDIR"'"
+shared="$vol/projects/-workspace"
+v187="$vol/'"$PROJECT_MEMORY_SUBDIR"'/$key"
+base="$vol/'"$PROJECT_SESSIONS_SUBDIR"'"
 dst="$base/$key"
 # The mountpoint must exist before docker mounts over it: docker would create
 # it as the daemon user, and a non-root session could then not write beside it.
-mkdir -p "$legacy" "$base"
+mkdir -p "$shared" "$base"
 if [ -d "$dst" ]; then
   echo exists
 else
@@ -121,10 +134,18 @@ else
   # never while another run may still be filling it.
   find "$work" -mindepth 1 -maxdepth 1 -mmin +60 -exec rm -rf {} +
   tmp=$(mktemp -d "$work/XXXXXX")
-  cp -R "$legacy/." "$tmp/"
-  chmod 755 "$tmp"
+  mkdir "$tmp/memory"
+  from=none
+  if [ -d "$v187" ]; then
+    cp -R "$v187/." "$tmp/memory/"
+    from=project-memory
+  elif [ -d "$shared/memory" ]; then
+    cp -R "$shared/memory/." "$tmp/memory/"
+    from=shared
+  fi
+  chmod 755 "$tmp" "$tmp/memory"
   if mv -T "$tmp" "$dst" 2>/dev/null; then
-    echo seeded
+    echo "seeded:$from"
   else
     rm -rf "$tmp"
     [ -d "$dst" ]
@@ -132,9 +153,9 @@ else
   fi
   rmdir "$work" "$base/.seed" 2>/dev/null || true
 fi'
-PROJECT_MEMORY_ARGS=()
+PROJECT_SESSIONS_ARGS=()
 
-project_memory_key() {
+project_sessions_key() {
   local k
   k="$(basename "$ROOT_DIR")"
   k="${k//[^A-Za-z0-9._-]/_}"
@@ -152,22 +173,22 @@ docker_supports_volume_subpath() {
                2>/dev/null || true); do
     [[ "$v" =~ ^([0-9]+)\.([0-9]+)$ ]] || continue
     maj="${BASH_REMATCH[1]}"; min="${BASH_REMATCH[2]}"
-    if (( maj < ${PROJECT_MEMORY_MIN_API%%.*} \
-          || (maj == ${PROJECT_MEMORY_MIN_API%%.*} && min < ${PROJECT_MEMORY_MIN_API#*.}) )); then
+    if (( maj < ${PROJECT_SESSIONS_MIN_API%%.*} \
+          || (maj == ${PROJECT_SESSIONS_MIN_API%%.*} && min < ${PROJECT_SESSIONS_MIN_API#*.}) )); then
       return 1
     fi
   done
   return 0
 }
 
-# Sets PROJECT_MEMORY_ARGS to this session's memory mount. $1 = the docker
-# --user spec ("" = the image's own user): the directory is created by the
-# user the session runs as, with the volume where the session mounts it (so a
-# fresh volume is first populated, and owned, as the session sees it).
-project_memory_mount() {
+# Sets PROJECT_SESSIONS_ARGS to this session's mount. $1 = the docker --user
+# spec ("" = the image's own user): the directory is created by the user the
+# session runs as, with the volume where the session mounts it (so a fresh
+# volume is first populated, and owned, as the session sees it).
+project_sessions_mount() {
   local user_spec="$1" key out
-  key="$(project_memory_key)"
-  local fallback=(--mount "type=tmpfs,dst=$CLAUDE_MEMORY_CONTAINER_DIR,tmpfs-mode=1777")
+  key="$(project_sessions_key)"
+  local fallback=(--mount "type=tmpfs,dst=$CLAUDE_PROJECT_CONTAINER_DIR,tmpfs-mode=1777")
   local prep=(--rm --network none --cap-drop=ALL
               -v "$CLAUDE_VOLUME":"$CLAUDE_CONFIG_CONTAINER_DIR" --entrypoint /bin/sh)
   if [[ -n "$user_spec" ]]; then
@@ -178,31 +199,33 @@ project_memory_mount() {
   fi
   # Prepared even when the mount below cannot be used: it also creates the
   # mountpoint the tmpfs needs, as the session's user.
-  if ! out="$(docker run "${prep[@]}" "$IMAGE_NAME" -c "$PROJECT_MEMORY_SEED_SH" sh "$key" \
+  if ! out="$(docker run "${prep[@]}" "$IMAGE_NAME" -c "$PROJECT_SESSIONS_SEED_SH" sh "$key" \
                 "$CLAUDE_CONFIG_CONTAINER_DIR" 2>&1)"; then
-    echo "container: auto-memory: could not prepare $PROJECT_MEMORY_SUBDIR/$key in '$CLAUDE_VOLUME' (${out:0:200}); this session's memory is empty and not kept" >&2
-    PROJECT_MEMORY_ARGS=("${fallback[@]}")
+    echo "container: sessions: could not prepare $PROJECT_SESSIONS_SUBDIR/$key in '$CLAUDE_VOLUME' (${out:0:200}); this session's transcripts and memory are empty and not kept" >&2
+    PROJECT_SESSIONS_ARGS=("${fallback[@]}")
     return 0
   fi
   if ! docker_supports_volume_subpath; then
-    echo "container: auto-memory: docker's API is older than $PROJECT_MEMORY_MIN_API (no volume-subpath); this session's memory is empty and not kept — upgrade Docker for per-project memory" >&2
-    PROJECT_MEMORY_ARGS=("${fallback[@]}")
+    echo "container: sessions: docker's API is older than $PROJECT_SESSIONS_MIN_API (no volume-subpath); this session's transcripts and memory are empty and not kept — upgrade Docker for a per-project session directory" >&2
+    PROJECT_SESSIONS_ARGS=("${fallback[@]}")
     return 0
   fi
   if [[ "$CLAUDE_VOLUME" == *,* ]]; then
-    echo "container: auto-memory: '$CLAUDE_VOLUME' contains a comma, which a --mount value cannot carry; this session's memory is empty and not kept" >&2
-    PROJECT_MEMORY_ARGS=("${fallback[@]}")
+    echo "container: sessions: '$CLAUDE_VOLUME' contains a comma, which a --mount value cannot carry; this session's transcripts and memory are empty and not kept" >&2
+    PROJECT_SESSIONS_ARGS=("${fallback[@]}")
     return 0
   fi
   if [[ "$CLAUDE_VOLUME" == /* ]]; then
     # A host directory used as the config "volume": the same layout, bound.
-    PROJECT_MEMORY_ARGS=(--mount "type=bind,src=$CLAUDE_VOLUME/$PROJECT_MEMORY_SUBDIR/$key,dst=$CLAUDE_MEMORY_CONTAINER_DIR")
+    PROJECT_SESSIONS_ARGS=(--mount "type=bind,src=$CLAUDE_VOLUME/$PROJECT_SESSIONS_SUBDIR/$key,dst=$CLAUDE_PROJECT_CONTAINER_DIR")
   else
-    PROJECT_MEMORY_ARGS=(--mount "type=volume,src=$CLAUDE_VOLUME,dst=$CLAUDE_MEMORY_CONTAINER_DIR,volume-subpath=$PROJECT_MEMORY_SUBDIR/$key")
+    PROJECT_SESSIONS_ARGS=(--mount "type=volume,src=$CLAUDE_VOLUME,dst=$CLAUDE_PROJECT_CONTAINER_DIR,volume-subpath=$PROJECT_SESSIONS_SUBDIR/$key")
   fi
   case "$out" in
-    *seeded*) echo "container: auto-memory: $PROJECT_MEMORY_SUBDIR/$key (first run: seeded with a copy of the shared memory)" ;;
-    *)        echo "container: auto-memory: $PROJECT_MEMORY_SUBDIR/$key" ;;
+    *seeded:project-memory*) echo "container: sessions: $PROJECT_SESSIONS_SUBDIR/$key (first run: memory carried over from $PROJECT_MEMORY_SUBDIR/$key)" ;;
+    *seeded:shared*)         echo "container: sessions: $PROJECT_SESSIONS_SUBDIR/$key (first run: memory seeded with a copy of the shared memory)" ;;
+    *seeded*)                echo "container: sessions: $PROJECT_SESSIONS_SUBDIR/$key (first run: empty)" ;;
+    *)                       echo "container: sessions: $PROJECT_SESSIONS_SUBDIR/$key" ;;
   esac
 }
 
@@ -497,8 +520,10 @@ run_container() {
   fi
 
   # CLAUDE_MODE controls whether the inner loop starts a fresh session (`new`,
-  # default) or resumes the most recent one (`continue`). Forward so users can
-  # manually continue a run that crashed mid-iteration without editing scripts:
+  # default) or resumes this project's last recorded conversation by id
+  # (`continue`; v0.18.8 — never "the most recent conversation", see
+  # scripts/run-phase.sh). Forward so users can manually continue a run that
+  # crashed mid-iteration without editing scripts:
   #   CLAUDE_MODE=continue bash scripts/container-setup.sh run
   if [[ -n "${CLAUDE_MODE:-}" ]]; then
     docker_args+=(-e CLAUDE_MODE="$CLAUDE_MODE")
@@ -542,14 +567,15 @@ run_container() {
     docker_args+=(-e GITHUB_TOKEN)
   fi
 
-  # Per-project auto-memory (v0.18.7; see PROJECT_MEMORY_SEED_SH above). Last,
-  # after every refusal above, so a refused session prepares nothing.
-  local memory_user="$CONTAINER_USER"
-  if [[ "$memory_user" == "root" ]]; then
-    memory_user="0:0"
+  # Per-project session directory (v0.18.8; see PROJECT_SESSIONS_SEED_SH
+  # above). Last, after every refusal above, so a refused session prepares
+  # nothing.
+  local sessions_user="$CONTAINER_USER"
+  if [[ "$sessions_user" == "root" ]]; then
+    sessions_user="0:0"
   fi
-  project_memory_mount "$memory_user"
-  docker_args+=("${PROJECT_MEMORY_ARGS[@]}")
+  project_sessions_mount "$sessions_user"
+  docker_args+=("${PROJECT_SESSIONS_ARGS[@]}")
 
   docker run "${docker_args[@]}" "$IMAGE_NAME" "${cmd[@]}"
 }

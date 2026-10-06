@@ -68,7 +68,7 @@ The key is passed into the container at runtime via `docker run -e` and never st
 
 ## Prerequisites
 
-- Docker installed and running (Engine 26+ for per-project auto-memory; see [Per-project auto-memory](#per-project-auto-memory))
+- Docker installed and running (Engine 26+ for the per-project session directory; see [Per-project session directory](#per-project-session-directory))
 - `ANTHROPIC_API_KEY` environment variable set (see above)
 - The scaffold repository cloned locally
 
@@ -158,7 +158,7 @@ This registers the server in your user-level Claude configuration. Add `--headle
 |---|---|---|
 | `ANTHROPIC_API_KEY` | (optional) | API key for pay-per-token auth; omit to use stored subscription credentials |
 | `MAX_ITERATIONS` | `50` | Phase loop iteration limit |
-| `CLAUDE_MODE` | `new` | Set to `continue` to resume a previous session (forwarded into the container) |
+| `CLAUDE_MODE` | `new` | Set to `continue` to resume this project's last recorded conversation by id (forwarded into the container; see EXECUTION_MODES.md, "Session continuity") |
 | `PHASEKIT_ITER_RETRY` | `1` | Retry budget per iteration on a transient `claude` CLI failure; see `docs/EXECUTION_MODES.md` |
 | `PHASEKIT_TRACE` | (unset) | Set to `1` to enable `set -x` xtrace in the wrapper scripts (host and inside the container); see `docs/EXECUTION_MODES.md` |
 | `IMAGE_NAME` | `scaffold-runner` | Docker image name |
@@ -171,28 +171,43 @@ This registers the server in your user-level Claude configuration. Add `--headle
 | `PHASEKIT_CONTAINER_USER` | (unset) | Lower-level override for `docker run --user` (`root` or `uid:gid`); takes precedence over `PHASEKIT_ROOTLESS_DOCKER` |
 | `PHASEKIT_CONTRACTS_MOUNT` | (unset) | Host path to a provider's contracts tree; bind-mounted read-only at `/contracts`; see [Cross-project contracts mount](#cross-project-contracts-mount) |
 
-## Per-project auto-memory
+## Per-project session directory
 
-*v0.18.7.* Every session mounts its project at `/workspace` and shares the `CLAUDE_VOLUME`, and
-Claude Code keys its auto-memory by the working directory (`projects/-workspace/memory/` in the
-config directory), so before v0.18.7 every project on a host shared ONE memory: each project's
-sessions read and wrote the others' notes.
+*v0.18.8 (auto-memory alone since v0.18.7).* Every session mounts its project at `/workspace`
+and shares the `CLAUDE_VOLUME`, and Claude Code keys its per-directory state by the working
+directory — `projects/-workspace/` in the config directory: the session transcripts
+(`<id>.jsonl`), each session's own files, and the auto-memory (`memory/`). So before v0.18.7
+every project on a host shared ONE memory, and before v0.18.8 one transcript directory, where
+`claude -c` ("the most recent conversation in this directory") could resume ANOTHER project's
+conversation. Measured 2026-10-06: 15 shared transcripts held two projects' turns, interleaved by
+concurrent sessions appending to one file. The loop now resumes by explicit session id (see
+[EXECUTION_MODES.md](EXECUTION_MODES.md), "Session continuity"); this is the storage half.
 
-`container-setup.sh` now gives each session its own directory of the same volume,
-`project-memory/<key>`, mounted over `/home/node/.claude/projects/-workspace/memory` (Docker's
-`volume-subpath`, Docker Engine 26+ / API 1.45+). `<key>` is the checkout's directory name
-(characters outside `A-Za-z0-9._-` become `_`, leading dots are dropped, an empty name is
-`_default`), so two checkouts with the same directory name share one memory. Before the
-session starts, a throwaway container (no network, the session's own user, the volume mounted
-where the session mounts it) creates the directory; the first time, it seeds it with a copy of the shared directory, so
-no project loses context, and from then on the copies diverge. The shared directory itself is
-never moved or deleted; it stays as the legacy copy (a project still on an older phasekit keeps
-using it). Nothing else changes: `/workspace`, the volume and `CLAUDE_CONFIG_DIR` are as before,
-and a session on the host never runs this script.
+`container-setup.sh` gives each session its own directory of the same volume,
+`project-sessions/<key>`, mounted over the WHOLE `/home/node/.claude/projects/-workspace`
+(one mount — Docker's `volume-subpath`, Docker Engine 26+ / API 1.45+; it replaces v0.18.7's
+memory-only mount). `<key>` is the checkout's directory name (characters outside
+`A-Za-z0-9._-` become `_`, leading dots are dropped, an empty name is `_default`), so two
+checkouts with the same directory name share one directory. Before the session starts, a
+throwaway container (no network, the session's own user, the volume mounted where the session
+mounts it) creates the directory; the first time, its `memory/` is carried over: a copy of
+v0.18.7's `project-memory/<key>` when the project has one, else of the shared memory. Nothing
+is moved or deleted: the shared directory (its transcripts are legacy — never resumed again)
+and `project-memory/<key>` stay where they are, and a project still on an older phasekit keeps
+using them. Nothing else changes: `/workspace`, the volume and `CLAUDE_CONFIG_DIR` are as
+before, and a session on the host never runs this script.
 
-Own memory or none, never another project's: if the directory cannot be prepared, or the docker
-client or daemon is older than API 1.45, the session gets an empty throwaway memory (tmpfs) and a
-warning.
+Own directory or none, never another project's: if the directory cannot be prepared, or the
+docker client or daemon is older than API 1.45, the session gets an empty throwaway directory
+(tmpfs) and a warning. Its transcripts then last the container's life: the loop's later turns
+still resume within it, and the next run (or a `CLAUDE_MODE=continue` start) begins a new
+conversation that re-anchors from the tree.
+
+Known limit: the whole config volume is still mounted at `/home/node/.claude` (it holds the
+login), so a session that goes looking can read `project-sessions/<other key>/` and
+`project-memory/` there. The CLI never resumes or remembers from those paths — only from
+`projects/-workspace`, which is this project's own — but a model running a shell command is not
+the CLI. Separating them fully needs a config root per project, which is not done here.
 
 ## Cross-project contracts mount
 

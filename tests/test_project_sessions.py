@@ -1,13 +1,15 @@
-"""Per-project auto-memory (v0.18.7).
+"""Per-project session directory (v0.18.8; auto-memory alone since v0.18.7).
 
 Every session mounted its project at /workspace with the one shared config
-volume, so Claude Code's auto-memory (<config>/projects/-workspace/memory/,
-keyed by the working directory) was one directory for the whole fleet: every
-project's sessions read and wrote every other project's notes. Now
-container-setup.sh mounts the volume's own `project-memory/<key>` over that
-path for each session (docker volume-subpath), after a throwaway container has
-created it — seeded once with a copy of the shared directory, which stays in
-place untouched.
+volume, so Claude Code's per-directory state (<config>/projects/-workspace/:
+transcripts, per-session files, auto-memory) was one directory for the whole
+fleet — and `claude -c` resumed "the most recent conversation" in it, which
+could be another project's. Now container-setup.sh mounts the volume's own
+`project-sessions/<key>` over that WHOLE path for each session (ONE docker
+volume-subpath mount, replacing v0.18.7's memory-only one), after a throwaway
+container has created it — its memory/ carried over from v0.18.7's
+`project-memory/<key>`, else from the shared memory; nothing is moved or
+deleted.
 
 Two halves, the extraction idiom: the real script against a stub `docker`
 (what each `docker run` is given), and the seed script itself — pulled out of
@@ -28,7 +30,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTAINER_SCRIPT = REPO_ROOT / "scripts" / "container-setup.sh"
-MEMORY_DIR = "/home/node/.claude/projects/-workspace/memory"
+PROJECT_DIR = "/home/node/.claude/projects/-workspace"
 
 # STUB_API: what `docker version` reports (client and server API versions); STUB_PREP_RC / STUB_PREP_OUT: the
 # memory-preparing run (the one with `--entrypoint /bin/sh`).
@@ -50,21 +52,21 @@ exit 0
 
 
 def _seed_script():
-    """PROJECT_MEMORY_SEED_SH as bash evaluates it (it splices in the subdir)."""
+    """PROJECT_SESSIONS_SEED_SH as bash evaluates it (it splices in the subdirs)."""
     text = CONTAINER_SCRIPT.read_text()
-    m = re.search(r"^PROJECT_MEMORY_SUBDIR=.*?$", text, re.M)
-    s = re.search(r"^PROJECT_MEMORY_SEED_SH='.*?^fi'$", text, re.M | re.S)
-    if not (m and s):
-        raise AssertionError("container-setup.sh carries no PROJECT_MEMORY_SEED_SH")
-    snippet = f"{m.group(0)}\n{s.group(0)}\nprintf '%s' \"$PROJECT_MEMORY_SEED_SH\"\n"
+    subdirs = re.findall(r"^PROJECT_(?:SESSIONS|MEMORY)_SUBDIR=.*?$", text, re.M)
+    s = re.search(r"^PROJECT_SESSIONS_SEED_SH='.*?^fi'$", text, re.M | re.S)
+    if not (len(subdirs) == 2 and s):
+        raise AssertionError("container-setup.sh carries no PROJECT_SESSIONS_SEED_SH")
+    snippet = "\n".join(subdirs) + f"\n{s.group(0)}\nprintf '%s' \"$PROJECT_SESSIONS_SEED_SH\"\n"
     return subprocess.run(["bash", "-c", snippet], capture_output=True, text=True,
                           check=True).stdout
 
 
-class ContainerSetupMemoryMount(unittest.TestCase):
+class ContainerSetupSessionsMount(unittest.TestCase):
 
     def _run(self, project="round-clock", extra=None):
-        tmp = Path(tempfile.mkdtemp(prefix="pk-mem-"))
+        tmp = Path(tempfile.mkdtemp(prefix="pk-ses-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         root = tmp / project
         (root / "scripts").mkdir(parents=True)
@@ -95,20 +97,25 @@ class ContainerSetupMemoryMount(unittest.TestCase):
         return [argv[i + 1] for i, a in enumerate(argv) if a == "--mount" and i + 1 < len(argv)]
 
     def _subpath(self, key, volume="scaffold-claude-config"):
-        return (f"type=volume,src={volume},dst={MEMORY_DIR},"
-                f"volume-subpath=project-memory/{key}")
+        return (f"type=volume,src={volume},dst={PROJECT_DIR},"
+                f"volume-subpath=project-sessions/{key}")
 
-    def test_the_session_mounts_its_own_memory_over_the_shared_path(self):
+    TMPFS = f"type=tmpfs,dst={PROJECT_DIR},tmpfs-mode=1777"
+
+    def test_the_session_mounts_its_own_directory_over_the_whole_shared_path(self):
         p, runs, session, prep = self._run("round-clock")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(len(session), 1, p.stdout + p.stderr)
         argv = session[0]
-        self.assertIn(self._subpath("round-clock"), self._mounts(argv))
+        # ONE mount: transcripts and memory together (v0.18.7's memory-only
+        # mount is replaced, not stacked)
+        self.assertEqual(self._mounts(argv), [self._subpath("round-clock")])
+        self.assertFalse(any("project-memory" in a for a in argv), argv)
         # the rest is unchanged: the whole volume, the config dir, /workspace
         self.assertIn("scaffold-claude-config:/home/node/.claude", argv)
         self.assertIn("CLAUDE_CONFIG_DIR=/home/node/.claude", argv)
         self.assertTrue(any(a.endswith("/round-clock:/workspace") for a in argv))
-        self.assertIn("auto-memory: project-memory/round-clock", p.stdout)
+        self.assertIn("sessions: project-sessions/round-clock", p.stdout)
 
     def test_two_projects_get_two_directories(self):
         _, _, a, _ = self._run("xmeo-v3")
@@ -143,23 +150,21 @@ class ContainerSetupMemoryMount(unittest.TestCase):
         self.assertNotIn("--user", prep2[0])
         self.assertNotIn("--cap-add=DAC_OVERRIDE", prep2[0])
 
-    def test_a_failed_preparation_gives_an_empty_throwaway_memory_never_the_shared_one(self):
+    def test_a_failed_preparation_gives_an_empty_throwaway_directory_never_the_shared_one(self):
         p, _, session, _ = self._run("round-clock", {"STUB_PREP_RC": "1",
                                                      "STUB_PREP_OUT": "mv: boom"})
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual(self._mounts(session[0]),
-                         [f"type=tmpfs,dst={MEMORY_DIR},tmpfs-mode=1777"])
-        self.assertIn("could not prepare project-memory/round-clock", p.stderr)
+        self.assertEqual(self._mounts(session[0]), [self.TMPFS])
+        self.assertIn("could not prepare project-sessions/round-clock", p.stderr)
         self.assertIn("mv: boom", p.stderr)
 
-    def test_a_docker_without_volume_subpath_gives_an_empty_throwaway_memory(self):
+    def test_a_docker_without_volume_subpath_gives_an_empty_throwaway_directory(self):
         for api in ("1.44 1.54", "1.54 1.44", "1.44"):
             with self.subTest(api=api):
                 p, _, session, prep = self._run("round-clock", {"STUB_API": api})
                 # still prepared: that also creates the tmpfs mountpoint as the session user
                 self.assertEqual(len(prep), 1)
-                self.assertEqual(self._mounts(session[0]),
-                                 [f"type=tmpfs,dst={MEMORY_DIR},tmpfs-mode=1777"])
+                self.assertEqual(self._mounts(session[0]), [self.TMPFS])
                 self.assertIn("older than 1.45", p.stderr)
         for api in ("1.45 1.45", "1.54 1.54", "2.0", "garbage"):
             with self.subTest(api=api):
@@ -171,17 +176,21 @@ class ContainerSetupMemoryMount(unittest.TestCase):
         _, _, session, prep = self._run("round-clock", {"CLAUDE_VOLUME": "/srv/claude"})
         self.assertIn("/srv/claude:/home/node/.claude", prep[0])
         self.assertEqual(self._mounts(session[0]), [
-            f"type=bind,src=/srv/claude/project-memory/round-clock,dst={MEMORY_DIR}"])
+            f"type=bind,src=/srv/claude/project-sessions/round-clock,dst={PROJECT_DIR}"])
 
-    def test_a_config_path_with_a_comma_gives_an_empty_throwaway_memory(self):
+    def test_a_config_path_with_a_comma_gives_an_empty_throwaway_directory(self):
         p, _, session, _ = self._run("round-clock", {"CLAUDE_VOLUME": "/srv/a,b"})
-        self.assertEqual(self._mounts(session[0]),
-                         [f"type=tmpfs,dst={MEMORY_DIR},tmpfs-mode=1777"])
+        self.assertEqual(self._mounts(session[0]), [self.TMPFS])
         self.assertIn("contains a comma", p.stderr)
 
-    def test_a_first_run_says_it_seeded(self):
-        p, _, _, _ = self._run("round-clock", {"STUB_PREP_OUT": "seeded"})
-        self.assertIn("seeded with a copy of the shared memory", p.stdout)
+    def test_a_first_run_says_where_its_memory_came_from(self):
+        for out, said in (("seeded:project-memory",
+                           "memory carried over from project-memory/round-clock"),
+                          ("seeded:shared", "memory seeded with a copy of the shared memory"),
+                          ("seeded:none", "first run: empty")):
+            with self.subTest(out=out):
+                p, _, _, _ = self._run("round-clock", {"STUB_PREP_OUT": out})
+                self.assertIn(said, p.stdout)
 
     def test_a_refused_session_prepares_nothing(self):
         p, runs, _, _ = self._run("round-clock",
@@ -195,9 +204,12 @@ class SeedScript(unittest.TestCase):
 
     def setUp(self):
         self.script = _seed_script()
-        self.vol = Path(tempfile.mkdtemp(prefix="pk-mem-vol-"))
+        self.vol = Path(tempfile.mkdtemp(prefix="pk-ses-vol-"))
         self.addCleanup(shutil.rmtree, self.vol, True)
-        self.legacy = self.vol / "projects" / "-workspace" / "memory"
+        self.shared = self.vol / "projects" / "-workspace"
+        self.legacy = self.shared / "memory"
+        self.v187 = self.vol / "project-memory"
+        self.base = self.vol / "project-sessions"
 
     def seed(self, key):
         r = subprocess.run(["sh", "-c", self.script, "sh", key, str(self.vol)],
@@ -209,41 +221,74 @@ class SeedScript(unittest.TestCase):
     def tree(d):
         return {str(p.relative_to(d)): p.read_text() for p in sorted(d.rglob("*")) if p.is_file()}
 
-    def test_a_first_run_copies_the_shared_memory_and_leaves_it_in_place(self):
-        (self.legacy / "sub").mkdir(parents=True)
-        (self.legacy / "MEMORY.md").write_text("- [a](a.md)\n")
-        (self.legacy / "a.md").write_text("note a\n")
-        (self.legacy / "sub" / "b.md").write_text("note b\n")
-        before = self.tree(self.legacy)
-        self.assertEqual(self.seed("round-clock"), "seeded")
-        dst = self.vol / "project-memory" / "round-clock"
-        self.assertEqual(self.tree(dst), before)
-        self.assertEqual(self.tree(self.legacy), before)
-        self.assertEqual(oct(dst.stat().st_mode & 0o777), "0o755")
-        self.assertFalse((self.vol / "project-memory" / ".seed" / "round-clock").exists())
+    def _shared_transcripts(self):
+        self.shared.mkdir(parents=True, exist_ok=True)
+        (self.shared / "aaaa.jsonl").write_text('{"gitBranch":"iter/1-other-project"}\n')
+        (self.shared / "aaaa").mkdir()
+        (self.shared / "aaaa" / "tool.txt").write_text("other project's file\n")
 
-    def test_later_runs_keep_the_copy_and_the_copies_diverge(self):
+    def test_a_first_run_carries_the_v0187_memory_over_and_moves_nothing(self):
+        self._shared_transcripts()
+        self.legacy.mkdir(parents=True)
+        (self.legacy / "MEMORY.md").write_text("shared, older\n")
+        own = self.v187 / "round-clock"
+        (own / "sub").mkdir(parents=True)
+        (own / "MEMORY.md").write_text("- [a](a.md)\n")
+        (own / "a.md").write_text("round-clock's own note\n")
+        (own / "sub" / "b.md").write_text("note b\n")
+        other = self.v187 / "xmeo-v3"
+        other.mkdir()
+        (other / "MEMORY.md").write_text("xmeo's\n")
+        before = (self.tree(self.vol))
+        self.assertEqual(self.seed("round-clock"), "seeded:project-memory")
+        dst = self.base / "round-clock"
+        self.assertEqual(self.tree(dst / "memory"), self.tree(own))
+        # no transcript, no other project's anything
+        self.assertEqual(sorted(p.name for p in dst.iterdir()), ["memory"])
+        # nothing moved or changed: every file that was there is still there, unchanged
+        after = self.tree(self.vol)
+        for path, body in before.items():
+            self.assertEqual(after.get(path), body, path)
+        self.assertEqual(oct(dst.stat().st_mode & 0o777), "0o755")
+        self.assertEqual(oct((dst / "memory").stat().st_mode & 0o777), "0o755")
+        self.assertFalse((self.base / ".seed" / "round-clock").exists())
+
+    def test_without_a_v0187_memory_the_shared_memory_is_copied(self):
+        self._shared_transcripts()
+        self.legacy.mkdir(parents=True)
+        (self.legacy / "MEMORY.md").write_text("shared\n")
+        (self.v187 / "someone-else").mkdir(parents=True)
+        (self.v187 / "someone-else" / "MEMORY.md").write_text("not mine\n")
+        self.assertEqual(self.seed("round-clock"), "seeded:shared")
+        dst = self.base / "round-clock"
+        self.assertEqual(self.tree(dst), {"memory/MEMORY.md": "shared\n"})
+        self.assertEqual(self.tree(self.legacy), {"MEMORY.md": "shared\n"})
+
+    def test_later_runs_keep_the_directory_and_it_diverges(self):
         self.legacy.mkdir(parents=True)
         (self.legacy / "MEMORY.md").write_text("v1\n")
-        self.assertEqual(self.seed("a"), "seeded")
+        self.assertEqual(self.seed("a"), "seeded:shared")
         (self.legacy / "MEMORY.md").write_text("v2 from an old-version project\n")
-        (self.vol / "project-memory" / "a" / "own.md").write_text("a's own\n")
+        (self.base / "a" / "memory" / "own.md").write_text("a's own\n")
+        (self.base / "a" / "s1.jsonl").write_text("a's transcript\n")
         self.assertEqual(self.seed("a"), "exists")
-        self.assertEqual(self.tree(self.vol / "project-memory" / "a"),
-                         {"MEMORY.md": "v1\n", "own.md": "a's own\n"})
-        self.assertEqual(self.seed("b"), "seeded")
-        self.assertEqual(self.tree(self.vol / "project-memory" / "b"),
-                         {"MEMORY.md": "v2 from an old-version project\n"})
+        self.assertEqual(self.tree(self.base / "a"),
+                         {"memory/MEMORY.md": "v1\n", "memory/own.md": "a's own\n",
+                          "s1.jsonl": "a's transcript\n"})
+        self.assertEqual(self.seed("b"), "seeded:shared")
+        self.assertEqual(self.tree(self.base / "b"),
+                         {"memory/MEMORY.md": "v2 from an old-version project\n"})
 
-    def test_no_shared_memory_yet_creates_the_mountpoint_and_an_empty_directory(self):
-        self.assertEqual(self.seed("fresh"), "seeded")
-        self.assertTrue(self.legacy.is_dir())
-        self.assertEqual(list((self.vol / "project-memory" / "fresh").iterdir()), [])
+    def test_nothing_yet_creates_the_mountpoint_and_an_empty_directory(self):
+        self.assertEqual(self.seed("fresh"), "seeded:none")
+        self.assertTrue(self.shared.is_dir())
+        self.assertEqual([p.name for p in (self.base / "fresh").iterdir()], ["memory"])
+        self.assertEqual(list((self.base / "fresh" / "memory").iterdir()), [])
 
     def test_a_killed_seed_leaves_no_half_directory_and_is_redone(self):
-        self.legacy.mkdir(parents=True)
-        (self.legacy / "MEMORY.md").write_text("whole\n")
-        work = self.vol / "project-memory" / ".seed" / "k"
+        (self.v187 / "k").mkdir(parents=True)
+        (self.v187 / "k" / "MEMORY.md").write_text("whole\n")
+        work = self.base / ".seed" / "k"
         half = work / "XXabcd"
         half.mkdir(parents=True)
         (half / "partial.md").write_text("half\n")
@@ -251,18 +296,18 @@ class SeedScript(unittest.TestCase):
         os.utime(half, (hour_ago, hour_ago))
         running = work / "XXlive"  # a seed of the same key still being filled
         running.mkdir()
-        other = self.vol / "project-memory" / ".seed" / "k.other" / "XXefgh"
+        other = self.base / ".seed" / "k.other" / "XXefgh"
         other.mkdir(parents=True)
-        self.assertEqual(self.seed("k"), "seeded")
-        self.assertEqual(self.tree(self.vol / "project-memory" / "k"), {"MEMORY.md": "whole\n"})
+        self.assertEqual(self.seed("k"), "seeded:project-memory")
+        self.assertEqual(self.tree(self.base / "k"), {"memory/MEMORY.md": "whole\n"})
         self.assertFalse(half.exists(), "a killed seed's leftovers are cleared")
         self.assertTrue(running.is_dir(), "a seed that may still be running is not touched")
         self.assertTrue(other.is_dir(), "another key's seed in flight is not touched")
 
     def test_an_existing_directory_is_never_reseeded(self):
-        self.legacy.mkdir(parents=True)
-        (self.legacy / "MEMORY.md").write_text("shared\n")
-        own = self.vol / "project-memory" / "k"
+        (self.v187 / "k").mkdir(parents=True)
+        (self.v187 / "k" / "MEMORY.md").write_text("v187\n")
+        own = self.base / "k"
         own.mkdir(parents=True)
         self.assertEqual(self.seed("k"), "exists")
         self.assertEqual(list(own.iterdir()), [])
