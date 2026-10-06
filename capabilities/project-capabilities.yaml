@@ -43,8 +43,6 @@ profiles:
       - PROJECT_QUALITY_GATES
       - PROD_REQUIREMENTS
       - USAGE_PATTERNS
-      - META_SPEC
-      - META_PHASES
       - CAPABILITY_MANIFEST
       - EXECUTION_MODES
       - REASONING_PROFILES
@@ -247,16 +245,6 @@ docs:
     required: true
     ownership: scaffold
 
-  META_SPEC:
-    path: docs/META_SPEC.md
-    required: true
-    ownership: scaffold-internal
-
-  META_PHASES:
-    path: docs/META_PHASES.md
-    required: true
-    ownership: scaffold-internal
-
   CAPABILITY_MANIFEST:
     path: docs/CAPABILITY_MANIFEST.md
     required: true
@@ -276,12 +264,6 @@ docs:
     path: docs/ADR_TEMPLATE.md
     required: false
     ownership: scaffold
-
-  SELF_APPLICATION_EXAMPLE:
-    path: docs/SELF_APPLICATION_EXAMPLE.md
-    required: false
-    ownership: scaffold-internal
-    # scaffold-internal: describes the M7 self-improvement cycle; not included in downstream enrichment profiles
 
   COMPATIBILITY:
     path: docs/COMPATIBILITY.md
@@ -736,3 +718,18 @@ files:
     # ADR for the scaffold's own self-update channel design (stable/edge).
     # Status: Proposed. Records why a persisted channel exists and how
     # install.sh / self-update consume it. Not installed downstream.
+
+  # v0.18.6: retired docs, kept for provenance only (docs/archive/README.md).
+  # Nothing reads them and they never ship; the self-improvement pair and its
+  # worked example went dormant when phasekit moved to hand-built releases.
+  docs/archive/README.md:
+    ownership: scaffold-internal
+
+  docs/archive/META_SPEC.md:
+    ownership: scaffold-internal
+
+  docs/archive/META_PHASES.md:
+    ownership: scaffold-internal
+
+  docs/archive/SELF_APPLICATION_EXAMPLE.md:
+    ownership: scaffold-internal

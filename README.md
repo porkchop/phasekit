@@ -319,20 +319,12 @@ KICKOFF.md                        # entrypoint documentation
 | `docs/COMPATIBILITY.md` | Versioning policy and upgrade guidance |
 | `docs/REASONING_PROFILES.md` | When to use deeper reasoning per role |
 | `docs/USAGE_PATTERNS.md` | Workflow patterns for different project types |
-| `docs/META_SPEC.md` | Scaffold self-improvement specification |
-| `docs/META_PHASES.md` | Self-improvement phase plan |
+| `docs/RELEASING.md` | How a phasekit release is built, gated and tagged |
 | `docs/INSTALL_LIFECYCLE.md` | Install / upgrade / uninstall contract; "What to commit" guidance; ownership classes |
 
-## Scaffold self-improvement
+## Developing phasekit
 
-This scaffold can improve itself under the same workflow it provides to downstream repos.
-
-1. Review `docs/META_SPEC.md`, `docs/META_PHASES.md`, and `capabilities/project-capabilities.yaml`
-2. Start in audit mode from the earliest unapproved meta-phase
-3. Use planner + red-team for control-loop or packaging changes
-4. Require reviewer approval and skill validation for relevant phases
-
-See `docs/SELF_APPLICATION_EXAMPLE.md` for a worked example.
+phasekit is developed by hand-built releases: every change reaches every downstream project, so a release is built, gated and reviewed by hand and shipped as a tag (`docs/RELEASING.md`). No phase loop runs on this repository. The retired self-improvement plan is kept in `docs/archive/` for provenance.
 
 ## Prerequisites
 

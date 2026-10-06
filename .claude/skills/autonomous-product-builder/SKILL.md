@@ -27,8 +27,6 @@ Always read these if they exist:
 - `docs/QUALITY_GATES.md`
 - `docs/PROD_REQUIREMENTS.md`
 - `docs/USAGE_PATTERNS.md`
-- `docs/META_SPEC.md`
-- `docs/META_PHASES.md`
 - `capabilities/project-capabilities.yaml`
 
 If the repository includes `.claude/agents/`, use those project agents rather than inventing a new role structure.

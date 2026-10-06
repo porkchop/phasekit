@@ -1,6 +1,6 @@
 # Install Lifecycle
 
-This document describes how scaffold capabilities are installed into a downstream project, how to detect drift, how to upgrade, and how to uninstall cleanly. The contract is implemented in `scripts/enrich-project.py` and is governed by Phase M9 of the scaffold (`docs/META_PHASES.md`).
+This document describes how scaffold capabilities are installed into a downstream project, how to detect drift, how to upgrade, and how to uninstall cleanly. The contract is implemented in `scripts/enrich-project.py`.
 
 ## TL;DR
 
@@ -194,7 +194,7 @@ Everything the scaffold installs into the project, plus everything the workflow 
 These are runtime-only or per-user artifacts:
 
 - **`.claude/settings.local.json`** — per-user overrides (often permissive); not project-shared.
-- **`.scaffold/manifest.json.lock`** — fcntl.flock advisory lockfile; runtime-only.
+- **`.scaffold/manifest.json.lock`** — fcntl.flock advisory lockfile; runtime-only. Since v0.18.6 the engine excludes it itself (`.git/info/exclude`, where it creates the lock), the loop never stages it, and `phasekit upgrade` untracks a copy an older history committed (the file stays on disk). A `.gitignore` line for it is harmless.
 - **`*.scaffold-tmp`** — orphan temp files from atomic copy interrupts; swept by the engine on next run, but might briefly exist.
 
 ### Copy-pasteable `.gitignore` snippet
@@ -348,6 +348,5 @@ These are deferred to later sub-phases:
 ## See also
 
 - `docs/CAPABILITY_MANIFEST.md` — manifest schema and ownership taxonomy
-- `docs/META_PHASES.md` §M9 — phase definition and acceptance criteria
 - `artifacts/decision-memo.md` — full design rationale (planning gate output)
 - `artifacts/red-team-review.md`, `artifacts/red-team-review-v2.md` — adversarial reviews of the design

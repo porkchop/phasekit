@@ -3,8 +3,8 @@
 
 Scope decision recorded here because it is a product decision, not a build
 detail: this ships as a capability-profile OPTION (`with-mutation`), never as a
-universal gate. phasekit is a public `curl | bash` tool whose META_SPEC now
-states it must work for someone with no orchestration layer; mandating a heavy
+universal gate. phasekit is a public `curl | bash` tool that must work for someone
+with no orchestration layer; mandating a heavy
 practice for every downstream user is a far bigger claim than "Foundry does
 this". The tests below pin the opt-in-ness as hard as the behaviour.
 

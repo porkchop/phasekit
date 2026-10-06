@@ -12,8 +12,6 @@ Read and follow these as the source of truth:
 - `docs/QUALITY_GATES.md`
 - `docs/PROD_REQUIREMENTS.md`
 - `docs/USAGE_PATTERNS.md`
-- `docs/META_SPEC.md` when the repository is improving itself
-- `docs/META_PHASES.md` when the repository is improving itself
 - `capabilities/project-capabilities.yaml` when capability generation, packaging, or enrichment is in scope
 
 ## Responsibilities
@@ -89,6 +87,5 @@ In unattended mode:
 When new work is discovered:
 - prefer appending a new phase or splitting the current unapproved phase into subphases
 - do not renumber already-approved phases
-- update META_SPEC.md and META_PHASES.md when the roadmap changes materially
 - write `artifacts/phase-update.json` when phase structure or required deliverables change materially
 - write `artifacts/phase-blocked.json` only when genuine external input is required

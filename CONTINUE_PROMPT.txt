@@ -11,8 +11,6 @@ Before doing substantive work:
 Read and follow, in this order, if present:
 - .claude/CLAUDE.md
 - CLAUDE.md
-- docs/META_SPEC.md
-- docs/META_PHASES.md
 - docs/QUALITY_GATES.md
 - docs/project/QUALITY_GATES.md (this project's own gates; they add to the scaffold's)
 - docs/CAPABILITY_MANIFEST.md
@@ -26,7 +24,7 @@ Operating rules:
 - The loop owns every commit: never run git commands that write history, refs or the index (commit, add, rm, mv, reset, restore, checkout, switch, stash, merge, rebase, cherry-pick, revert, tag, branch -f/-D, update-ref, worktree, push) — the command guard refuses them. Write your verdict artifact; the loop commits it, verify-gated. To undo an edit of your own, edit the file back (`git show HEAD:<path> > <path>` restores the committed bytes).
 - Tests read the declared surface: a test reads this project's own tree and phasekit's DECLARED surface (`contracts/interface.json` `facts`, or `bash scripts/phasekit.sh facts --json`), never scaffold-owned files (the vendored loop and scripts, the hooks, the scaffold docs); a fact a test needs that the surface lacks is a request to phasekit, not a parse (docs/QUALITY_GATES.md "Tests read the declared surface").
 - Scratch files go in artifacts/scratch/ (ignored, never committed, cleared when an iteration starts) or /tmp — never elsewhere in the tree: the loop commits everything else it finds.
-- Start from the earliest unapproved phase or meta-phase
+- Start from the earliest unapproved phase
 - Work in audit-first mode
 - Prefer approval over rewrite when existing implementation satisfies the phase
 - Prefer minimal, backward-compatible fixes when a phase is partially complete
@@ -70,7 +68,7 @@ First task:
 1. If `artifacts/session-handoff.json` exists, it is the previous session's baton — read it first to orient (last approved phase, in-flight work, whether verify passed), then DELETE the file after orienting. Its `note` says which flavor it is: a wrap-up baton (the session ended deliberately) or a dead-man baton (the session was KILLED or exited mid-iteration — treat the dirty tree as that iteration's unverified work-in-progress: verify what is green and keep it; finish the rest or edit it back; never read it as intentional resting state). It is ephemeral, not a durable record (durable learnings belong in docs/LEARNINGS.md).
 2. If `artifacts/phase-verify-failed.json` exists, the previous iteration's phase-approval or phase-update commit was blocked by the pre-commit verification gate. Treat fixing that failure as the highest-priority work for this iteration — read the artifact's `command`, `log_tail`, and `attempts` fields, then fix the underlying problem before doing any new phase work. Re-write whichever signal artifact you wrote previously (`phase-approval.json` or `phase-update.json`, preserving the same phase identity) when the fix is in place; the wrapper will retry the commit. If the refused commit was a COMPLETION, `artifacts/project-complete.json` is on disk either way: UNCOMMITTED (its own commit was refused — the loop kept it for you: EDIT that record, never rebuild it from an archive or a previous record, and re-write it once the gate is green; until you re-write it, it claims nothing), or already COMMITTED (the gate refused the tree around it — artifacts/boundary-state.json `unlanded` may name the paths): then leave the record as it is — never delete, rebuild or commit it — fix what the gate names and end your turn; the loop lands the rest, verify-gated. The same file also carries refusals that are not the test gate — the label says which (a credential-shaped line in docs/LEARNINGS*.md, a path git cannot stage, git refusing the commit): fix what it names. If the artifact carries `gate_footprint`, the gate itself wrote to the tree — the listed paths — and the wrapper restored them and failed the gate (a verify gate is read-only over tracked files and writes nothing untracked; gate output belongs under an ignored path): fix the GATE as `gate_footprint_recipe` says (write its output under `artifacts/logs/` or another ignored path; a formatter runs in check mode, never with a write flag), not the listed files.
 3. Read `artifacts/phase-approval.json` to find the last approved phase
-4. Identify the next unapproved phase from docs/META_PHASES.md or docs/PHASES.md
+4. Identify the next unapproved phase from docs/PHASES.md
 5. List the minimum work needed for that phase
 6. Execute only that phase
 7. Stop after approval, phase update, blocker, or completion

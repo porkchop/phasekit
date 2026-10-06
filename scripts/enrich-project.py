@@ -1277,6 +1277,12 @@ def cmd_upgrade(target_dir, profile=None, dry_run=False, yes=False, no_lock=Fals
         print(f"--upgrade: {e}", file=sys.stderr)
         return 1
 
+    # Nothing to upgrade and nothing to recover: say so without taking the lock,
+    # which would create .scaffold/ in a repository that has none (v0.18.6).
+    if not (target / ".scaffold" / "manifest.json").is_file() and _pending_upgrade(target) is None:
+        print(f"No .scaffold/manifest.json in {target}; run --reconcile first.",
+              file=sys.stderr)
+        return 1
     with target_lock(target, no_lock=no_lock):
         if dry_run and _pending_upgrade(target):
             print("--upgrade: an interrupted upgrade is pending for this project; run "
@@ -2301,6 +2307,118 @@ def upgrade_commit_paths(plans):
     return sorted(touched)
 
 
+# The lock file is runtime-only (v0.18.6). docs/INSTALL_LIFECYCLE.md always
+# said to ignore it and nothing did, so the first `git add -A` after an enrich
+# tracked it: 8 of 9 fleet projects carried it (2026-10-06). The engine now
+# excludes it where it creates it, in .git/info/exclude (repo-local, ships
+# nothing, never collides with a project's own .gitignore), and an upgrade
+# untracks a tracked copy in its own commit (_commit_paths).
+SCAFFOLD_LOCK_REL = ".scaffold/manifest.json.lock"
+
+
+def _git_out(target, *args):
+    """stdout of `git -C target ARGS` stripped, or None when git fails."""
+    try:
+        r = subprocess.run(["git", "-C", str(target), *args], capture_output=True, text=True)
+    except OSError:
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def scaffold_lock_pattern(target):
+    """(work-tree root, the lock's path relative to it) for the work tree
+    holding `target` — the line .git/info/exclude needs — or (None, None)."""
+    top = _git_out(target, "rev-parse", "--show-toplevel")
+    if not top:
+        return None, None
+    try:
+        rel = Path(target).resolve().relative_to(Path(top).resolve())
+    except ValueError:
+        return None, None
+    rel = rel.as_posix()
+    return top, SCAFFOLD_LOCK_REL if rel == "." else f"{rel}/{SCAFFOLD_LOCK_REL}"
+
+
+def exclude_scaffold_lock(target):
+    """Make git ignore the lock in this clone. Returns the lock's work-tree
+    path when git now ignores it, else None. Best-effort: a failure here
+    never stops the operation that holds the lock."""
+    top, pattern = scaffold_lock_pattern(target)
+    if pattern is None:
+        return None
+    exclude = _git_out(top, "rev-parse", "--git-path", "info/exclude")
+    if exclude:
+        path = Path(top) / exclude  # relative to the work tree unless absolute
+        try:  # bytes: an exclude file need not be UTF-8 (review F4)
+            data = path.read_bytes() if path.is_file() else b""
+            line = pattern.encode()
+            if line not in data.splitlines():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("ab") as f:
+                    f.write((b"" if not data or data.endswith(b"\n") else b"\n") + line + b"\n")
+        except (OSError, ValueError):
+            pass
+    ignored = subprocess.run(["git", "-C", top, "check-ignore", "-q", "--no-index", "--", pattern],
+                             capture_output=True)
+    return pattern if ignored.returncode == 0 else None
+
+
+LOCK_UNTRACK_NOTE = (f"Untracks {SCAFFOLD_LOCK_REL}: the engine's runtime-only flock target "
+                     "(kept on disk, excluded in .git/info/exclude; phasekit v0.18.6).")
+
+
+def _stage_lock_untracking(target, git, paths):
+    """Stage the untracking of a committed lock file (v0.18.6) when it can ride
+    this upgrade's commit safely; True when it was staged.
+
+    Only a lock in HEAD is untracked (a fresh one is kept out by the exclude),
+    and only when (a) git ignores the file once it is untracked — otherwise the
+    upgrade would trade a tracked file for an untracked `??` one, a dirty tree
+    — and (b) the index holds nothing beyond this upgrade's own paths. A
+    project's staged work is never swept into an upgrade commit; the lock then
+    stays tracked, untouched, and the next upgrade with a clean index untracks
+    it."""
+    if git("cat-file", "-e", f"HEAD:{SCAFFOLD_LOCK_REL}").returncode != 0:
+        return False
+    # A plain commit would CONCLUDE an operator's merge, cherry-pick or revert
+    # in progress (review F3); `--only` refuses that, so the lock waits.
+    for ref, what in (("MERGE_HEAD", "merge"), ("CHERRY_PICK_HEAD", "cherry-pick"),
+                      ("REVERT_HEAD", "revert")):
+        if git("rev-parse", "-q", "--verify", ref).returncode == 0:
+            print(f"  note: {SCAFFOLD_LOCK_REL} stays tracked this time: a {what} is in "
+                  "progress. The next upgrade untracks it.", file=sys.stderr)
+            return False
+    if exclude_scaffold_lock(target) != SCAFFOLD_LOCK_REL:
+        print(f"  note: {SCAFFOLD_LOCK_REL} stays tracked: git would not ignore it "
+              f"once untracked (.git/info/exclude unwritable?).", file=sys.stderr)
+        return False
+    if git("rm", "--cached", "-q", "--ignore-unmatch", "--", SCAFFOLD_LOCK_REL).returncode != 0:
+        return False
+    # Plumbing, not `git diff`: porcelain diff applies diff.renames and
+    # diff.ignoreSubmodules, which can fold a project's staged deletion into a
+    # rename onto one of this upgrade's paths and hide it here (review F1).
+    staged = git("diff-index", "--cached", "--no-renames", "--ignore-submodules=none",
+                 "--name-only", "-z", "HEAD").stdout.split("\0")
+    others = sorted(p for p in staged if p and p not in set(paths) and p != SCAFFOLD_LOCK_REL)
+    if others:
+        git("reset", "-q", "--", SCAFFOLD_LOCK_REL)
+        print(f"  note: {SCAFFOLD_LOCK_REL} stays tracked this time: the index holds "
+              f"{len(others)} staged path(s) that are not this upgrade's (first: {others[0]}), "
+              "and an upgrade commit never carries a project's staged work. The next "
+              "upgrade with a clean index untracks it.", file=sys.stderr)
+        return False
+    return True
+
+
+def _undo_lock_untracking(git, changed):
+    """Put a staged lock untracking back when its commit cannot be made, so it
+    never leaves `D lock` staged (a dirty tree) on its own (review F2). True
+    when the lock was the whole change: the upgrade then has nothing to commit,
+    keeps no pending record and does not exit 5."""
+    git("reset", "-q", "--", SCAFFOLD_LOCK_REL)
+    return all(p == SCAFFOLD_LOCK_REL for p in changed)
+
+
 def _commit_paths(target, paths, message):
     target = Path(target)
     if not (target / ".git").exists():
@@ -2332,10 +2450,13 @@ def _commit_paths(target, paths, message):
               file=sys.stderr)
         return "stage-failed"
 
+    untrack_lock = _stage_lock_untracking(target, git, paths)
+
     # Which of them actually differ from HEAD. An idempotent re-upgrade reaches
     # here with nothing to say and must not make an empty commit.
+    wanted = set(paths) | ({SCAFFOLD_LOCK_REL} if untrack_lock else set())
     changed = [p for p in git("diff", "--cached", "--name-only").stdout.split()
-               if p in set(paths)]
+               if p in wanted]
     if not changed:
         return "nothing"
 
@@ -2359,6 +2480,8 @@ def _commit_paths(target, paths, message):
             err = r.stderr.strip().splitlines()
             detail = next((line for line in err if line.startswith(("fatal:", "error:"))),
                           err[-1] if err else "no git identity")
+            if untrack_lock and _undo_lock_untracking(git, changed):
+                return "nothing"
             print(f"  note: could not commit the upgrade (no git identity: {detail}); "
                   f"the files are installed but the tree is left dirty — set "
                   f"user.name/user.email and commit them.", file=sys.stderr)
@@ -2371,9 +2494,21 @@ def _commit_paths(target, paths, message):
     # which is worse than the dirty tree this feature exists to fix.
     # `--only` commits exactly these paths and leaves the rest of the index
     # staged and uncommitted.
-    r = git("commit", "--only", "-m", message, "--", *changed)
+    #
+    # The one exception is untracking the lock (v0.18.6): `--only` takes each
+    # path's WORKING-TREE state, so it would put the lock straight back.
+    # _stage_lock_untracking admits it only when the index holds nothing but
+    # this upgrade's own paths, so a plain commit is exactly these paths too.
+    if untrack_lock:
+        r = git("commit", "-m", message, "-m", LOCK_UNTRACK_NOTE)
+    else:
+        r = git("commit", "--only", "-m", message, "--", *changed)
     if r.returncode != 0:
         detail = (r.stderr.strip().splitlines() or [""])[-1]
+        if untrack_lock and _undo_lock_untracking(git, changed):
+            print(f"  note: could not commit the lock's untracking ({detail}); it stays "
+                  "tracked and the tree is unchanged.", file=sys.stderr)
+            return "nothing"
         print(f"  note: could not commit the upgrade ({detail}); "
               f"the files are installed but the tree is left dirty.", file=sys.stderr)
         return "commit-failed"
@@ -2630,6 +2765,7 @@ def target_lock(target_dir, no_lock=False):
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / "manifest.json.lock"
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    exclude_scaffold_lock(target_dir)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -2901,7 +3037,7 @@ DOC_TEMPLATE_MAP = {
 
 # Docs that exist in the scaffold but never install downstream (matches
 # the existing cmd_enrich filter).
-SCAFFOLD_ONLY_DOCS = {"META_SPEC", "META_PHASES", "CAPABILITY_MANIFEST"}
+SCAFFOLD_ONLY_DOCS = {"CAPABILITY_MANIFEST"}
 
 # Scripts in the manifest's `scripts:` section that are workflow-relevant
 # downstream (not all scaffold scripts; matches cmd_enrich's filter).

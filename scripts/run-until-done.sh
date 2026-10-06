@@ -198,7 +198,8 @@ ensure_transients_excluded() {
   mkdir -p "$(dirname "$exclude_file")" 2>/dev/null || return 0
   # v0.18.2: artifacts/scratch/ is the session's sanctioned scratch space —
   # ignored, never committed, cleared when an iteration starts.
-  local lines=("artifacts/logs/" "artifacts/wrapup-requested" "artifacts/scratch/")
+  # v0.18.6: the engine's runtime-only flock target (.scaffold/), never committed.
+  local lines=("artifacts/logs/" "artifacts/wrapup-requested" "artifacts/scratch/" ".scaffold/manifest.json.lock")
   for sig in "${HIDDEN_TRANSIENTS[@]}"; do
     lines+=("artifacts/$sig")
   done
@@ -237,6 +238,10 @@ unstage_transient_adds() {
       git reset -q -- "$ARTIFACTS_DIR/$sig" 2>/dev/null || true
     fi
   done
+  # v0.18.6: nor the engine's flock target — fresh adds only; a copy an older
+  # history tracks is `phasekit upgrade`'s to untrack, in its own commit.
+  git cat-file -e "HEAD:.scaffold/manifest.json.lock" 2>/dev/null \
+    || git reset -q -- "$ROOT_DIR/.scaffold/manifest.json.lock" 2>/dev/null || true
   return 0
 }
 
@@ -861,7 +866,7 @@ run_contracts_gate() {
   # 1. INERT without a declaration. A repo with no contracts.yaml never reaches
   #    the checker's failure paths, so phasekit keeps working with no
   #    orchestrator at all — a public `curl | bash` tool cannot make Foundry a
-  #    prerequisite (docs/META_SPEC.md).
+  #    prerequisite.
   # 2. Runs BEFORE the VERIFY_SKIP bypass. VERIFY_SKIP is the per-iteration
   #    hatch for red TDD commits and docs-only phases, and a builder sets it
   #    routinely; letting it also switch off contract authenticity would neuter
@@ -3248,7 +3253,7 @@ phasekit_trailers() {
 # `## Phase 193 continuation — …` is not a heading of phase 193.
 _phase_plan_py() {
   # $1 = title | check, $2 = phase id, $3 = since (check only). Reads the plan
-  # from docs/PHASES.md (else docs/META_PHASES.md); check reads the changed
+  # from docs/PHASES.md; check reads the changed
   # paths from `git diff --cached` since $3. Prints the title (or nothing),
   # or the plan_paths JSON object.
   python3 - "$@" <<'PLAN_PY'
@@ -3260,10 +3265,7 @@ IMPLICIT = ["artifacts/**", "docs/PHASES.md", "docs/LEARNINGS*.md"]
 CAP = 100
 
 def plan_file():
-    for rel in ("docs/PHASES.md", "docs/META_PHASES.md"):
-        if os.path.isfile(rel):
-            return rel
-    return None
+    return "docs/PHASES.md" if os.path.isfile("docs/PHASES.md") else None
 
 # a record ABOUT the phase, not its plan: "progress record …", "status
 # update", or the bare word — never a title like "Status page" (round 3)

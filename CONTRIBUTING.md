@@ -1,12 +1,11 @@
 # Contributing
 
-Thanks for your interest. This repo is a phase-gated development scaffold; it improves itself under the same workflow it gives to downstream projects. Please read this before opening a PR.
+Thanks for your interest. This repo is a phase-gated development scaffold for downstream projects; phasekit itself is developed by hand-built releases (`docs/RELEASING.md`), not by a phase loop. Please read this before opening a PR.
 
 ## Before you start
 
-1. Read `README.md`, `AGENTS.md`, and `docs/META_SPEC.md`.
-2. Check `docs/META_PHASES.md` to see if your idea fits an existing phase or needs a new one.
-3. For non-trivial proposals, open an issue first describing the goal, tradeoffs, and rollback path.
+1. Read `README.md`, `AGENTS.md`, and `docs/RELEASING.md`.
+2. For non-trivial proposals, open an issue first describing the goal, tradeoffs, and rollback path.
 
 ## Ground rules
 
@@ -28,9 +27,8 @@ These changes are subject to the **control-loop change gate** (`docs/QUALITY_GAT
 
 These should also include a planning memo (`artifacts/decision-memo.md`) and ideally an ADR under `docs/adr/`.
 
-## Adding a new phase, profile, agent, or skill
+## Adding a new profile, agent, or skill
 
-- **New phase:** append to `docs/META_PHASES.md`. Do not renumber existing approved phases.
 - **New profile:** add to `capabilities/project-capabilities.yaml` with `extends: default`. See `docs/EXTENSION_PATTERNS.md`.
 - **New agent:** add to `.claude/agents/` and register in `capabilities/project-capabilities.yaml`. Follow the role-description style of existing agents.
 - **New skill:** follow the skill anatomy (Overview / When to Use / Process / Common Rationalizations / Red Flags / Verification). Place under `.claude/skills/<name>/SKILL.md`. Validate via `python3 scripts/validate-skill.py`.

@@ -33,11 +33,10 @@ Use when the main product exists and quality/readiness are the focus.
 
 Use when the repository is improving its own agents, hooks, settings, workflow docs, or packaging flow.
 
-1. Read `docs/META_SPEC.md` and `docs/META_PHASES.md`.
-2. Start in audit mode.
-3. Use planner and red-team for control-loop or packaging changes.
-4. Require reviewer approval.
-5. Require skill validation/packaging when relevant.
+1. Start in audit mode.
+2. Use planner and red-team for control-loop or packaging changes.
+3. Require reviewer approval.
+4. Require skill validation/packaging when relevant.
 
 ## Mode 5: Capability-packager
 

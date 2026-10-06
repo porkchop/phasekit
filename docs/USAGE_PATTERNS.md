@@ -58,10 +58,9 @@ Workflow:
 Use when this repository is evolving its own agents, hooks, settings, workflow docs, or generation logic.
 
 Workflow:
-1. read `docs/META_SPEC.md` and `docs/META_PHASES.md`
-2. start in audit mode
-3. use planner and red-team for any control-loop or packaging changes
-4. require reviewer approval and, when relevant, skill validation + packaging before acceptance
+1. start in audit mode
+2. use planner and red-team for any control-loop or packaging changes
+3. require reviewer approval and, when relevant, skill validation + packaging before acceptance
 
 ## Pattern 7 - Capability-packager mode
 Use when the scaffold should generate enrichment assets for another repository.

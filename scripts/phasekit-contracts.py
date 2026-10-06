@@ -28,7 +28,7 @@ copy to go green. A forged copy simply does not survive the next build.
 
 STANDALONE IS A HARD CONSTRAINT
 -------------------------------
-phasekit is a public tool with no orchestrator required (docs/META_SPEC.md).
+phasekit is a public tool with no orchestrator required.
 So the trigger for refusing is a REPO-OWNED DECLARATION, never the mount's
 absence:
 

@@ -4,14 +4,14 @@ This file provides guidance to AI coding agents (Claude Code, Cursor, Copilot, O
 
 ## Repository overview
 
-A reusable Claude Code project scaffold for methodical, phase-gated software delivery. This repo is a development *operating system*: it enriches downstream projects with subagents, settings, hooks, skills, capability profiles, and an audit-first workflow. It also improves itself under the same workflow.
+A reusable Claude Code project scaffold for methodical, phase-gated software delivery. This repo is a development *operating system*: it enriches downstream projects with subagents, settings, hooks, skills, capability profiles, and an audit-first workflow.
 
-See `README.md` for product detail and `docs/META_SPEC.md` for the self-improvement specification.
+See `README.md` for product detail and `docs/RELEASING.md` for how a release is built and gated.
 
 ## Core operating rules
 
 - Work in **audit-first mode** — assume code may already exist; verify before rewriting.
-- Start from the **earliest unapproved phase** in `docs/META_PHASES.md` (for self-improvement) or `docs/PHASES.md` (for downstream projects).
+- phasekit is developed by **hand-built releases** (`docs/RELEASING.md`, plus Foundry's `phasekit-release` runbook); no phase loop runs on this repository. Downstream projects start from the earliest unapproved phase in their `docs/PHASES.md`.
 - Prefer **minimal, backward-compatible** changes.
 - **Stop after writing `artifacts/phase-approval.json`** — do not proceed past a phase until the repository has been committed externally.
 - **The loop owns every commit**: never run git commands that write history, refs or the index (commit, add, rm, mv, reset, restore, checkout, switch, stash, merge, rebase, cherry-pick, revert, tag, branch -f/-D, update-ref, worktree, push) — the command guard refuses them. Write your verdict artifact; the loop commits it, verify-gated. To undo an edit of your own, edit the file back (`git show HEAD:<path> > <path>` restores the committed bytes).
@@ -36,8 +36,7 @@ Each phase ends with `artifacts/phase-approval.json` and an external commit. The
 
 Before non-trivial work, read:
 
-- `docs/META_SPEC.md` — what this scaffold is and what it must do
-- `docs/META_PHASES.md` — phase definitions for scaffold self-improvement
+- `docs/RELEASING.md` — how a release is built, gated and tagged
 - `docs/QUALITY_GATES.md` — universal/testing/DRY/drift/planning/control-loop/commit gates
 - `docs/CAPABILITY_MANIFEST.md` — manifest schema and profile resolution
 - `capabilities/project-capabilities.yaml` — the single source of truth for profiles

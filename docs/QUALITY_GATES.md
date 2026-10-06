@@ -667,7 +667,7 @@ If the new work is small, backward-compatible, and does not require external inp
 ### Major but self-resolvable discovered work
 If the new work is substantial but can be resolved using existing repo context and subagents:
 - invoke strategy-planner and architecture-red-team as needed
-- update META_SPEC.md, META_PHASES.md, ADRs, or related docs
+- update ADRs or related docs
 - split the phase into subphases or append follow-on phases as needed
 - do not ask the user for confirmation merely to continue planning
 - write `artifacts/phase-update.json` if the phase plan changed materially

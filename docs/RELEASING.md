@@ -131,8 +131,7 @@ moved" from "nobody looked".
 Pushing the tag is the release action: new installs (`install.sh`) and `phasekit self-update` track the highest `v*` tag, and the loop nudge / `--check-version` compare against it. Until a tag is pushed, nothing downstream sees the change.
 
 There is no `CHANGELOG.md` yet; the annotated tag message and `git log` are the
-record. (A changelog + `--upgrade --to vX.Y.Z` is tracked as future work in
-`docs/META_PHASES.md`.)
+record.
 
 ## How downstream discovers updates
 
