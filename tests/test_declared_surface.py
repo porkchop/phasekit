@@ -85,6 +85,12 @@ def synthesize(pattern):
     return "".join(out)
 
 
+
+def _is_session(argv):
+    """The session's `docker run`, not v0.18.7's memory-preparing one before it
+    (the session is the run that mounts the project at /workspace)."""
+    return any(a.endswith(":/workspace") for a in argv)
+
 class _Gates(unittest.TestCase):
     """post_verify_commit_gates, the real function, in a scratch repository."""
 
@@ -416,7 +422,7 @@ class Container(unittest.TestCase):
                     "HOME": str(tmp / "home")}, **extra)
         p = subprocess.run(["bash", str(CONTAINER), "shell"], capture_output=True, text=True, env=env)
         runs = [b.strip().splitlines() for b in log.read_text().split("---\n") if b.strip()]
-        runs = [c for c in runs if c and c[0] == "run"]
+        runs = [c for c in runs if c and c[0] == "run" and _is_session(c)]
         self.assertEqual(len(runs), 1, p.stdout + p.stderr)
         return p, runs[0]
 

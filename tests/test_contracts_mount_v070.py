@@ -66,6 +66,12 @@ def _write_provider(root: Path, entries) -> Path:
     return root
 
 
+
+def _is_session(argv):
+    """The session's `docker run`, not v0.18.7's memory-preparing one before it
+    (the session is the run that mounts the project at /workspace)."""
+    return any(a.endswith(":/workspace") for a in argv)
+
 class ProviderIndexTest(unittest.TestCase):
     def test_absent_mount_is_not_an_error(self):
         """No provider is the ordinary standalone case, never a failure."""
@@ -263,7 +269,7 @@ class ContainerSetupArgvTest(unittest.TestCase):
                 for block in log.read_text(encoding="utf-8").split("---\n")
                 if block.strip()
             ] if log.exists() else []
-            return proc, [c for c in calls if c and c[0] == "run"]
+            return proc, [c for c in calls if c and c[0] == "run" and _is_session(c)]
 
     def _baseline_argv(self):
         proc, runs = self._docker_run_argv({})

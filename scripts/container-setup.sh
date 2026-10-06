@@ -78,6 +78,134 @@ COMMAND="${1:-build}"
 # way to name it. Must match DEFAULT_MOUNT_DIR in scripts/phasekit-contracts.py.
 CONTRACTS_CONTAINER_DIR="/contracts"
 
+# Per-project auto-memory (v0.18.7). Every project is mounted at /workspace and
+# every session shares one config volume, so Claude Code's auto-memory —
+# <config>/projects/-workspace/memory/, keyed by the working directory — was
+# ONE directory for every project: each project's sessions read and wrote the
+# others' notes (2026-10-06: 531 files, 2.5 MB, written by the whole fleet).
+# The volume is shared by concurrent sessions, so a symlink inside it cannot
+# send different containers to different places. Instead each session gets
+# its own directory of the same volume MOUNTED over that path (docker's
+# volume-subpath, Docker >= 26 / API 1.45): project-memory/<key>, where <key>
+# is this checkout's directory name. /workspace, the volume and
+# CLAUDE_CONFIG_DIR are unchanged, and a host session never runs this script.
+#
+# The shared directory stays where it is, as the legacy copy: never moved,
+# never deleted. A project's own directory is seeded with a copy of it the
+# first time the project runs (atomically: a killed seed leaves no half
+# directory), and the copies diverge from then on. Own memory or none, never
+# another project's: when the directory cannot be prepared, or docker is too
+# old for a subpath, the session gets an empty throwaway memory (tmpfs) and a
+# warning. The key is the directory NAME, so two checkouts with one name share
+# a memory (the fleet keeps one checkout per project under one directory).
+CLAUDE_CONFIG_CONTAINER_DIR="/home/node/.claude"
+CLAUDE_MEMORY_CONTAINER_DIR="$CLAUDE_CONFIG_CONTAINER_DIR/projects/-workspace/memory"
+PROJECT_MEMORY_SUBDIR="project-memory"
+PROJECT_MEMORY_MIN_API="1.45"
+# Run by `sh` in a throwaway container: $1 = the key, $2 = where the config
+# volume is mounted. Prints `seeded` or `exists`.
+PROJECT_MEMORY_SEED_SH='set -eu
+key=$1; vol=$2
+legacy="$vol/projects/-workspace/memory"
+base="$vol/'"$PROJECT_MEMORY_SUBDIR"'"
+dst="$base/$key"
+# The mountpoint must exist before docker mounts over it: docker would create
+# it as the daemon user, and a non-root session could then not write beside it.
+mkdir -p "$legacy" "$base"
+if [ -d "$dst" ]; then
+  echo exists
+else
+  work="$base/.seed/$key"
+  mkdir -p "$work"
+  # A killed seed leaves its directory here: cleared once it is an hour old,
+  # never while another run may still be filling it.
+  find "$work" -mindepth 1 -maxdepth 1 -mmin +60 -exec rm -rf {} +
+  tmp=$(mktemp -d "$work/XXXXXX")
+  cp -R "$legacy/." "$tmp/"
+  chmod 755 "$tmp"
+  if mv -T "$tmp" "$dst" 2>/dev/null; then
+    echo seeded
+  else
+    rm -rf "$tmp"
+    [ -d "$dst" ]
+    echo exists
+  fi
+  rmdir "$work" "$base/.seed" 2>/dev/null || true
+fi'
+PROJECT_MEMORY_ARGS=()
+
+project_memory_key() {
+  local k
+  k="$(basename "$ROOT_DIR")"
+  k="${k//[^A-Za-z0-9._-]/_}"
+  k="${k#"${k%%[!.]*}"}"   # no leading dot: never `.`, `..` or a hidden name
+  [[ -n "$k" ]] || k="_default"
+  printf '%s' "$k"
+}
+
+# True unless an API version docker reports — the client's or the server's,
+# whichever is lower — is older than the subpath minimum (an unreadable one is
+# tried; docker then reports its own error).
+docker_supports_volume_subpath() {
+  local v maj min
+  for v in $(docker version --format '{{.Client.APIVersion}} {{.Server.APIVersion}}' \
+               2>/dev/null || true); do
+    [[ "$v" =~ ^([0-9]+)\.([0-9]+)$ ]] || continue
+    maj="${BASH_REMATCH[1]}"; min="${BASH_REMATCH[2]}"
+    if (( maj < ${PROJECT_MEMORY_MIN_API%%.*} \
+          || (maj == ${PROJECT_MEMORY_MIN_API%%.*} && min < ${PROJECT_MEMORY_MIN_API#*.}) )); then
+      return 1
+    fi
+  done
+  return 0
+}
+
+# Sets PROJECT_MEMORY_ARGS to this session's memory mount. $1 = the docker
+# --user spec ("" = the image's own user): the directory is created by the
+# user the session runs as, with the volume where the session mounts it (so a
+# fresh volume is first populated, and owned, as the session sees it).
+project_memory_mount() {
+  local user_spec="$1" key out
+  key="$(project_memory_key)"
+  local fallback=(--mount "type=tmpfs,dst=$CLAUDE_MEMORY_CONTAINER_DIR,tmpfs-mode=1777")
+  local prep=(--rm --network none --cap-drop=ALL
+              -v "$CLAUDE_VOLUME":"$CLAUDE_CONFIG_CONTAINER_DIR" --entrypoint /bin/sh)
+  if [[ -n "$user_spec" ]]; then
+    prep+=(--user "$user_spec")
+    if [[ "$user_spec" == "0:0" ]]; then
+      prep+=(--cap-add=DAC_OVERRIDE)
+    fi
+  fi
+  # Prepared even when the mount below cannot be used: it also creates the
+  # mountpoint the tmpfs needs, as the session's user.
+  if ! out="$(docker run "${prep[@]}" "$IMAGE_NAME" -c "$PROJECT_MEMORY_SEED_SH" sh "$key" \
+                "$CLAUDE_CONFIG_CONTAINER_DIR" 2>&1)"; then
+    echo "container: auto-memory: could not prepare $PROJECT_MEMORY_SUBDIR/$key in '$CLAUDE_VOLUME' (${out:0:200}); this session's memory is empty and not kept" >&2
+    PROJECT_MEMORY_ARGS=("${fallback[@]}")
+    return 0
+  fi
+  if ! docker_supports_volume_subpath; then
+    echo "container: auto-memory: docker's API is older than $PROJECT_MEMORY_MIN_API (no volume-subpath); this session's memory is empty and not kept — upgrade Docker for per-project memory" >&2
+    PROJECT_MEMORY_ARGS=("${fallback[@]}")
+    return 0
+  fi
+  if [[ "$CLAUDE_VOLUME" == *,* ]]; then
+    echo "container: auto-memory: '$CLAUDE_VOLUME' contains a comma, which a --mount value cannot carry; this session's memory is empty and not kept" >&2
+    PROJECT_MEMORY_ARGS=("${fallback[@]}")
+    return 0
+  fi
+  if [[ "$CLAUDE_VOLUME" == /* ]]; then
+    # A host directory used as the config "volume": the same layout, bound.
+    PROJECT_MEMORY_ARGS=(--mount "type=bind,src=$CLAUDE_VOLUME/$PROJECT_MEMORY_SUBDIR/$key,dst=$CLAUDE_MEMORY_CONTAINER_DIR")
+  else
+    PROJECT_MEMORY_ARGS=(--mount "type=volume,src=$CLAUDE_VOLUME,dst=$CLAUDE_MEMORY_CONTAINER_DIR,volume-subpath=$PROJECT_MEMORY_SUBDIR/$key")
+  fi
+  case "$out" in
+    *seeded*) echo "container: auto-memory: $PROJECT_MEMORY_SUBDIR/$key (first run: seeded with a copy of the shared memory)" ;;
+    *)        echo "container: auto-memory: $PROJECT_MEMORY_SUBDIR/$key" ;;
+  esac
+}
+
 # Resolve the container user (see header docs).
 #
 # The image normally runs as the non-root `node` user (UID 1000). That is the
@@ -413,6 +541,15 @@ run_container() {
     export GITHUB_TOKEN
     docker_args+=(-e GITHUB_TOKEN)
   fi
+
+  # Per-project auto-memory (v0.18.7; see PROJECT_MEMORY_SEED_SH above). Last,
+  # after every refusal above, so a refused session prepares nothing.
+  local memory_user="$CONTAINER_USER"
+  if [[ "$memory_user" == "root" ]]; then
+    memory_user="0:0"
+  fi
+  project_memory_mount "$memory_user"
+  docker_args+=("${PROJECT_MEMORY_ARGS[@]}")
 
   docker run "${docker_args[@]}" "$IMAGE_NAME" "${cmd[@]}"
 }

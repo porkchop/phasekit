@@ -68,7 +68,7 @@ The key is passed into the container at runtime via `docker run -e` and never st
 
 ## Prerequisites
 
-- Docker installed and running
+- Docker installed and running (Engine 26+ for per-project auto-memory; see [Per-project auto-memory](#per-project-auto-memory))
 - `ANTHROPIC_API_KEY` environment variable set (see above)
 - The scaffold repository cloned locally
 
@@ -170,6 +170,29 @@ This registers the server in your user-level Claude configuration. Add `--headle
 | `PHASEKIT_ROOTLESS_DOCKER` | (unset) | Set to `1` to run the container as UID 0 for rootless Docker bind mounts; see [Rootless Docker](#rootless-docker) |
 | `PHASEKIT_CONTAINER_USER` | (unset) | Lower-level override for `docker run --user` (`root` or `uid:gid`); takes precedence over `PHASEKIT_ROOTLESS_DOCKER` |
 | `PHASEKIT_CONTRACTS_MOUNT` | (unset) | Host path to a provider's contracts tree; bind-mounted read-only at `/contracts`; see [Cross-project contracts mount](#cross-project-contracts-mount) |
+
+## Per-project auto-memory
+
+*v0.18.7.* Every session mounts its project at `/workspace` and shares the `CLAUDE_VOLUME`, and
+Claude Code keys its auto-memory by the working directory (`projects/-workspace/memory/` in the
+config directory), so before v0.18.7 every project on a host shared ONE memory: each project's
+sessions read and wrote the others' notes.
+
+`container-setup.sh` now gives each session its own directory of the same volume,
+`project-memory/<key>`, mounted over `/home/node/.claude/projects/-workspace/memory` (Docker's
+`volume-subpath`, Docker Engine 26+ / API 1.45+). `<key>` is the checkout's directory name
+(characters outside `A-Za-z0-9._-` become `_`, leading dots are dropped, an empty name is
+`_default`), so two checkouts with the same directory name share one memory. Before the
+session starts, a throwaway container (no network, the session's own user, the volume mounted
+where the session mounts it) creates the directory; the first time, it seeds it with a copy of the shared directory, so
+no project loses context, and from then on the copies diverge. The shared directory itself is
+never moved or deleted; it stays as the legacy copy (a project still on an older phasekit keeps
+using it). Nothing else changes: `/workspace`, the volume and `CLAUDE_CONFIG_DIR` are as before,
+and a session on the host never runs this script.
+
+Own memory or none, never another project's: if the directory cannot be prepared, or the docker
+client or daemon is older than API 1.45, the session gets an empty throwaway memory (tmpfs) and a
+warning.
 
 ## Cross-project contracts mount
 

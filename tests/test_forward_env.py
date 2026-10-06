@@ -34,6 +34,12 @@ exit 0
 SECRET_VALUE = "wss://example-sequencer.invalid/ws?token=" + "z" * 12
 
 
+
+def _is_session(argv):
+    """The session's `docker run`, not v0.18.7's memory-preparing one before it
+    (the session is the run that mounts the project at /workspace)."""
+    return any(a.endswith(":/workspace") for a in argv)
+
 class ForwardEnvTest(unittest.TestCase):
     def _run(self, extra_env):
         with tempfile.TemporaryDirectory() as tmp:
@@ -62,7 +68,7 @@ class ForwardEnvTest(unittest.TestCase):
             calls = [block.strip().splitlines()
                      for block in log.read_text(encoding="utf-8").split("---\n")
                      if block.strip()] if log.exists() else []
-            runs = [c for c in calls if c and c[0] == "run"]
+            runs = [c for c in calls if c and c[0] == "run" and _is_session(c)]
             self.assertEqual(len(runs), 1, proc.stdout + proc.stderr)
             return proc, runs[0]
 

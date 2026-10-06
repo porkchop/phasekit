@@ -1110,6 +1110,7 @@ def apply_upgrade_plan(target_dir, scaffold_manifest, plans, profile):
             })
 
     sync_hook_registrations(target)
+    migrate_claude_md_imports(target)
 
     # Rewrite the manifest with the post-apply state.
     write_downstream_manifest(target, scaffold_manifest, profile,
@@ -1196,6 +1197,106 @@ def sync_hook_registrations(target, quiet=False):
         for event, command in added:
             print(f"  hook-register: {event} -> {command}")
     return added
+
+
+# v0.18.7: the dead imports in a project's .claude/CLAUDE.md. Claude Code
+# resolves an `@path` import relative to the file that holds it, so the
+# `- @docs/SPEC.md` lines the template seeded into `.claude/CLAUDE.md` pointed
+# at `.claude/docs/SPEC.md` and loaded nothing (probed on Claude Code 2.1.289:
+# `@docs/X` absent, `@../docs/X` and `@/abs/X` present). They are not made
+# live: an import loads the whole file into every session, and a fleet SPEC
+# reached 3.3 MB (2026-10-06) — so the template now NAMES the references and
+# the session reads them on demand, as CONTINUE_PROMPT already tells it to.
+# The file is project-owned and never re-rendered, so existing projects get
+# this surgical rewrite: exactly the template-seeded lines, nothing else.
+CLAUDE_MD_REL = ".claude/CLAUDE.md"
+DEAD_IMPORT_PATHS = (
+    "docs/SPEC.md", "docs/ARCHITECTURE.md", "docs/PHASES.md", "docs/QUALITY_GATES.md",
+    "docs/project/QUALITY_GATES.md", "docs/PROD_REQUIREMENTS.md", "docs/DESIGN.md",
+)
+_DEAD_IMPORT_LINE = re.compile(
+    r"^(?P<lead>[ \t]*[-*+][ \t]+)@(?P<path>" + "|".join(map(re.escape, DEAD_IMPORT_PATHS))
+    + r")(?P<rest>(?:[ \t].*)?)$")
+_ANY_IMPORT = re.compile(r"(?<![\w`@./])@(?P<path>[A-Za-z0-9_][^\s`()\[\]<>,;]*)")
+_FENCE = re.compile(r"^[ \t]*(```|~~~)")
+
+
+def migrate_claude_md_imports(target, dry_run=False, quiet=False):
+    """Rewrite the template-seeded dead `- @docs/<X>.md` imports in
+    `.claude/CLAUDE.md` to named references (`- \\`docs/<X>.md\\``), in place.
+
+    Only a list line whose import is one of DEAD_IMPORT_PATHS changes, outside
+    fenced code, with its bullet, indentation and trailing text kept; every
+    other byte of the file stays. Idempotent (a rewritten line no longer
+    matches). Any OTHER `@path` in the file that is missing relative to
+    `.claude/` but present at the root is the project's own and only noted.
+    Never fails an upgrade. Returns the 1-based line numbers rewritten.
+    """
+    path = Path(target) / CLAUDE_MD_REL
+    if path.is_symlink() or not path.is_file():
+        return []
+    # The upgrade commits the file it rewrites, so a project's uncommitted edit
+    # to it (or a file git does not track) would ride along: leave it for an
+    # upgrade that finds it clean.
+    dirty = _git_out(target, "status", "--porcelain", "--untracked-files=all", "--",
+                     CLAUDE_MD_REL)
+    if dirty:
+        if not quiet:
+            print(f"  note: {CLAUDE_MD_REL} has uncommitted changes; its dead @docs imports "
+                  "are migrated by the next upgrade that finds it committed")
+        return []
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        if not quiet:
+            print(f"  note: could not read {CLAUDE_MD_REL} for the import migration ({e})",
+                  file=sys.stderr)
+        return []
+    lines = text.splitlines(keepends=True)
+    changed, others, fenced = [], [], False
+    for n, line in enumerate(lines, 1):
+        body = line.rstrip("\r\n")
+        if _FENCE.match(body):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        m = _DEAD_IMPORT_LINE.match(body)
+        if m:
+            lines[n - 1] = (f"{m.group('lead')}`{m.group('path')}`{m.group('rest')}"
+                            + line[len(body):])
+            changed.append(n)
+            continue
+        for im in _ANY_IMPORT.finditer(re.sub(r"`[^`]*`", "", body)):
+            rel = im.group("path")
+            # os.path.exists never raises (an over-long or unreadable name is
+            # just "absent"; Path.exists raises on Python < 3.12).
+            if (not os.path.exists(path.parent / rel)
+                    and os.path.exists(Path(target) / rel)):
+                others.append((n, rel))
+    if changed and not dry_run:
+        tmp = path.with_name(path.name + TMP_SUFFIX)  # swept if a kill strands it
+        try:
+            tmp.write_bytes("".join(lines).encode("utf-8"))
+            os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
+            os.replace(tmp, path)
+        except OSError as e:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            if not quiet:
+                print(f"  note: could not rewrite {CLAUDE_MD_REL} ({e}); its imports still "
+                      "load nothing", file=sys.stderr)
+            return []
+    if not quiet:
+        if changed:
+            verb = "would rewrite" if dry_run else "rewrote"
+            print(f"  migrate: {CLAUDE_MD_REL}: {verb} {len(changed)} dead @docs import(s) "
+                  f"as named references (line {', '.join(map(str, changed))}); they "
+                  "resolved relative to .claude/ and loaded nothing")
+        for n, rel in others:
+            print(f"  note: {CLAUDE_MD_REL} line {n}: @{rel} resolves relative to .claude/ "
+                  f"and loads nothing; `@../{rel}` would load it whole into every session")
+    return changed
 
 
 def _interactive_resolve(plans, target):
@@ -1350,6 +1451,7 @@ def _upgrade_locked(target, profile, dry_run, yes, interactive, keep_local, take
         return 3
 
     if dry_run:
+        migrate_claude_md_imports(target, dry_run=True)
         print("\n(dry-run; no changes written)")
         return 0
 
@@ -2008,8 +2110,13 @@ def _prune_empty_parents(target, d):
         d = d.parent
 
 
+# Written in place by every upgrade when needed (hook registrations, v0.8;
+# the dead-import migration, v0.18.7), whatever the plan says about them.
+UPGRADE_IN_PLACE_PATHS = (".claude/settings.json", CLAUDE_MD_REL)
+
+
 def _upgrade_touched_paths(plans):
-    paths = {".scaffold/manifest.json", ".claude/settings.json"}
+    paths = {".scaffold/manifest.json", *UPGRADE_IN_PLACE_PATHS}
     for p in plans:
         paths.add(p["path"])
         if p.get("rename_target"):
@@ -2146,15 +2253,15 @@ class PendingUpgrade:
 
     def write_set(self, candidates):
         """The candidates this upgrade actually changed. `.claude/settings.json`
-        is always a candidate, so without this a project's in-flight edit to it
-        rode along in a commit the upgrade never needed (review r3)."""
+        and `.claude/CLAUDE.md` are always candidates, so without this a
+        project's in-flight edit to one rode along in a commit the upgrade never
+        needed (review r3)."""
         pre, post = self.record.get("pre") or {}, self.record.get("post") or {}
-        rel = ".claude/settings.json"
-        # Only this always-listed path is filtered: every other candidate the
+        # Only these always-listed paths are filtered: every other candidate the
         # upgrade wrote, and staging an unchanged one is how an untracked
         # manifest gets re-tracked.
         return sorted(p for p in candidates
-                      if p != rel or post.get(p) != pre.get(p))
+                      if p not in UPGRADE_IN_PLACE_PATHS or post.get(p) != pre.get(p))
 
     def mark_verified(self, commit_paths):
         self.record["phase"] = "verified"
@@ -2297,7 +2404,7 @@ def commit_upgrade(target, plans, old_version, unverified=False, paths=None):
 def upgrade_commit_paths(plans):
     """The paths an upgrade commit may carry: the ones it WROTE. A kept or
     untouched path is the project's, whatever state it is in."""
-    touched = {".scaffold/manifest.json", ".claude/settings.json"}
+    touched = {".scaffold/manifest.json", *UPGRADE_IN_PLACE_PATHS}
     for p in plans:
         if p["action"] in (ACTION_INSTALL, ACTION_TAKE_NEW, ACTION_DELETE,
                            ACTION_RENAME_LOCAL):

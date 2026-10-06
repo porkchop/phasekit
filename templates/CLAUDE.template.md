@@ -14,14 +14,15 @@ This repository uses the phasekit workflow.
 - Tests read the declared surface: a test reads this project's own tree and phasekit's DECLARED surface (`contracts/interface.json` `facts`, or `bash scripts/phasekit.sh facts --json`), never scaffold-owned files (the vendored loop and scripts, the hooks, the scaffold docs); a fact a test needs that the surface lacks is a request to phasekit, not a parse (docs/QUALITY_GATES.md "Tests read the declared surface").
 
 ## Required references
-- @docs/SPEC.md
-- @docs/ARCHITECTURE.md
-- @docs/PHASES.md
-- @docs/QUALITY_GATES.md
-- @docs/project/QUALITY_GATES.md
-- @docs/PROD_REQUIREMENTS.md
+Read on demand. These are named, not `@`-imported: an import loads the whole file into every session's context, and a SPEC grows without bound (an `@path` in this file would also resolve relative to `.claude/`, not the repository root).
+- `docs/SPEC.md`
+- `docs/ARCHITECTURE.md`
+- `docs/PHASES.md`
+- `docs/QUALITY_GATES.md`
+- `docs/project/QUALITY_GATES.md`
+- `docs/PROD_REQUIREMENTS.md`
 
 ## Optional references
-- @docs/DESIGN.md — steady-state system design (subsystems, data flows, hot spots, boundaries). Read first if present; not every project has one.
+- `docs/DESIGN.md` — steady-state system design (subsystems, data flows, hot spots, boundaries). Read first if present; not every project has one.
 
 {{OPTIONAL_REFERENCES}}

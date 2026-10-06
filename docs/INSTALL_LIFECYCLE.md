@@ -171,6 +171,15 @@ two rules that contradict each other). Instead every file has one owner:
   scaffold class or from a collision is based on its own bytes. (A base recorded before
   v0.17.0 is the template as of that project's last v0.16 upgrade, not necessarily the
   one its file was first rendered from — template changes before then are not reported.)
+- **Two in-place repairs of project-owned files**, the only writes an upgrade makes to them:
+  missing scaffold hook registrations are added to `.claude/settings.json` (additive), and
+  (v0.18.7) the template-seeded `- @docs/<NAME>.md` lines in `.claude/CLAUDE.md` are
+  rewritten as named references (`` - `docs/<NAME>.md` ``). Claude Code resolves an `@`
+  import relative to the file that holds it, so from `.claude/` those imports loaded
+  nothing; they are not made live because an import loads the whole file into every
+  session. Only those lines change (outside fenced code, bullet and trailing text kept);
+  any other `@path` that resolves to nothing is only noted. `--dry-run` says what it would
+  rewrite; a second upgrade finds nothing to do.
 
 ## What to commit (and what to gitignore)
 

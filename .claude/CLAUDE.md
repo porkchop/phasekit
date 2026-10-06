@@ -20,8 +20,9 @@ This repository is a reusable development operating system.
 - Do not make ordinary direct work on this repository cumbersome
 
 ## Required references
-- @docs/RELEASING.md
-- @docs/QUALITY_GATES.md
-- @docs/CAPABILITY_MANIFEST.md
-- @capabilities/project-capabilities.yaml
-- @docs/USAGE_PATTERNS.md
+Read on demand. These are named, not `@`-imported: an import loads the whole file into every session's context (these five are about 119 KB), and an `@path` in this file would resolve relative to `.claude/`, not the repository root.
+- `docs/RELEASING.md`
+- `docs/QUALITY_GATES.md`
+- `docs/CAPABILITY_MANIFEST.md`
+- `capabilities/project-capabilities.yaml`
+- `docs/USAGE_PATTERNS.md`
