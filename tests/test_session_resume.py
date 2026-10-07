@@ -27,6 +27,7 @@ import tempfile
 import time
 import unittest
 import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
+from _layout import Layout
 
 try:
     from test_run_until_done_v060 import LoopHarness, VERIFY_OK
@@ -110,7 +111,7 @@ class _FakeClaude:
 
     def fake_env(self):
         return {"FAKE_CLAUDE_STATE": self.fake_dir,
-                "PATH": self.fake_bin + os.pathsep + os.environ["PATH"]}
+                "PATH": self.layout.claude_path(self.fake_bin + os.pathsep + os.environ["PATH"])}
 
     def argv(self, n):
         with open(os.path.join(self.fake_dir, f"argv-{n}")) as f:
@@ -155,13 +156,11 @@ class LoopResumesBySessionId(_FakeClaude, LoopHarness):
     def setUp(self):
         super().setUp()
         self._write("scripts/phasekit-verify.sh", VERIFY_OK, executable=True)
-        with open(RUN_PHASE) as f:
-            self._write("scripts/run-phase.sh", f.read(), executable=True)
+        self.layout.put("scripts/run-phase.sh", src=RUN_PHASE, executable=True)
         if os.path.exists(FORMATTER):
-            with open(FORMATTER) as f:
-                self._write("scripts/phasekit-log-fmt.sh", f.read(), executable=True)
+            self.layout.put("scripts/phasekit-log-fmt.sh", src=FORMATTER, executable=True)
         self._git("add", "-A")
-        self._git("commit", "-qm", "real run-phase")
+        self._git("commit", "--allow-empty", "-qm", "real run-phase")
         self._fake_setup(self.tmp)
         self.foreign = self.seed_foreign_session()
 
@@ -299,7 +298,9 @@ class RunPhaseDirect(_FakeClaude, unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(os.path.join(self.repo, "scripts"))
-        shutil.copy(RUN_PHASE, os.path.join(self.repo, "scripts", "run-phase.sh"))
+        self.layout = Layout(self.repo)
+        self.addCleanup(self.layout.cleanup)
+        self.layout.put("scripts/run-phase.sh", src=RUN_PHASE, executable=True)
         with open(os.path.join(self.repo, "prompt.txt"), "w") as f:
             f.write("the prompt\n")
         self._fake_setup(self.tmp)
@@ -312,7 +313,8 @@ class RunPhaseDirect(_FakeClaude, unittest.TestCase):
         env.update(self.fake_env())
         env.update({"CLAUDE_MODE": mode, "PHASEKIT_ITER": it})
         env.update(extra or {})
-        return subprocess.run(["bash", os.path.join(self.repo, "scripts", "run-phase.sh"),
+        env = self.layout.env(env)
+        return subprocess.run(["bash", str(self.layout.path("scripts/run-phase.sh")),
                                os.path.join(self.repo, "prompt.txt")],
                               cwd=self.repo, env=env, capture_output=True, text=True,
                               timeout=60)

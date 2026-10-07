@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
+from _layout import hook_argv, mark_pinned
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO_ROOT, ".claude", "hooks", "compact-reanchor.sh")
@@ -13,7 +14,7 @@ HOOK = os.path.join(REPO_ROOT, ".claude", "hooks", "compact-reanchor.sh")
 
 def run_hook(payload: dict, cwd: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["bash", HOOK],
+        hook_argv(HOOK, cwd),
         input=json.dumps(payload),
         capture_output=True,
         text=True,
@@ -23,6 +24,7 @@ def run_hook(payload: dict, cwd: str) -> subprocess.CompletedProcess:
 
 
 def make_project(root: str) -> None:
+    mark_pinned(root)
     os.makedirs(os.path.join(root, "artifacts"))
     os.makedirs(os.path.join(root, "docs"))
     with open(os.path.join(root, "artifacts", "phase-approval.json"), "w") as f:
@@ -62,7 +64,7 @@ class CompactReanchorTest(unittest.TestCase):
     def test_fail_open_on_garbage_stdin(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             r = subprocess.run(
-                ["bash", HOOK], input="not json", capture_output=True,
+                hook_argv(HOOK, root), input="not json", capture_output=True,
                 text=True, cwd=root, timeout=30,
             )
             self.assertEqual(r.returncode, 0)

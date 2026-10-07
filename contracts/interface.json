@@ -240,7 +240,7 @@
       "set_by": ["scripts/run-until-done.sh"],
       "default": "new",
       "container_forwarded": true,
-      "semantics": "new = fresh session (also resets a stale phase-verify-failed.json at kickoff); continue = resume the most recent session (-c). The loop consumes it for iteration 1 and sets it per child invocation thereafter."
+      "semantics": "new = fresh session (also resets a stale phase-verify-failed.json at kickoff); continue = resume this run's own recorded conversation BY ID (artifacts/logs/claude-session-id, `--resume <id>`; v0.18.8 — never `claude -c`, never 'the most recent conversation'); with no usable id, or a resume the CLI refuses as unknown, a NEW session with a re-anchoring prompt. The loop consumes it for iteration 1 and sets it per child invocation thereafter."
     },
     {
       "name": "MAX_ITERATIONS",
@@ -383,7 +383,7 @@
     {
       "name": "PHASEKIT_ITER_MARKER",
       "kind": "both",
-      "read_by": [".claude/hooks/require-verdict.sh"],
+      "read_by": [".claude/hooks/require-verdict.sh", "scripts/phasekit-pin.py"],
       "set_by": ["scripts/run-until-done.sh"],
       "default": "unset — the hook is inert",
       "container_forwarded": false,
@@ -463,6 +463,115 @@
       "default": "48",
       "container_forwarded": false,
       "semantics": "Advisory-only threshold in KB for the once-per-session docs/LEARNINGS.md size note. At or over the threshold the loop prints one stderr line suggesting a curation pass per the file's own header rule; it never blocks, never rotates, and never alters prompts (the doc-rotation descope, 2026-08-20). Non-numeric values disable the check. Supervisors that want scheduling watch the same file size themselves."
+    },
+    {
+      "name": "PHASEKIT_PROJECT_DIR",
+      "kind": "both",
+      "read_by": ["scripts/run-until-done.sh", "scripts/run-phase.sh", "scripts/container-setup.sh"],
+      "set_by": ["scripts/phasekit.sh", "scripts/container-setup.sh"],
+      "default": "unset — the engine's own checkout is the project (a vendored project; every pre-v0.19.0 behaviour)",
+      "container_forwarded": true,
+      "semantics": "v0.19.0, the engine outside the repository. The PROJECT the engine works on: its tree, artifacts/, docs and gate. The engine's own files (the loop, run-phase.sh, CONTINUE_PROMPT.txt, the tools, the scaffold docs, the plugin) are always read from the engine's checkout (ENGINE_DIR, the script's own location). Unset: one directory, exactly as before (a vendored project). Set by the CLI (`phasekit loop|run|verify|scope|container` in a pinned project) and, in the container, by container-setup.sh to /workspace (the engine is mounted read-only at /opt/phasekit). Never inherited by the project's gate or the model's own tool calls (the loop drops it for both), so a project test that runs a phasekit fixture is never pointed at the real tree."
+    },
+    {
+      "name": "PHASEKIT_ENGINE_DIR",
+      "kind": "both",
+      "read_by": ["scripts/phasekit.sh", "scripts/phasekit-pin.py"],
+      "set_by": ["scripts/run-until-done.sh"],
+      "default": "unset — the CLI resolves the engine from the project's pin",
+      "container_forwarded": false,
+      "semantics": "v0.19.0. The engine a running loop uses, set by the loop's `phasekit` shim on PATH for every `phasekit` a session or gate runs: the CLI then uses that engine and never re-resolves the pin, so a pin edited or committed mid-run never switches the engine of the iteration it started (the engine that started an iteration finishes it). An operator may set it to run a CLI verb against a specific engine checkout."
+    },
+    {
+      "name": "PHASEKIT_ENGINE_DOCS",
+      "kind": "exported",
+      "read_by": ["scripts/run-phase.sh", "plugin/hooks/run-hook.sh"],
+      "set_by": ["scripts/run-until-done.sh"],
+      "default": "unset in a vendored run (the docs are in the project's own docs/)",
+      "container_forwarded": false,
+      "semantics": "v0.19.0. In a pinned run, the directory of the engine's process docs (QUALITY_GATES.md, USAGE_PATTERNS.md, …; /opt/phasekit/docs in the container), exported to the session. The session prompt also names each engine doc by its real path: a `docs/<NAME>.md` the project lacks is rewritten to the engine's copy."
+    },
+    {
+      "name": "PHASEKIT_ENGINE_STORE",
+      "kind": "consumed",
+      "read_by": ["scripts/phasekit-pin.py"],
+      "default": "<canonical clone>/engines (the install at ~/.local/share/phasekit/engines), or the parent of a store engine",
+      "container_forwarded": false,
+      "semantics": "v0.19.0. Where pinned engines live, one read-only `git archive` checkout per release tag (<store>/<tag>/, with .engine-version and .engine-commit). A supervisor resolves a project's pin to <store>/<pin>/scripts/container-setup.sh."
+    },
+    {
+      "name": "PHASEKIT_NO_AUTO_FETCH",
+      "kind": "consumed",
+      "read_by": ["scripts/phasekit-pin.py"],
+      "default": "unset — a pinned engine the store lacks is installed on first use",
+      "container_forwarded": false,
+      "semantics": "v0.19.0, offline opt-out. Unset: a pinned verb whose engine is not in the store installs it first, from the canonical clone's own tag (git objects; a tag the clone lacks is fetched from the clone's origin). 1: nothing is installed or fetched implicitly; the verb exits 6 naming `phasekit engines install <tag>`. `phasekit check` never installs either way."
+    },
+    {
+      "name": "PHASEKIT_HOME",
+      "kind": "consumed",
+      "read_by": ["scripts/phasekit-pin.py"],
+      "default": "${XDG_DATA_HOME:-~/.local/share}/phasekit",
+      "container_forwarded": false,
+      "semantics": "The canonical phasekit clone (install.sh's location). v0.19.0: the clone whose release tags fill the engine store and whose .claude-plugin/marketplace.json the plugin is installed from."
+    },
+    {
+      "name": "PHASEKIT_NO_PLUGIN",
+      "kind": "consumed",
+      "read_by": ["scripts/phasekit-pin.py"],
+      "default": "unset — install.sh and `phasekit init` install the Claude Code plugin",
+      "container_forwarded": false,
+      "semantics": "v0.19.0. 1 skips the plugin install that `phasekit init` (and install.sh) perform for interactive Claude Code sessions; `phasekit check` still warns when the plugin is missing."
+    },
+    {
+      "name": "PHASEKIT_GUARD_PROBE",
+      "kind": "both",
+      "read_by": ["plugin/hooks/run-hook.sh"],
+      "set_by": ["scripts/run-phase.sh"],
+      "default": "unset — the plugin's guard-probe hook is inert",
+      "container_forwarded": false,
+      "semantics": "v0.19.0, the fail-closed guard self-check of a pinned run. Before every model turn run-phase.sh starts a throwaway, model-free `claude -p --plugin-dir <engine>/plugin` with this set to a file; the plugin's UserPromptSubmit hook proves the command guard refuses (a destructive command, and a commit under the loop) and every hook is present, writes '<token> ok' there and blocks the prompt (no model call). No token: the turn is REFUSED (run-phase.sh exits 7)."
+    },
+    {
+      "name": "PHASEKIT_GUARD_PROBE_TOKEN",
+      "kind": "both",
+      "read_by": ["plugin/hooks/run-hook.sh"],
+      "set_by": ["scripts/run-phase.sh"],
+      "default": "unset",
+      "container_forwarded": false,
+      "semantics": "v0.19.0. The per-probe random token the guard-probe hook writes back; a stale or foreign file can never satisfy the check."
+    },
+    {
+      "name": "PHASEKIT_GUARD_PROBE_TIMEOUT",
+      "kind": "consumed",
+      "read_by": ["scripts/run-phase.sh"],
+      "default": "120",
+      "container_forwarded": true,
+      "semantics": "v0.19.0. Seconds the guard probe's throwaway `claude` may run; a probe that times out has proven nothing, so the turn is refused."
+    },
+    {
+      "name": "PHASEKIT_TEST_LAYOUT",
+      "kind": "consumed",
+      "read_by": ["scripts/verify-in-container.sh"],
+      "default": "vendored",
+      "container_forwarded": false,
+      "semantics": "v0.19.0, phasekit's own test harness only (tests/_layout.py): the layout the loop-behaviour tests build their fixtures in — vendored (the engine in the project's tree) or pinned (the engine in a separate read-only directory, the project at PHASEKIT_PROJECT_DIR). verify-in-container.sh passes it into the image. Never read by the loop."
+    },
+    {
+      "name": "PHASEKIT_LOGIN_REFRESH",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "1 — refresh first",
+      "container_forwarded": true,
+      "semantics": "v0.19.0, pinned container sessions only. A pinned session's login is a single-file mount (it pins the file's inode) and refresh tokens rotate, so a pinned session must never refresh mid-session: it starts only when the shared OAuth access token outlives it (PHASEKIT_SESSION_DEADLINE, else two hours, plus 15 minutes). When it does not, the login is refreshed FIRST by a throwaway networked container (a tiny haiku `claude -p` on an expired copy, written back IN PLACE). 0: refuse instead of refreshing."
+    },
+    {
+      "name": "PHASEKIT_IMAGE_PREBUILT",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "unset",
+      "container_forwarded": true,
+      "semantics": "v0.19.0. A pinned `run`/`shell` never builds or retags the shared image per dispatch; it builds it once, from the engine's .devcontainer, only when the image does not exist. 1 skips even that existence check (the supervisor guarantees the image)."
     }
   ],
   "artifacts": [
@@ -1232,11 +1341,12 @@
         "2": "stopped, external input required: phase-blocked.json present, a commit was blocked, or a light-mode run escalated",
         "3": "MAX_ITERATIONS reached without project completion (light mode also writes light-escalation.json with trigger iteration_cap)"
       },
-      "passthrough": "Any other code is the claude CLI's own exit, propagated verbatim after the PHASEKIT_ITER_RETRY budget is exhausted — including 124 from a supervisor-side timeout and 137 from SIGKILL. The loop assigns meaning only to 0/1/2/3. v0.18.0: the `verify` and `scope` subcommands (what `phasekit verify`/`phasekit scope` run) exit 0 green/answered, 1 red/unanswerable, 2 usage, 3 verify skipped (the tier's measured P90 is over 540 s) — they start no iteration. A turn the deadline watchdog ended at the take-control point (SIGTERM, claude exits 143) is not a CLI failure: no retry, and the run ends 0 after its verify-gated landing / wrap-up. v0.18.1: when the watchdog could not write its marker, a turn that started before its take-control instant and ended non-zero after it is read as taken (the log says `took control (inferred …`) — never a retry; and a turn the completion guard ended (the completion record was committed during it) is not a CLI failure either: no retry, and the loop lands it (`verify` exits 2 when the index is locked)."
+      "passthrough": "Any other code is the claude CLI's own exit, propagated verbatim after the PHASEKIT_ITER_RETRY budget is exhausted — including 124 from a supervisor-side timeout and 137 from SIGKILL. The loop assigns meaning only to 0/1/2/3. v0.18.0: the `verify` and `scope` subcommands (what `phasekit verify`/`phasekit scope` run) exit 0 green/answered, 1 red/unanswerable, 2 usage, 3 verify skipped (the tier's measured P90 is over 540 s) — they start no iteration. A turn the deadline watchdog ended at the take-control point (SIGTERM, claude exits 143) is not a CLI failure: no retry, and the run ends 0 after its verify-gated landing / wrap-up. v0.19.0: 7 is run-phase.sh's (a pinned run's guard self-check refused the turn before any model call), propagated after the retry budget like a CLI code — never a CLI failure, nothing ran and nothing was committed. v0.18.1: when the watchdog could not write its marker, a turn that started before its take-control instant and ended non-zero after it is read as taken (the log says `took control (inferred …`) — never a retry; and a turn the completion guard ended (the completion record was committed during it) is not a CLI failure either: no retry, and the loop lands it (`verify` exits 2 when the index is locked)."
     },
     "scripts/run-phase.sh": {
       "codes": {
-        "1": "usage error: no prompt-file argument, or the prompt file does not exist"
+        "1": "usage error: no prompt-file argument, or the prompt file does not exist",
+        "7": "v0.19.0, a pinned run only: the turn was REFUSED before any model call — the guard self-check failed (the engine's plugin is missing, did not load, or its command guard did not refuse); never a CLI failure, nothing ran"
       },
       "passthrough": "Otherwise the claude CLI's exit status, unmodified (pipefail); nothing is remapped."
     },
@@ -1288,7 +1398,18 @@
         "2": "lock contention — another enrich-project.py holds the target's lock; v0.18.0 `verify`/`scope`: usage error, not run inside a phasekit project, or `verify --tier` naming the tier that does not run now; v0.18.1 `verify`: not run — git's index is locked (the message names the index.lock path, its age and what to do; nothing was staged or run, the lock is never removed by it)",
         "3": "drift detected by the check verb (DRIFT / MISSING / TEMPLATE DRIFT); v0.18.0 `verify`: skipped — the tier's measured P90 is longer than a tool call may run (the commit gate runs it)"
       },
-      "passthrough": "The CLI execs scripts/enrich-project.py, so these are the engine's codes; a missing PHASEKIT_PYTHON interpreter surfaces as the shell's 126/127."
+      "passthrough": "The CLI execs scripts/enrich-project.py, so these are the engine's codes; a missing PHASEKIT_PYTHON interpreter surfaces as the shell's 126/127. v0.19.0: in a PINNED project (.phasekit-version, no vendored loop) `check`, `upgrade`, `init`, `migrate`, `engines`, `plugin`, `docs` exec scripts/phasekit-pin.py (its codes below), and `verify`/`scope`/`loop`/`run`/`container`/`contracts` exec the pinned engine's own scripts after resolving it (6 when the pin is not installed and was not fetched)."
+    },
+    "scripts/phasekit-pin.py": {
+      "codes": {
+        "0": "ok (an idempotent re-run that changes nothing is 0)",
+        "1": "error (git or I/O failure, a commit that failed)",
+        "2": "usage, or not a project of the right kind: a bad or pre-v0.19.0 tag, a dirty tree or staged index for migrate/upgrade, local changes to engine files migrate would discard (without --discard-local), a vendored project given to init",
+        "3": "`check` found a leftover in a pinned project: a tracked engine path (anything the engine's manifest calls scaffold, or .scaffold/), or .claude/settings.json still wiring vendored hook paths; `plugin status`: not installed",
+        "4": "the project's gate was not green under the new engine (migrate, upgrade): nothing changed — the tree, the index and the pin are as they were",
+        "6": "the pinned engine is not installed and was not fetched (`check` never fetches; elsewhere PHASEKIT_NO_AUTO_FETCH=1, or the tag is in neither the canonical clone nor its origin): the message names `phasekit engines install <tag>`"
+      },
+      "passthrough": "None: every exit is one of these."
     },
     ".claude/hooks/require-verdict.sh": {
       "codes": {

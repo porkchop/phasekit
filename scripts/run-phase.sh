@@ -4,7 +4,17 @@ set -euo pipefail
 # Loud but useful for debugging the autonomous loop. See docs/EXECUTION_MODES.md.
 [[ "${PHASEKIT_TRACE:-}" == "1" ]] && set -x
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# v0.19.0: the engine (this checkout) vs the project (PHASEKIT_PROJECT_DIR;
+# the same directory in a vendored project — see run-until-done.sh).
+ENGINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -n "${PHASEKIT_PROJECT_DIR:-}" ]]; then
+  ROOT_DIR="$(cd "$PHASEKIT_PROJECT_DIR" && pwd)"
+else
+  ROOT_DIR="$ENGINE_DIR"
+fi
+PINNED=0
+if [[ "$ROOT_DIR" != "$ENGINE_DIR" ]]; then PINNED=1; fi
+PLUGIN_DIR="$ENGINE_DIR/plugin"
 PROMPT_FILE="${1:?Usage: run-phase.sh <prompt-file>}"
 CLAUDE_MODE="${CLAUDE_MODE:-new}"
 
@@ -36,7 +46,7 @@ if [[ "${PHASEKIT_RETRY_ATTEMPT:-0}" -gt 0 ]]; then
 fi
 RAW_LOG="$LOG_DIR/claude-iter-${PHASEKIT_ITER:-manual}${ATTEMPT_TAG}.jsonl"
 LOG_FILE="$LOG_DIR/claude-iter-${PHASEKIT_ITER:-manual}${ATTEMPT_TAG}.log"
-FORMATTER="$ROOT_DIR/scripts/phasekit-log-fmt.sh"
+FORMATTER="$ENGINE_DIR/scripts/phasekit-log-fmt.sh"
 echo "Logging claude output to: $LOG_FILE (raw JSONL: $RAW_LOG)"
 
 # Observability must never break the loop. If the formatter script is
@@ -66,6 +76,9 @@ fi
 # importantly claude's), so the caller still sees failure.
 CLAUDE_FLAGS=(--permission-mode bypassPermissions --verbose
               --output-format stream-json --include-partial-messages)
+if [[ "$PINNED" == 1 ]]; then
+  CLAUDE_FLAGS+=(--plugin-dir "$PLUGIN_DIR")
+fi
 # Per-project model choice (v0.4.5): ANTHROPIC_MODEL carries an alias
 # (fable/opus/sonnet/haiku) or a full claude-* id, set by the orchestrator
 # via build_env → run-session → container-setup. Passed explicitly as
@@ -80,6 +93,81 @@ fi
 # role = PHASEKIT_ITER (a pass number, or light-review). Removed when the
 # turn ends; the watchdog also checks the pid is alive and is claude.
 PIDFILE="$LOG_DIR/claude.pid"
+
+# --- a pinned run: the engine outside the tree (v0.19.0) ----------------------
+# A vendored project wires its hooks and agents in its own .claude/ — nothing
+# here applies to it. A pinned project carries none: they come from the
+# engine's plugin, passed with --plugin-dir, so the read-only engine is the
+# only copy a session can reach (it cannot edit its own guard). The prompt
+# names the engine's docs by their real path (a `docs/<NAME>.md` this tree
+# lacks is the engine's), and every turn first proves the plugin's guard is
+# live (guard_probe): a turn whose hooks did not load is REFUSED, never run
+# unguarded.
+# The model's own tool calls (a project test that runs a phasekit fixture)
+# must never inherit the engine's pointer at this tree.
+export -n PHASEKIT_PROJECT_DIR 2>/dev/null || true
+GUARD_REFUSED_RC=7
+
+# Rewrite `docs/<NAME>.md` to the engine's copy for every engine doc this
+# project does not have (its own docs keep their paths), then say where the
+# engine is. Prints the rendered prompt.
+# The engine's PROCESS docs — the scaffold-class docs a vendored project
+# carries (tests/test_engine_outside.py pins this list to the manifest). Its
+# seed templates (SPEC, PHASES, …) and internal docs are never offered.
+ENGINE_PROCESS_DOCS="ADR_TEMPLATE CONTAINERIZATION CONTRACTS EXECUTION_MODES INSTALL_LIFECYCLE MUTATION_TESTING QUALITY_GATES REASONING_PROFILES USAGE_PATTERNS"
+render_pinned_prompt() {
+  local text="$1" name ver repl
+  # `&`, `\` and `#` would be sed syntax in the replacement
+  repl="$(printf '%s' "$ENGINE_DIR" | sed -e 's/[\\&#]/\\&/g')"
+  for name in $ENGINE_PROCESS_DOCS; do
+    [[ -f "$ENGINE_DIR/docs/$name.md" ]] || continue
+    [[ -e "$ROOT_DIR/docs/$name.md" ]] && continue
+    text="$(printf '%s' "$text" | sed -E "s#(^|[^/A-Za-z0-9_.-])docs/$name\\.md#\\1$repl/docs/$name.md#g")"
+  done
+  ver="$(cat "$ENGINE_DIR/.engine-version" 2>/dev/null || git -C "$ENGINE_DIR" describe --tags --always 2>/dev/null || echo unknown)"
+  cat <<ENGINE_EOF
+=== PHASEKIT ENGINE (this session) ===
+phasekit ${ver} runs this project from OUTSIDE the repository: the engine is
+read-only at ${ENGINE_DIR} and is not project content.
+- Its process docs are there, not in this tree: ${ENGINE_DIR}/docs/
+  (QUALITY_GATES.md, USAGE_PATTERNS.md, …; also \$PHASEKIT_ENGINE_DOCS). A
+  docs/<NAME>.md this repository lacks is one of them — read it there.
+- Run phasekit as \`phasekit <verb>\` (verify, scope, facts, contracts check): it
+  is on PATH and runs this engine against this project.
+- Its subagents are namespaced: phasekit:project-lead, phasekit:code-reviewer,
+  phasekit:strategy-planner, phasekit:architecture-red-team, …
+- Never copy engine files into this repository.
+=== END ENGINE ===
+
+ENGINE_EOF
+  printf '%s' "$text"
+}
+
+# The fail-closed self-check: a throwaway, model-free `claude -p` whose prompt
+# the plugin's guard-probe hook (UserPromptSubmit) blocks after proving the
+# guard refuses. Returns 0 only when that hook wrote this probe's token.
+guard_probe() {
+  local probe token got=""
+  if [[ ! -f "$PLUGIN_DIR/hooks/hooks.json" || ! -f "$PLUGIN_DIR/.claude-plugin/plugin.json" ]]; then
+    echo "phasekit: REFUSING the turn — the engine's plugin is missing at $PLUGIN_DIR (hooks.json / plugin.json), so this session would run without its command guard and stop hook" >&2
+    return 1
+  fi
+  probe="$LOG_DIR/.guard-probe.$$"
+  token="$(new_session_id)"; [[ -n "$token" ]] || token="probe-$$-$(date +%s)"
+  rm -f "$probe" 2>/dev/null || true
+  PHASEKIT_GUARD_PROBE="$probe" PHASEKIT_GUARD_PROBE_TOKEN="$token" \
+    timeout "${PHASEKIT_GUARD_PROBE_TIMEOUT:-120}" \
+    claude --plugin-dir "$PLUGIN_DIR" --no-session-persistence --permission-mode bypassPermissions \
+      -p "phasekit guard probe (blocked by the plugin before any model call)" >/dev/null 2>&1 || true
+  got=""
+  if [[ -r "$probe" ]]; then IFS= read -r got < "$probe" || got=""; fi
+  rm -f "$probe" 2>/dev/null || true
+  if [[ "$got" == "$token ok" ]]; then
+    return 0
+  fi
+  echo "phasekit: REFUSING the turn — the guard self-check failed (${got:-the guard-probe hook of the plugin never ran, so the plugin did not load}). A pinned run never starts a model turn without its command guard and stop hook (plugin: $PLUGIN_DIR)." >&2
+  return 1
+}
 trap 'rm -f "$PIDFILE" "${TURN_MARK:-}" 2>/dev/null' EXIT
 
 # --- session continuity (v0.18.8) --------------------------------------------
@@ -219,6 +307,13 @@ start_new_session() {
     run_claude "$1"
   fi
 }
+
+if [[ "$PINNED" == 1 ]]; then
+  PROMPT_CONTENT="$(render_pinned_prompt "$PROMPT_CONTENT")"
+  if ! guard_probe; then
+    exit "$GUARD_REFUSED_RC"
+  fi
+fi
 
 rc=0
 # This turn's start, for "a yield since this turn began" (resume_not_honoured).

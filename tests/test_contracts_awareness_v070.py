@@ -52,7 +52,7 @@ class PromptAwarenessTest(LoopHarness):
     def setUp(self):
         super().setUp()
         self._write("scripts/phasekit-verify.sh", VERIFY_OK, executable=True)
-        shutil.copy2(SCRIPT_PATH, os.path.join(self.repo, "scripts", "phasekit-contracts.py"))
+        self.layout.put("scripts/phasekit-contracts.py", src=SCRIPT_PATH)
         self.mount = Path(self.tmp) / "mount"
         (self.mount / "billing-api").mkdir(parents=True)
         (self.mount / "billing-api" / "openapi.json").write_text("{}\n", encoding="utf-8")
@@ -95,7 +95,7 @@ class PromptAwarenessTest(LoopHarness):
         self._declare_and_vendor()
         prompt = self._first_prompt()
         self.assertIn("Do NOT edit a vendored contract", prompt)
-        self.assertIn("python3 scripts/phasekit-contracts.py refresh", prompt)
+        self.assertIn("phasekit contracts refresh", prompt)
 
     def test_a_zero_entry_declaration_adds_nothing_to_the_prompt(self):
         """Declaring none is declaring nothing; do not spend prompt on it."""
@@ -128,6 +128,7 @@ class StackSeedingTest(unittest.TestCase):
     def test_every_verify_template_seeds_the_check(self):
         for suffix in STACK_TEMPLATES:
             with self.subTest(template=suffix or "stub"):
+                self.assertIn("phasekit contracts check", self._template(suffix))
                 self.assertIn(
                     "python3 scripts/phasekit-contracts.py check", self._template(suffix)
                 )
@@ -138,17 +139,14 @@ class StackSeedingTest(unittest.TestCase):
         for suffix in STACK_TEMPLATES:
             text = self._template(suffix)
             start = text.index("# --- Cross-project contracts (phasekit v0.7.0)")
-            end = text.index("fi\n", text.index("phasekit-contracts.py check")) + 3
+            end = text.index("fi\nfi\n", text.index("phasekit contracts check")) + 6
             blocks[suffix] = text[start:end]
         self.assertEqual(len(set(blocks.values())), 1, blocks)
 
     def test_the_seeded_check_is_inert_without_a_declaration(self):
         for suffix in STACK_TEMPLATES:
             with self.subTest(template=suffix or "stub"):
-                self.assertIn(
-                    "if [[ -f contracts.yaml && -f scripts/phasekit-contracts.py ]]; then",
-                    self._template(suffix),
-                )
+                self.assertIn("if [[ -f contracts.yaml ]]; then", self._template(suffix))
 
     def test_the_check_runs_before_any_stack_specific_fail_open(self):
         """python-uv fail-opens when there is no pyproject.toml yet; several

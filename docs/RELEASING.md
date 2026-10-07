@@ -6,12 +6,19 @@ a different axis from the **manifest schema version** (`version: 1` in
 `capabilities/project-capabilities.yaml`) — see `docs/COMPATIBILITY.md` for the
 schema-compatibility contract.
 
+Since v0.19.0 a release reaches projects in two ways. A **pinned** project names
+its release in `.phasekit-version` and runs that release's engine read-only from
+the engine store; it moves to a new release by a gated pin bump
+(`phasekit upgrade`), at any time. A **vendored** project (legacy, supported
+until migrated) carries the engine in its own tree and is upgraded the old way.
+See "Rolling a release out" below.
+
 ## The two version axes
 
 | Axis | Where | Changes when | Consumed by |
 | --- | --- | --- | --- |
 | Manifest schema version | `version: 1` / `SCHEMA_VERSION_CURRENT` | backward-incompatible manifest change | `enrich-project.py` migrations |
-| Scaffold release version | git tag `vX.Y.Z` → `scaffold_version` | every release | `--check-version`, loop update nudge |
+| Scaffold release version | git tag `vX.Y.Z` → `.phasekit-version` (pinned) / `scaffold_version` (vendored) | every release | the engine store, `phasekit upgrade`; `--check-version` and the loop update nudge (vendored) |
 
 ## Scaffold release version
 
@@ -24,9 +31,12 @@ schema-compatibility contract.
 - No tags at all (or git unavailable): falls back to the short commit, or
   `0.0.0+git.unknown`
 
-It is recorded in every enriched project's `.scaffold/manifest.json` alongside
-`scaffold_commit` and `origin_url`, so a project always knows what it was built
-from and where upstream lives.
+In a vendored project it is recorded in `.scaffold/manifest.json` alongside
+`scaffold_commit` and `origin_url`, so the project knows what it was built
+from and where upstream lives. A pinned project records only the tag, in
+`.phasekit-version`; an installed engine records its tag and full commit in
+`.engine-version` and `.engine-commit`. Only exact `vMAJOR.MINOR.PATCH` tags,
+`v0.19.0` or later, can be pinned — a describe string is never a pin.
 
 ## Pre-tag: the suite under the runtime's jq (v0.14.12)
 
@@ -38,7 +48,7 @@ green. So before tagging a release that touches `scripts/run-until-done.sh`,
 the hooks, or the image, run the boundary-state suite **inside the image**:
 
 ```bash
-bash scripts/container-setup.sh build     # if the image is stale
+phasekit container build                  # if the image is stale (from the phasekit checkout)
 bash scripts/verify-in-container.sh       # tests.test_boundary_state, repo mounted read-only
 ```
 
@@ -97,6 +107,23 @@ t=$(mktemp -d) && TMPDIR=$t python3 -m unittest discover -s tests -p 'test_*.py'
 A new test module needs the one line `import _suite_tmp  # noqa: F401`;
 `tests/test_suite_tmpdir.py` refuses a module without it.
 
+## Pre-tag: the loop behaves the same with the engine outside the tree (v0.19.0)
+
+Every loop-behaviour test builds its fixture project through `tests/_layout.py`,
+so the same case runs in both layouts: `PHASEKIT_TEST_LAYOUT=vendored` (the
+default — the engine's files in the fixture's own tree) and
+`PHASEKIT_TEST_LAYOUT=pinned` (the fixture holds no engine file; the engine is a
+separate, read-only directory and the loop is pointed at the project with
+`PHASEKIT_PROJECT_DIR`). The full suite runs vendored; run the loop-behaviour
+modules (`LAYOUT_MODULES`) again pinned:
+
+```bash
+bash tests/run-layouts.sh pinned          # or: both
+```
+
+A case green vendored and red pinned is a release blocker: it means the engine
+reads or writes the project through its own location (or the reverse).
+
 ## Pre-tag: the release note names every loop surface it moved (v0.16.0)
 
 A downstream project may pin a loop internal in its own tests — xmeo-v3 pinned
@@ -128,19 +155,52 @@ moved" from "nobody looked".
    git push origin v0.2.0
    ```
 
-Pushing the tag is the release action: new installs (`install.sh`) and `phasekit self-update` track the highest `v*` tag, and the loop nudge / `--check-version` compare against it. Until a tag is pushed, nothing downstream sees the change.
+Pushing the tag is the release action: new installs (`install.sh`) and `phasekit self-update` track the highest `v*` tag, and the loop nudge / `--check-version` (vendored) compare against it. Until a tag is pushed, nothing downstream sees the change.
+
+4. On every host that runs pinned projects, put the tag into the engine store:
+   `phasekit self-update` does it when it lands on the tag (so does a fresh
+   `install.sh`); `phasekit engines install vX.Y.Z` does it explicitly. A pinned
+   project whose engine is missing fetches it on first use unless the host runs
+   with `PHASEKIT_NO_AUTO_FETCH=1` — then this step is required.
+5. If the release changes `.devcontainer/`, rebuild the shared image once per
+   host (`phasekit container build`): a pinned run never rebuilds or retags the
+   image per dispatch.
 
 There is no `CHANGELOG.md` yet; the annotated tag message and `git log` are the
 record.
 
+## Rolling a release out
+
+- **Pinned projects: a pin bump.** In each project, `phasekit upgrade` (or
+  `phasekit upgrade --to vX.Y.Z`) installs the engine, writes the pin, runs the
+  project's own gate under the new engine, and commits one line
+  (`chore(phasekit): pin vA -> vB`); a red gate changes nothing (exit 4) and the
+  project stays on its old release. It can run at any time: a running iteration
+  finishes on the engine it started with, and a pin bump on the integration
+  branch reaches an open iteration's work branch only at its merge-back (the pin
+  travels with the branch). There is no rest window to wait for and no skip to
+  write down. `phasekit check` (exit 0 / 3 / 6) confirms the result.
+- **Vendored projects (legacy, until migrated):** upgraded the old way — the
+  vendored 3-way `phasekit upgrade` at the project's resting boundary
+  (`docs/INSTALL_LIFECYCLE.md`, the legacy section). `phasekit migrate` converts
+  one to a pin.
+- **A supervisor that vendors phasekit's contract** (`contracts/interface.json`)
+  re-vendors it after each release while it is itself vendored; once it is
+  pinned, it reads the contract from its pinned engine and the pin bump replaces
+  the re-vendor.
+
 ## How downstream discovers updates
 
-- **Explicit:** from a scaffold clone, `phasekit --check-version /path/to/project`
+- **Pinned projects:** `phasekit self-update` learns new release tags;
+  `phasekit upgrade` then bumps to the newest release known on the machine, or
+  says there is nothing to do. The loop's update nudge reads the vendored
+  manifest, so a pinned project gets no nudge.
+- **Explicit (vendored):** from a scaffold clone, `phasekit --check-version /path/to/project`
   reports the project's recorded version vs the running scaffold, using git
   ancestry for a precise "behind by N commits" verdict when resolvable.
-- **Automatic:** `scripts/run-until-done.sh` prints a one-line, non-fatal nudge
+- **Automatic (vendored):** `scripts/run-until-done.sh` prints a one-line, non-fatal nudge
   at loop start when a newer `v*` tag exists upstream (read via `git ls-remote`
   against the manifest's `origin_url`, falling back to the canonical remote).
   Opt out with `PHASEKIT_NO_UPDATE_CHECK=1`.
 
-Neither auto-upgrades; both point the operator at `phasekit --upgrade`.
+Neither auto-upgrades; both point the operator at the vendored upgrade (`phasekit upgrade`).

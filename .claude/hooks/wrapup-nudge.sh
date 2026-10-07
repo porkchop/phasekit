@@ -134,7 +134,7 @@ Stop expanding scope NOW. No new work, no new reviews, no memory writes.
 Close out in this order, then end your turn:
   1. Write your verdict: artifacts/phase-update.json (the phase is not done —
      almost always right here), phase-approval.json, or project-complete.json.
-  2. Run `bash scripts/phasekit.sh verify` ONCE — the gate exactly as the
+  2. Run `phasekit verify` ONCE — the gate exactly as the
      commit runs it; a green verdict is reused by the commit, not repeated.
   3. End your turn without changing anything after a green verify.
 

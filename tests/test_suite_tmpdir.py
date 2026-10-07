@@ -69,10 +69,7 @@ class TheLoopCleansItsTemporaries(unittest.TestCase):
         repo = H.Repo(squash=False)
         self.addCleanup(repo.cleanup)
         tmp = self._fresh()
-        r = subprocess.run(["bash", str(repo.repo / "scripts" / "run-until-done.sh"), "verify"],
-                           cwd=repo.repo, capture_output=True, text=True, timeout=120,
-                           env={**os.environ, "TMPDIR": tmp, "STUB_DIR": str(repo.stub),
-                                "PHASEKIT_NO_UPDATE_CHECK": "1"})
+        r = repo.run_verb("verify", env={"TMPDIR": tmp})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(_left(tmp), [])
 

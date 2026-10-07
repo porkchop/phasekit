@@ -675,8 +675,13 @@ def advisory_line(reads):
 
 
 def _contract(root):
-    for rel in ("contracts/interface.json", "vendor/contracts/phasekit/interface.json"):
-        p = Path(root) / rel
+    candidates = [Path(root) / rel for rel in
+                  ("contracts/interface.json", "vendor/contracts/phasekit/interface.json")]
+    if (Path(root) / ".phasekit-version").is_file():
+        # v0.19.0: a pinned project carries no contract of its own; the facts
+        # are this engine's (scripts/phasekit.sh runs the PINNED engine's copy)
+        candidates = [Path(__file__).resolve().parent.parent / "contracts" / "interface.json"]
+    for p in candidates:
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):

@@ -4,11 +4,14 @@ This document describes how to run the scaffold's phase-gated workflow autonomou
 
 **This is opt-in.** Interactive collaboration mode (see `docs/EXECUTION_MODES.md`) is the default. Use containerized execution only when you want fully autonomous phase loops.
 
+The commands below are the `phasekit` CLI, run from inside the project: `phasekit container build|setup|run|shell`, with `phasekit run` short for `phasekit container run`. They run the engine's `scripts/container-setup.sh` against the project. In a **pinned** project (v0.19.0 and later: `.phasekit-version`, no engine files in the tree) that is the pinned engine's copy from the engine store, with `PHASEKIT_PROJECT_DIR` naming the project; see [Pinned projects: the mounted engine](#pinned-projects-the-mounted-engine). In a **vendored** project (the engine in its own tree) it is the project's own copy, and everything behaves exactly as in v0.18.8; see [Legacy: vendored projects](#legacy-vendored-projects).
+
 ## Security model
 
 The container runs Claude Code with `--permission-mode bypassPermissions`. This means:
 - Claude can execute any command without prompting for approval
 - **Hooks still apply** — permission prompts are skipped, but the project's hooks run on every tool call (probed in scaffold-runner, claude 2.1.285, 2026-09-30): a PreToolUse hook that exits 2 refuses the call. `deny-dangerous-commands.sh` receives its payload as JSON on stdin; until v0.18.1 it read only `CLAUDE_TOOL_INPUT`, which the harness never sets, so it blocked nothing. Since v0.18.2 it is live, and under the loop it refuses the model's git writes to this repository — the loop owns every commit (docs/QUALITY_GATES.md "The loop owns every commit")
+- **The engine is read-only** — in a pinned project the engine is mounted read-only at `/opt/phasekit`, so a session cannot edit its own loop, hooks or guard; the hooks come from the engine's plugin, which the loop passes to every turn and checks before every turn (the guard self-check, `docs/EXECUTION_MODES.md`)
 - **Full repo access** — the bind mount gives Claude read/write access to the entire repository, including `.git` history (the guard refuses git writes by command; a program that runs git itself is caught by the loop's whole-tree check at every completion)
 - **`git add -A`** — the wrapper's commit function stages all changes; `.gitignore` and the loop's own exclusions (artifacts/logs/, artifacts/scratch/) are the only defense against committing unexpected files — scratch goes in `artifacts/scratch/` or `/tmp`
 
@@ -37,17 +40,17 @@ This uses a 2-phase workflow — first log in interactively, then run headless:
 
 ```bash
 # Phase 1: One-time setup — log in with your subscription
-bash scripts/container-setup.sh setup
+phasekit container setup
 # Inside the container, run:
 claude login
 # A URL is displayed — open it in your browser to complete OAuth.
 # Once logged in, exit the container.
 
 # Phase 2: Run the autonomous loop using stored credentials
-bash scripts/container-setup.sh run
+phasekit run
 ```
 
-Credentials are stored in a named Docker volume (`scaffold-claude-config`) and persist between container runs. You only need to repeat the setup phase if the credentials expire or the volume is deleted.
+Credentials are stored in a named Docker volume (`scaffold-claude-config`) and persist between container runs. You only need to repeat the setup phase if the credentials expire or the volume is deleted. The login is shared: `setup` mounts the whole volume (in a pinned project too), and every project's sessions use the one `.credentials.json` in it.
 
 **Important:** Do NOT set `ANTHROPIC_API_KEY` when using subscription auth — if set, it takes precedence over stored credentials.
 
@@ -61,38 +64,38 @@ For pay-per-token billing via the Anthropic API:
 
 ```bash
 export ANTHROPIC_API_KEY='sk-ant-...'
-bash scripts/container-setup.sh run
+phasekit run
 ```
 
 The key is passed into the container at runtime via `docker run -e` and never stored in any repo file.
 
 ## Prerequisites
 
-- Docker installed and running (Engine 26+ for the per-project session directory; see [Per-project session directory](#per-project-session-directory))
-- `ANTHROPIC_API_KEY` environment variable set (see above)
-- The scaffold repository cloned locally
+- Docker installed and running (Engine 26+ / API 1.45+ for the per-project session directory and, in a pinned project, the per-project config root, which refuses older Docker; see [Per-project session directory](#per-project-session-directory))
+- Subscription credentials from `phasekit container setup`, or `ANTHROPIC_API_KEY` set (see above)
+- phasekit installed (`install.sh`): the `phasekit` CLI and the engine store
 
 ## Quick start
 
 ```bash
 # Build the container image
-bash scripts/container-setup.sh build
+phasekit container build
 
 # One-time setup: log in with your Claude subscription
-bash scripts/container-setup.sh setup
+phasekit container setup
 # Inside the container, run: claude login
 
 # Run the autonomous phase loop (using stored subscription credentials)
-bash scripts/container-setup.sh run
+phasekit run
 
 # Or with an API key instead:
-ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" bash scripts/container-setup.sh run
+ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" phasekit run
 
 # Open an interactive shell inside the container
-bash scripts/container-setup.sh shell
+phasekit container shell
 ```
 
-All three modes (build, run, shell) initialize the firewall before executing the main command. There is no way to accidentally bypass the firewall through `container-setup.sh`.
+The `run`, `setup` and `shell` commands initialize the firewall inside the container before executing the main command. There is no way to accidentally bypass the firewall through `container-setup.sh`.
 
 ## Container contents
 
@@ -108,7 +111,20 @@ The Dockerfile (`.devcontainer/Dockerfile`) is based on [Anthropic's reference d
 - Entrypoint wrapper (`entrypoint.sh`) that runs firewall and injects MCP config before the main command
 - Non-root `node` user (UID 1000) for execution
 
-The working directory (`/workspace`) is bind-mounted from the host, so all changes are visible on both sides.
+The working directory (`/workspace`) is bind-mounted from the host, so all changes are visible on both sides. In a pinned project the engine is also mounted, read-only, at `/opt/phasekit`.
+
+## Pinned projects: the mounted engine
+
+*v0.19.0.* For a pinned project, `container-setup.sh` (the engine's copy, run with `PHASEKIT_PROJECT_DIR` set to the project — `phasekit run` does this) starts the container with:
+
+- the project at `/workspace`, read-write, as before;
+- the engine directory from the store at `/opt/phasekit`, **read-only**;
+- `-e PHASEKIT_PROJECT_DIR=/workspace`, so the engine's loop works on the project;
+- `/opt/phasekit/bin` first on `PATH`, so `phasekit` inside the container is the mounted engine (the loop also puts its own `phasekit` shim first, which runs the loop's own engine);
+- the loop started as `/opt/phasekit/scripts/run-until-done.sh`;
+- the session's own Claude config root (next section), not the whole config volume.
+
+**The image is never built or retagged per dispatch.** One shared image (`IMAGE_NAME`, default `scaffold-runner`) serves every project; a project on an older engine must not retag it for all the others. `run` and `shell` use the existing image; only when it does not exist at all are they allowed to build it once, from the engine's `.devcontainer/` (the first run of a fresh install). `PHASEKIT_IMAGE_PREBUILT=1` skips even the existence check. Rebuild deliberately with `phasekit container build` (it builds from the engine's `.devcontainer/`), for example after a release that changes the image.
 
 ## Playwright MCP server (browser automation)
 
@@ -128,7 +144,7 @@ The MCP server runs in headless mode with `--no-sandbox` (standard for Docker co
 To skip Playwright MCP injection (e.g., for non-browser projects):
 
 ```bash
-SKIP_PLAYWRIGHT_MCP=1 bash scripts/container-setup.sh run
+SKIP_PLAYWRIGHT_MCP=1 phasekit run
 ```
 
 ### Interactive mode setup
@@ -143,12 +159,12 @@ This registers the server in your user-level Claude configuration. Add `--headle
 
 ## How it works
 
-1. `container-setup.sh build` builds the Docker image from `.devcontainer/`
-2. `container-setup.sh run` starts the container with firewall capabilities
+1. `phasekit container build` builds the Docker image from the engine's `.devcontainer/`
+2. `phasekit run` starts the container with firewall capabilities (pinned: the engine mounted read-only at `/opt/phasekit`, the image reused)
 3. `entrypoint.sh` runs `init-firewall.sh` (default-deny + whitelisted domains)
 4. `entrypoint.sh` injects Playwright MCP server config into `.claude/settings.local.json`
-5. After firewall and MCP init, the entrypoint executes `scripts/run-until-done.sh`
-6. `run-until-done.sh` calls `run-phase.sh` in a loop, each invocation using `--permission-mode bypassPermissions`
+5. After firewall and MCP init, the entrypoint executes the engine's `run-until-done.sh` (pinned: `/opt/phasekit/scripts/run-until-done.sh`)
+6. `run-until-done.sh` calls `run-phase.sh` in a loop, each invocation using `--permission-mode bypassPermissions` (pinned: also `--plugin-dir /opt/phasekit/plugin`, after the guard self-check)
 7. Each phase writes `artifacts/phase-approval.json`, which the wrapper commits before the next iteration
 8. The loop stops when `artifacts/project-complete.json` appears, a blocker is written, or `MAX_ITERATIONS` is reached
 
@@ -162,7 +178,7 @@ This registers the server in your user-level Claude configuration. Add `--headle
 | `PHASEKIT_ITER_RETRY` | `1` | Retry budget per iteration on a transient `claude` CLI failure; see `docs/EXECUTION_MODES.md` |
 | `PHASEKIT_TRACE` | (unset) | Set to `1` to enable `set -x` xtrace in the wrapper scripts (host and inside the container); see `docs/EXECUTION_MODES.md` |
 | `IMAGE_NAME` | `scaffold-runner` | Docker image name |
-| `CLAUDE_VOLUME` | `scaffold-claude-config` | Named Docker volume for `~/.claude` credential persistence |
+| `CLAUDE_VOLUME` | `scaffold-claude-config` | Named Docker volume for `~/.claude` credential persistence. A host directory path (starting with `/`) is also accepted; a pinned session then gets bind mounts of its parts instead of volume-subpath mounts |
 | `GIT_USER_NAME` | `Scaffold Runner` | Git author name for commits |
 | `GIT_USER_EMAIL` | `scaffold-runner@localhost` | Git author email for commits |
 | `SKIP_PLAYWRIGHT_MCP` | (empty) | Set to `1` to skip Playwright MCP injection |
@@ -170,6 +186,8 @@ This registers the server in your user-level Claude configuration. Add `--headle
 | `PHASEKIT_ROOTLESS_DOCKER` | (unset) | Set to `1` to run the container as UID 0 for rootless Docker bind mounts; see [Rootless Docker](#rootless-docker) |
 | `PHASEKIT_CONTAINER_USER` | (unset) | Lower-level override for `docker run --user` (`root` or `uid:gid`); takes precedence over `PHASEKIT_ROOTLESS_DOCKER` |
 | `PHASEKIT_CONTRACTS_MOUNT` | (unset) | Host path to a provider's contracts tree; bind-mounted read-only at `/contracts`; see [Cross-project contracts mount](#cross-project-contracts-mount) |
+| `PHASEKIT_PROJECT_DIR` | (unset) | The project directory for an engine outside the tree (pinned). Set by `phasekit run` / `phasekit container`; unset means the vendored layout (the script's own checkout is the project) |
+| `PHASEKIT_IMAGE_PREBUILT` | (unset) | Pinned projects: `1` skips the check that the image exists (and the one-time build when it does not) |
 
 ## Per-project session directory
 
@@ -186,7 +204,7 @@ concurrent sessions appending to one file. The loop now resumes by explicit sess
 `container-setup.sh` gives each session its own directory of the same volume,
 `project-sessions/<key>`, mounted over the WHOLE `/home/node/.claude/projects/-workspace`
 (one mount — Docker's `volume-subpath`, Docker Engine 26+ / API 1.45+; it replaces v0.18.7's
-memory-only mount). `<key>` is the checkout's directory name (characters outside
+memory-only mount). `<key>` is the project directory's name (characters outside
 `A-Za-z0-9._-` become `_`, leading dots are dropped, an empty name is `_default`), so two
 checkouts with the same directory name share one directory. Before the session starts, a
 throwaway container (no network, the session's own user, the volume mounted where the session
@@ -203,11 +221,50 @@ docker client or daemon is older than API 1.45, the session gets an empty throwa
 still resume within it, and the next run (or a `CLAUDE_MODE=continue` start) begins a new
 conversation that re-anchors from the tree.
 
-Known limit: the whole config volume is still mounted at `/home/node/.claude` (it holds the
-login), so a session that goes looking can read `project-sessions/<other key>/` and
-`project-memory/` there. The CLI never resumes or remembers from those paths — only from
-`projects/-workspace`, which is this project's own — but a model running a shell command is not
-the CLI. Separating them fully needs a config root per project, which is not done here.
+Known limit (vendored projects): the whole config volume is still mounted at
+`/home/node/.claude` (it holds the login), so a session that goes looking can read
+`project-sessions/<other key>/` and `project-memory/` there. The CLI never resumes or remembers
+from those paths — only from `projects/-workspace`, which is this project's own — but a model
+running a shell command is not the CLI. A pinned project's sessions close this with a config
+root per project (next section).
+
+## Per-project config root (pinned projects)
+
+*v0.19.0.* A pinned project's container session sees, of the config volume (`CLAUDE_VOLUME`),
+exactly three things — never the whole volume:
+
+| In the volume | Mounted at | What it is |
+|---|---|---|
+| `project-config/<key>` | `/home/node/.claude` | the project's own config root: its settings, `.claude.json`, history, shell snapshots and caches |
+| `project-sessions/<key>` | `/home/node/.claude/projects/-workspace` | its transcripts and memory, exactly as in v0.18.8 (carried over; nothing moved or deleted) |
+| `.credentials.json` | `/home/node/.claude/.credentials.json` | the **shared** login, one read-write file mount |
+
+`<key>` is the project directory's name (the same key as the session directory). The first time,
+the root is created (atomically, in the same throwaway preparation container) and seeded with a
+copy of the shared `settings.json` and a minimal `.claude.json` that marks `/workspace` trusted and
+onboarding done — no other state.
+
+**The login.** Refresh tokens rotate (measured 2026-10-07: a refresh replaced the shared refresh
+token), so the credentials are never copied and never read-only: a copy or a read-only file would
+strand a rotated token in one session and log everyone else out. They are one read-write FILE
+mount, and a file mount pins the file's inode — while every whole-volume writer (a vendored
+project's session, `setup`, a supervisor's own containers) replaces the file by renaming a staging
+file over it. A pinned session therefore **never refreshes the login itself**: it starts only when
+the shared access token outlives it (until `PHASEKIT_SESSION_DEADLINE`, else two hours, plus 15
+minutes). When the token expires sooner, the login is refreshed **first**: a throwaway, networked
+container gives a copy of the login (marked expired) to a tiny `claude -p` (haiku) in a throwaway
+config directory, then writes the refreshed login back **in place** (same inode, so every running
+pinned session sees it; Claude Code itself also writes in place over a mount point, its rename
+failing with `EBUSY`). No credential is ever printed; only the new expiry is read back. Refreshes are serialised by a lock file in the volume (`.phasekit-login.lock`) and the expiry is re-checked under it, so concurrent pinned preps refresh once. An unbounded pinned session (`phasekit container shell`, or a run without `PHASEKIT_SESSION_DEADLINE`) is guaranteed two hours; beyond that it may refresh the login itself, which is safe only while no whole-volume writer has replaced the file since the session started.
+`PHASEKIT_LOGIN_REFRESH=0` refuses the session instead of refreshing. With no shared login in the
+volume, the session needs `ANTHROPIC_API_KEY` (or run `phasekit container setup`).
+
+This needs Docker's `volume-subpath` (Engine 26+ / API 1.45+). On older Docker, or when the root
+cannot be prepared, a pinned session is **refused** — it never falls back to the whole volume.
+Alternatively set `CLAUDE_VOLUME` to a host directory (an absolute path): the same three parts are
+then bind-mounted, which works on any Docker version. A `CLAUDE_VOLUME` containing a comma is
+refused (a `--mount` value cannot carry it). `phasekit container setup` still mounts the whole
+volume, because the login it creates is the shared one.
 
 ## Cross-project contracts mount
 
@@ -221,7 +278,7 @@ the in-container tooling can find it.
 
 ```bash
 PHASEKIT_CONTRACTS_MOUNT=/srv/foundry/contracts \
-  bash scripts/container-setup.sh run
+  phasekit run
 ```
 
 Two rules govern the mount, and they pull in opposite directions on purpose:
@@ -276,7 +333,7 @@ mapped UIDs your host user cannot touch.
 Set `PHASEKIT_ROOTLESS_DOCKER=1`:
 
 ```bash
-PHASEKIT_ROOTLESS_DOCKER=1 bash scripts/container-setup.sh run
+PHASEKIT_ROOTLESS_DOCKER=1 phasekit run
 ```
 
 This runs the container process as UID 0. Because Docker is rootless, **container
@@ -293,8 +350,8 @@ For finer control (e.g. matching a specific host UID/GID), use the lower-level
 override instead — it accepts `root` or a raw `uid:gid`:
 
 ```bash
-PHASEKIT_CONTAINER_USER=root        bash scripts/container-setup.sh run
-PHASEKIT_CONTAINER_USER=1001:1001   bash scripts/container-setup.sh run
+PHASEKIT_CONTAINER_USER=root        phasekit run
+PHASEKIT_CONTAINER_USER=1001:1001   phasekit run
 ```
 
 `PHASEKIT_CONTAINER_USER` takes precedence over `PHASEKIT_ROOTLESS_DOCKER`.
@@ -306,7 +363,7 @@ PHASEKIT_CONTAINER_USER=1001:1001   bash scripts/container-setup.sh run
 
 ## VS Code devcontainer support (optional)
 
-The `.devcontainer/devcontainer.json` file provides optional VS Code integration. If you open this repo in VS Code with the Dev Containers extension, it will offer to reopen in the container. This is entirely optional — the CLI-only path via `container-setup.sh` does not require VS Code.
+The `.devcontainer/devcontainer.json` file (in the phasekit repository, and in a vendored project) provides optional VS Code integration. If you open such a repo in VS Code with the Dev Containers extension, it will offer to reopen in the container. This is entirely optional — the CLI-only path via `container-setup.sh` does not require VS Code.
 
 When using VS Code, the firewall runs via `postStartCommand` instead of the entrypoint wrapper.
 
@@ -323,7 +380,7 @@ USER node
 
 ```bash
 docker build -t my-project-runner -f Dockerfile.project .
-IMAGE_NAME=my-project-runner bash scripts/container-setup.sh run
+IMAGE_NAME=my-project-runner phasekit run
 ```
 
 ## Firewall maintenance
@@ -349,10 +406,11 @@ If you previously used the `container/Dockerfile` from M5:
 After building, run the verification script to check that all tools are correctly installed:
 
 ```bash
-# From inside the container (e.g. after container-setup.sh shell)
-bash scripts/verify-container.sh
+# From inside the container (after phasekit container shell; pinned: the engine's copy)
+bash /opt/phasekit/scripts/verify-container.sh
 
-# Or directly from the host (--entrypoint bypasses firewall which needs extra caps)
+# Or directly from the host, from the phasekit checkout or a vendored project
+# (--entrypoint bypasses firewall which needs extra caps)
 docker run --rm --entrypoint bash -v "$(pwd)":/workspace -w /workspace scaffold-runner scripts/verify-container.sh
 ```
 
@@ -363,8 +421,30 @@ The script checks: core tools (claude, git, jq, python3+pyyaml), Playwright MCP 
 - **"ANTHROPIC_API_KEY is not set"**: Export the variable before running
 - **"Firewall initialization failed"**: Ensure Docker supports `--cap-add=NET_ADMIN` (rootless Docker may not)
 - **Permission errors on /workspace**: Under standard Docker, ensure the host directory is readable by UID 1000 (the `node` user). Under **rootless Docker** these errors are expected with the default user — run with `PHASEKIT_ROOTLESS_DOCKER=1` (see [Rootless Docker](#rootless-docker))
-- **`fatal: detected dubious ownership in repository at '/workspace'`** (git exits 128): the bind-mounted workspace is owned by a different UID than the container user. The image marks `/workspace` as a git `safe.directory`, so **rebuild** to pick up the fix (`bash scripts/container-setup.sh build`). If extending the image with your own Dockerfile, re-apply `git config --global --add safe.directory /workspace`
+- **`fatal: detected dubious ownership in repository at '/workspace'`** (git exits 128): the bind-mounted workspace is owned by a different UID than the container user. The image marks `/workspace` as a git `safe.directory`, so **rebuild** to pick up the fix (`phasekit container build`). If extending the image with your own Dockerfile, re-apply `git config --global --add safe.directory /workspace`
 - **Claude CLI not found**: Rebuild the image to pick up the latest CLI version
-- **Phase loop exits immediately**: Check that `CONTINUE_PROMPT.txt` exists in the repo root
+- **Phase loop exits immediately**: In a vendored project, check that `CONTINUE_PROMPT.txt` exists in the repo root; in a pinned one the prompt is the engine's — check `phasekit check` (the pin is installed) and that the engine mount at `/opt/phasekit` is present
+- **`phasekit: REFUSING the turn — the guard self-check failed`** (pinned): the engine's plugin did not load in the session, so the loop will not start a model turn without its command guard (`run-phase.sh` exits 7). Check that `/opt/phasekit/plugin/` exists in the container and that `claude` and `jq` work there
+- **`container: config: … refusing`** (pinned): the per-project config root could not be mounted alone — upgrade Docker (Engine 26+), or set `CLAUDE_VOLUME` to a host directory; see [Per-project config root](#per-project-config-root-pinned-projects)
 - **Firewall blocking needed domains**: Check `init-firewall.sh` whitelist; add domains if your workflow requires additional network access
 - **Stale DNS in long-running containers**: The firewall resolves domain IPs at startup; CDN-backed services may rotate IPs over time. Restart the container or re-run `sudo /usr/local/bin/init-firewall.sh` to refresh
+
+## Legacy: vendored projects
+
+A vendored project (the engine in its own tree; every project created before v0.19.0) runs its
+own copy of the script, so `phasekit container <cmd>` and `phasekit run` behave exactly as the
+direct forms below, as in v0.18.8:
+
+```bash
+bash scripts/container-setup.sh build    # vendored: build the image from the project's own .devcontainer/
+bash scripts/container-setup.sh setup    # vendored: interactive login
+bash scripts/container-setup.sh run      # vendored: rebuild the image, then run scripts/run-until-done.sh
+bash scripts/container-setup.sh shell    # vendored: a shell in the container
+```
+
+Differences from a pinned project: the project's own tree is the engine (nothing at
+`/opt/phasekit`, no `PHASEKIT_PROJECT_DIR`); `run` and `shell` rebuild the image from the project's
+`.devcontainer/` every time; the whole config volume is mounted at `/home/node/.claude` with the
+per-project session directory over `projects/-workspace` (and the tmpfs fallback on older
+Docker, rather than a refusal); and the hooks are the project's own, wired in its
+`.claude/settings.json` (an installed plugin steps aside for them).

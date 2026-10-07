@@ -74,7 +74,7 @@ class InstallerBranchFastForward(unittest.TestCase):
                 **os.environ,
                 "PHASEKIT_URL": str(remote),
                 "PHASEKIT_REF": "master",
-                "PHASEKIT_HOME": str(home),
+                "PHASEKIT_HOME": str(home), "PHASEKIT_NO_PLUGIN": "1",
                 "PHASEKIT_BIN": str(Path(d) / "bin"),
             }
             _run(["bash", str(INSTALLER)], env=env)
@@ -144,7 +144,7 @@ class InstallerIntegration(unittest.TestCase):
                 **os.environ,
                 "PHASEKIT_URL": str(REPO_ROOT),
                 "PHASEKIT_REF": head,
-                "PHASEKIT_HOME": str(home),
+                "PHASEKIT_HOME": str(home), "PHASEKIT_NO_PLUGIN": "1",
                 "PHASEKIT_BIN": str(bindir),
             }
             result = _run(["bash", str(INSTALLER)], env=env)
@@ -204,7 +204,7 @@ class Channels(unittest.TestCase):
         return remote, a, b
 
     def _install(self, url, home, ref=None):
-        env = {**os.environ, "PHASEKIT_URL": str(url), "PHASEKIT_HOME": str(home),
+        env = {**os.environ, "PHASEKIT_URL": str(url), "PHASEKIT_HOME": str(home), "PHASEKIT_NO_PLUGIN": "1",
                "PHASEKIT_BIN": str(Path(home).parent / "bin")}
         if ref is not None:
             env["PHASEKIT_REF"] = ref

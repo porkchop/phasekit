@@ -29,6 +29,7 @@ import time
 import unittest
 from pathlib import Path
 import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
+from _layout import hook_argv
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / ".claude" / "hooks" / "require-verdict.sh"
@@ -68,7 +69,7 @@ class HookFixture(unittest.TestCase):
 
     def run_hook(self, **overrides):
         return subprocess.run(
-            ["bash", str(HOOK)],
+            hook_argv(HOOK),
             input=json.dumps({"session_id": "x", "hook_event_name": "Stop"}),
             capture_output=True, text=True, env=self.env(**overrides),
         )

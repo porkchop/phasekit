@@ -15,6 +15,7 @@ import tempfile
 import time
 import unittest
 import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
+from _layout import STUB_ROOT_LINE, Layout, mark_pinned
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOOP_SCRIPT = os.path.join(REPO_ROOT, "scripts", "run-until-done.sh")
@@ -24,7 +25,7 @@ HAVE_TOOLS = all(shutil.which(c) for c in ("bash", "git", "jq"))
 
 STUB_RUN_PHASE = """#!/usr/bin/env bash
 set -euo pipefail
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+""" + STUB_ROOT_LINE + """
 cd "$ROOT_DIR"
 : "${STUB_DIR:?stub state dir must be set}"
 n=$(( $(cat "$STUB_DIR/calls" 2>/dev/null || echo 0) + 1 ))
@@ -32,7 +33,7 @@ echo "$n" > "$STUB_DIR/calls"
 printf 'call=%s iter=%s model=%s mode=%s\\n' \
   "$n" "${PHASEKIT_ITER:-}" "${ANTHROPIC_MODEL-__unset__}" "${CLAUDE_MODE:-}" \
   >> "$STUB_DIR/log"
-cp "$1" "$STUB_DIR/prompt-$n.txt"
+cat "$1" > "$STUB_DIR/prompt-$n.txt"
 sleep 0.05
 CALL_N="$n" bash "$ROOT_DIR/scripts/scenario.sh"
 """
@@ -163,11 +164,14 @@ class LoopHarness(unittest.TestCase):
         os.makedirs(os.path.join(self.repo, "artifacts"))
         os.makedirs(os.path.join(self.repo, "docs"))
         os.makedirs(self.stub_dir)
-        shutil.copy(LOOP_SCRIPT, os.path.join(self.repo, "scripts", "run-until-done.sh"))
-        self._write("scripts/run-phase.sh", STUB_RUN_PHASE, executable=True)
-        self._write("CONTINUE_PROMPT.txt", "standard continue prompt\n")
+        self.layout = Layout(self.repo)
+        self.addCleanup(self.layout.cleanup)
+        self.layout.put("scripts/run-until-done.sh", src=LOOP_SCRIPT)
+        self.layout.put("scripts/run-phase.sh", STUB_RUN_PHASE, executable=True)
+        self.layout.put("CONTINUE_PROMPT.txt", "standard continue prompt\n")
         self._write("docs/PHASES.md", "# Phases\n")
         self._write("src.txt", "base\n")
+        mark_pinned(self.repo)
         self._git("init", "-q", "-b", "main")
         self._git("config", "user.email", "test@test")
         self._git("config", "user.name", "test")
@@ -217,8 +221,9 @@ class LoopHarness(unittest.TestCase):
             "STUB_DIR": self.stub_dir,
         })
         run_env.update(env or {})
+        run_env = self.layout.env(run_env)
         return subprocess.run(
-            ["bash", os.path.join(self.repo, "scripts", "run-until-done.sh")],
+            self.layout.loop_cmd(),
             cwd=self.repo, env=run_env, capture_output=True, text=True, timeout=120)
 
     def _calls(self) -> int:

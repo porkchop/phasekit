@@ -15,7 +15,7 @@ See `README.md` for product detail and `docs/SPEC.md` for the product specificat
 - Prefer **minimal, backward-compatible** changes.
 - **Stop after writing `artifacts/phase-approval.json`** — do not proceed past a phase until the repository has been committed externally.
 - **The loop owns every commit**: never run git commands that write history, refs or the index (commit, add, rm, mv, reset, restore, checkout, switch, stash, merge, rebase, cherry-pick, revert, tag, branch -f/-D, update-ref, worktree, push) — the command guard refuses them. Write your verdict artifact; the loop commits it, verify-gated. To undo an edit of your own, edit the file back (`git show HEAD:<path> > <path>` restores the committed bytes).
-- **Tests read the declared surface**: a test reads this project's own tree and phasekit's DECLARED surface (`contracts/interface.json` `facts`, or `bash scripts/phasekit.sh facts --json`), never scaffold-owned files (the vendored loop and scripts, the hooks, the scaffold docs); a fact a test needs that the surface lacks is a request to phasekit, not a parse (docs/QUALITY_GATES.md "Tests read the declared surface").
+- **Tests read the declared surface**: a test reads this project's own tree and phasekit's DECLARED surface (`contracts/interface.json` `facts`, {{#vendored}}or `bash scripts/phasekit.sh facts --json`), never scaffold-owned files (the vendored loop and scripts, the hooks, the scaffold docs); a fact a test needs that the surface lacks is a request to phasekit, not a parse (docs/QUALITY_GATES.md "Tests read the declared surface").{{/vendored}}{{#pinned}}or `phasekit facts --json`), never the engine's files (the loop and scripts, the hooks, the engine docs); a fact a test needs that the surface lacks is a request to phasekit, not a parse (the engine's QUALITY_GATES.md "Tests read the declared surface").{{/pinned}}
 - Scratch files go in artifacts/scratch/ (ignored, never committed, cleared when an iteration starts) or /tmp — never elsewhere in the tree: the loop commits everything else it finds.
 - Treat containerized unattended mode as **opt-in**. Permissive execution must live in local/container-only configuration or explicit CLI overrides — never in shared project settings.
 
@@ -40,16 +40,19 @@ Before non-trivial work, read:
 - `docs/ARCHITECTURE.md` — technical architecture
 - `docs/DESIGN.md` (if present) — steady-state system design: subsystems, data flows, hot spots, boundaries
 - `docs/PHASES.md` — phase plan for this project
-- `docs/QUALITY_GATES.md` — universal/testing/DRY/drift/planning/control-loop/commit gates (scaffold-owned)
-- `docs/project/QUALITY_GATES.md` — this project's own gates, read alongside the scaffold's
+{{#vendored}}- `docs/QUALITY_GATES.md` — universal/testing/DRY/drift/planning/control-loop/commit gates (scaffold-owned)
+{{/vendored}}{{#pinned}}- `QUALITY_GATES.md` in phasekit's engine docs — universal/testing/DRY/drift/planning/control-loop/commit gates (`phasekit docs` prints the directory; the engine is outside this repository)
+{{/pinned}}- `docs/project/QUALITY_GATES.md` — this project's own gates, read alongside the scaffold's
 - `docs/PROD_REQUIREMENTS.md` — production/deployment requirements
-- `docs/USAGE_PATTERNS.md` — workflow patterns
-- `.claude/CLAUDE.md` — project instructions (loaded automatically by Claude Code)
+{{#vendored}}- `docs/USAGE_PATTERNS.md` — workflow patterns
+{{/vendored}}{{#pinned}}- `USAGE_PATTERNS.md` in phasekit's engine docs — workflow patterns
+{{/pinned}}- `.claude/CLAUDE.md` — project instructions (loaded automatically by Claude Code)
 
 ## Subagents available
 
-Subagents live in `.claude/agents/`. Use the right one for the task — do not improvise across roles.
-
+{{#vendored}}Subagents live in `.claude/agents/`. Use the right one for the task — do not improvise across roles.
+{{/vendored}}{{#pinned}}Subagents come from phasekit's Claude Code plugin, namespaced `phasekit:<agent>` (e.g. `phasekit:project-lead`). Use the right one for the task — do not improvise across roles.
+{{/pinned}}
 | Agent | Use when |
 |---|---|
 | `project-lead` | Orchestrating phased delivery; deciding the next smallest verified step |
@@ -88,14 +91,17 @@ Stop and confirm with the human before:
 - Schema migrations on shared/production data
 - Anything touching auth, secrets, or public exposure
 - Force-push or amending published commits
-- Changing `.claude/settings.json`, hooks, or other shared scaffold-managed files (these are tracked by `.scaffold/manifest.json` and will surface as drift on upgrade)
-
+{{#vendored}}- Changing `.claude/settings.json`, hooks, or other shared scaffold-managed files (these are tracked by `.scaffold/manifest.json` and will surface as drift on upgrade)
+{{/vendored}}{{#pinned}}- Changing `.claude/settings.json` or `.phasekit-version` (the engine pin: it moves only by `phasekit upgrade`)
+{{/pinned}}
 ## Which files this project may edit
 
-Every phasekit-installed file has an owner (`ownership` in `.scaffold/manifest.json`):
+{{#vendored}}Every phasekit-installed file has an owner (`ownership` in `.scaffold/manifest.json`):
 
 - **Scaffold-owned** (`scaffold`) — `docs/QUALITY_GATES.md` and the other process docs, `.claude/agents/`, `.claude/hooks/`, the loop scripts. Do not edit them here: every `phasekit upgrade` replaces them. Project additions go in the companion `docs/project/<NAME>.md` (`docs/project/QUALITY_GATES.md` is seeded); changes to the scaffold's text go upstream to phasekit.
-- **Project-owned** (`bootstrap-*`) — `docs/SPEC.md`, `docs/ARCHITECTURE.md`, `docs/PHASES.md`, `docs/CONVENTIONS.md`, `docs/project/*`, this file, `.claude/CLAUDE.md`, `scripts/phasekit-verify.sh`. Edit freely; phasekit never overwrites them and reports template changes only as advisory (`phasekit check --include-templates`).
+{{/vendored}}{{#pinned}}phasekit's engine — the loop, the hooks, the agents, the process docs — is not in this repository: it runs read-only from outside it, at the release `.phasekit-version` names (`phasekit docs` prints where its docs are). Project additions to its gates go in the companion `docs/project/<NAME>.md` (`docs/project/QUALITY_GATES.md` is seeded); changes to the engine's text go upstream to phasekit.
+
+{{/pinned}}- **Project-owned** (`bootstrap-*`) — `docs/SPEC.md`, `docs/ARCHITECTURE.md`, `docs/PHASES.md`, `docs/CONVENTIONS.md`, `docs/project/*`, this file, `.claude/CLAUDE.md`, `scripts/phasekit-verify.sh`. Edit freely; phasekit never overwrites them and reports template changes only as advisory (`phasekit check --include-templates`).
 
 ## Anti-rationalization
 
@@ -112,10 +118,14 @@ Reject these excuses:
 
 ## Scaffold provenance
 
-This repo was enriched by the `phasekit` scaffold. The provenance record is at `.scaffold/manifest.json` (committed, not gitignored). To audit, upgrade, or uninstall scaffold-installed files, use the scaffold's `enrich-project.py` engine. See `docs/INSTALL_LIFECYCLE.md` (if present) for the lifecycle contract.
-
+{{#vendored}}This repo was enriched by the `phasekit` scaffold. The provenance record is at `.scaffold/manifest.json` (committed, not gitignored). To audit, upgrade, or uninstall scaffold-installed files, use the scaffold's `enrich-project.py` engine. See `docs/INSTALL_LIFECYCLE.md` (if present) for the lifecycle contract.
+{{/vendored}}{{#pinned}}This repo is pinned to a phasekit release by `.phasekit-version`; the engine is installed once per machine (`install.sh`), not in this tree. `phasekit check` reports the project's health, `phasekit upgrade` bumps the pin through the project's gate. See INSTALL_LIFECYCLE.md in the engine docs for the lifecycle.
+{{/pinned}}
 ## Cross-tool notes
 
-- **Claude Code** is the primary target. Subagents in `.claude/agents/` are auto-discovered; skills under `.claude/skills/` follow Claude skill anatomy.
-- **OpenCode / Cursor / Copilot / Gemini CLI**: read this file. Subagents map to your tool's equivalent (custom modes, agents, etc.). The phase-gate model is tool-agnostic.
-- Hooks in `.claude/hooks/` are Claude-specific. Other tools should enforce equivalent boundaries via their own mechanisms before running Bash.
+{{#vendored}}- **Claude Code** is the primary target. Subagents in `.claude/agents/` are auto-discovered; skills under `.claude/skills/` follow Claude skill anatomy.
+{{/vendored}}{{#pinned}}- **Claude Code** is the primary target. phasekit's subagents and hooks come from its Claude Code plugin (`phasekit plugin install`, once per machine; the loop passes it itself), namespaced `phasekit:<agent>`.
+{{/pinned}}- **OpenCode / Cursor / Copilot / Gemini CLI**: read this file. Subagents map to your tool's equivalent (custom modes, agents, etc.). The phase-gate model is tool-agnostic.
+{{#vendored}}- Hooks in `.claude/hooks/` are Claude-specific. Other tools should enforce equivalent boundaries via their own mechanisms before running Bash.
+{{/vendored}}{{#pinned}}- phasekit's hooks are Claude-specific (its plugin). Other tools should enforce equivalent boundaries via their own mechanisms before running Bash.
+{{/pinned}}

@@ -53,3 +53,6 @@ dist/skills/**/skill.zip
 
 # Misc generated files
 *.log
+# The engine store of a canonical install (v0.19.0): one read-only checkout
+# per release tag, filled by `phasekit engines install`; never tracked.
+/engines/

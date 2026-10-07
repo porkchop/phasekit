@@ -43,7 +43,7 @@ _spec.loader.exec_module(H)
 
 RUN_PHASE_WITH_PID = """#!/usr/bin/env bash
 set -euo pipefail
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+""" + H.STUB_ROOT_LINE + """
 cd "$ROOT_DIR"
 mkdir -p artifacts/logs
 n=$(( $(cat "$STUB_DIR/calls" 2>/dev/null || echo 0) + 1 ))
@@ -83,9 +83,8 @@ class _Base(unittest.TestCase):
     def _repo(self, scenario):
         repo = H.Repo(squash=self.squash)
         self.addCleanup(repo.cleanup)
-        repo.write("scripts/run-phase.sh", RUN_PHASE_WITH_PID, executable=True)
-        repo.git("add", "-A")
-        repo.git("commit", "-qm", "run-phase with a pidfile")
+        repo.put_engine("scripts/run-phase.sh", RUN_PHASE_WITH_PID, executable=True,
+                        commit="run-phase with a pidfile")
         (repo.stub / "claude").write_text(scenario)
         return repo
 

@@ -28,6 +28,7 @@ import time
 import unittest
 from pathlib import Path
 import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
+from _layout import hook_argv
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / ".claude" / "hooks" / "wrapup-nudge.sh"
@@ -63,7 +64,7 @@ class HookFixture(unittest.TestCase):
 
     def run_hook(self, **overrides):
         return subprocess.run(
-            ["bash", str(HOOK)],
+            hook_argv(HOOK),
             input="{}",
             capture_output=True,
             text=True,
@@ -118,7 +119,7 @@ class HookFixture(unittest.TestCase):
     # -- per agent (v0.18.0) ---------------------------------------------------
 
     def run_payload(self, payload, **overrides):
-        return subprocess.run(["bash", str(HOOK)], input=json.dumps(payload), capture_output=True,
+        return subprocess.run(hook_argv(HOOK), input=json.dumps(payload), capture_output=True,
                               text=True, timeout=30, env=self.env(**overrides))
 
     def test_a_subagent_cannot_spend_the_main_agents_nudge(self):
@@ -152,8 +153,8 @@ class HookFixture(unittest.TestCase):
     def test_the_nudge_names_the_close_out_order(self):
         self.sentinel.touch()
         result = self.run_hook()
-        self.assertIn("phasekit.sh verify", result.stderr)
-        self.assertLess(result.stderr.index("Write your verdict"), result.stderr.index("phasekit.sh verify"))
+        self.assertIn("`phasekit verify`", result.stderr)
+        self.assertLess(result.stderr.index("Write your verdict"), result.stderr.index("`phasekit verify`"))
 
     def test_custom_sentinel_path_is_honoured(self):
         custom = self.tmp / "elsewhere"

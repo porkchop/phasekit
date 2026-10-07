@@ -1,0 +1,12 @@
+{
+  "name": "phasekit",
+  "owner": {"name": "phasekit"},
+  "description": "phasekit as a Claude Code plugin (installed by install.sh and `phasekit init`).",
+  "plugins": [
+    {
+      "name": "phasekit",
+      "source": "./plugin",
+      "description": "phasekit's guardrails and subagents for Claude Code."
+    }
+  ]
+}

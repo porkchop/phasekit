@@ -39,7 +39,8 @@ TARGETS=("$@")
 # v0.18.3: the guard's scope, the scaffold-reads advisory and the declared
 # facts' proofs (they run the loop's own functions on the image's jq/grep).
 [[ ${#TARGETS[@]} -gt 0 ]] || TARGETS=("tests.test_boundary_state" "tests.test_loop_owns_commits"
-  "tests.test_guard_scope" "tests.test_scaffold_reads" "tests.test_declared_surface")
+  "tests.test_guard_scope" "tests.test_scaffold_reads" "tests.test_declared_surface"
+  "tests.test_engine_outside")
 
 command -v docker >/dev/null 2>&1 || { echo "verify-in-container: docker not found" >&2; exit 2; }
 docker image inspect "$IMAGE_NAME" >/dev/null 2>&1 || {
@@ -85,6 +86,7 @@ exec docker run --rm -i \
   --entrypoint bash \
   --user "$run_user" \
   -e JQ_MIN="$JQ_MIN" \
+  -e PHASEKIT_TEST_LAYOUT="${PHASEKIT_TEST_LAYOUT:-vendored}" \
   -v "$ROOT_DIR:/workspace:ro" \
   -w /workspace \
   "$IMAGE_NAME" -s -- "${TARGETS[@]}" <<<"$IN_CONTAINER"

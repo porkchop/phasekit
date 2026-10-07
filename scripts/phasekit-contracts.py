@@ -504,7 +504,9 @@ def refresh_command(repo_root: Path) -> str:
     try:
         rel = script.relative_to(repo_root.resolve()).as_posix()
     except ValueError:
-        rel = str(script)
+        # v0.19.0: the engine runs this project from outside its tree (a
+        # pinned project): the CLI names the checker the engine provides.
+        return "phasekit contracts refresh"
     return f"python3 {rel} refresh"
 
 

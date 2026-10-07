@@ -28,6 +28,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
+from _layout import engine_dir_for
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOOP = REPO_ROOT / "scripts" / "run-until-done.sh"
@@ -114,7 +115,7 @@ class _Gates(unittest.TestCase):
     def gates(self, context="iteration", mode="standard"):
         script = (top_assignments("CREDENTIAL_TOKEN_RE", "PRIVATE_KEY_RE") + "\n"
                   + fn("post_verify_commit_gates")
-                  + f'ROOT_DIR="{self.repo}"; ARTIFACTS_DIR="{self.repo}/artifacts"; '
+                  + f'ENGINE_DIR="{engine_dir_for(self.repo)}"; ROOT_DIR="{self.repo}"; ARTIFACTS_DIR="{self.repo}/artifacts"; '
                   f'ITERATION_MODE="{mode}"\ncd "$ROOT_DIR"\npost_verify_commit_gates {context}\n')
         return subprocess.run(["bash", "-c", "set -euo pipefail\n" + script], capture_output=True,
                               text=True, timeout=60)

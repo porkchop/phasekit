@@ -499,6 +499,43 @@ generation:
 # re-installed *into* the scaffold; the class describes their downstream
 # behavior. (M9 §A clarification.)
 files:
+  # --- the engine outside the repository (v0.19.0): engine-only, never
+  # installed into a project (a pinned project runs them from the engine
+  # store; a vendored one keeps its vendored scripts) ---
+  scripts/phasekit-pin.py:
+    ownership: scaffold-internal
+    # pins, the engine store, and the verbs of a pinned project: init,
+    # migrate, check, upgrade (a gated pin bump), engines, plugin, docs.
+
+  bin/phasekit:
+    ownership: scaffold-internal
+    # the engine's own `phasekit` (on PATH in the container as
+    # /opt/phasekit/bin/phasekit): this engine's CLI, nothing more.
+
+  .claude-plugin/marketplace.json:
+    ownership: scaffold-internal
+    # the one-plugin marketplace `phasekit plugin install` (install.sh,
+    # `phasekit init`) adds for interactive Claude Code sessions.
+
+  plugin/.claude-plugin/plugin.json:
+    ownership: scaffold-internal
+
+  plugin/hooks/hooks.json:
+    ownership: scaffold-internal
+    # the same (event, matcher, hook) set as templates/settings.template.json
+    # (tests/test_engine_outside.py pins it) plus the loop's guard probe.
+
+  plugin/hooks/run-hook.sh:
+    ownership: scaffold-internal
+
+  plugin/hooks/scripts:
+    ownership: scaffold-internal
+    # a link to .claude/hooks: the hooks have one source.
+
+  plugin/agents:
+    ownership: scaffold-internal
+    # a link to .claude/agents: the agents have one source.
+
   # --- scaffold (copied verbatim downstream) ---
   CONTINUE_PROMPT.txt:
     ownership: scaffold

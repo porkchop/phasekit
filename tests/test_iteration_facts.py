@@ -27,15 +27,19 @@ import importlib.util
 import json
 import shutil
 import subprocess
+import os
 import unittest
 from pathlib import Path
 import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
+from _layout import engine_dir_for
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # The stub model exports two variables of its own (CALL_N, the loop pid for
 # its kill scenarios); a real model's shell carries only what the harness adds.
-PV = 'env -u CALL_N -u PHASEKIT_TEST_LOOP_PID bash scripts/phasekit.sh verify'
+# v0.19.0: a session reaches phasekit as `phasekit` (the loop's shim on PATH
+# runs the engine's CLI), in both layouts — what the prompts name.
+PV = 'env -u CALL_N -u PHASEKIT_TEST_LOOP_PID phasekit verify'
 
 _spec = importlib.util.spec_from_file_location(
     "pk_boundary_harness", Path(__file__).resolve().parent / "test_boundary_state.py")
@@ -71,9 +75,22 @@ def supervised(repo, iteration, intake_subject="unrelated intake words", mode="s
 
 
 def with_cli(repo):
-    shutil.copy(REPO_ROOT / "scripts" / "phasekit.sh", repo.repo / "scripts" / "phasekit.sh")
-    repo.git("add", "-A")
-    repo.git("commit", "-qm", "cli")
+    repo.put_engine("scripts/phasekit.sh", (REPO_ROOT / "scripts" / "phasekit.sh").read_text(),
+                    executable=True, commit="cli")
+
+
+def cli(repo, *args, env=None):
+    """An operator's `phasekit <args>` outside the loop, from the project:
+    the engine's CLI (pinned: the installed CLI has resolved the pin to this
+    engine — PHASEKIT_ENGINE_DIR stands in for that resolution)."""
+    e = {**os.environ, "STUB_DIR": str(repo.stub), **(env or {})}
+    e.pop("CALL_N", None)
+    e.pop("PHASEKIT_TEST_LOOP_PID", None)
+    e.pop("PHASEKIT_ENGINE_DIR", None)
+    if repo.layout.pinned:
+        e["PHASEKIT_ENGINE_DIR"] = str(repo.layout.engine)
+    return subprocess.run(["bash", str(repo.layout.path("scripts/phasekit.sh")), *args],
+                          cwd=repo.repo, capture_output=True, text=True, timeout=60, env=e)
 
 
 def trailers(repo, ref):
@@ -244,15 +261,13 @@ jq -n '{done: true, summary: "copied forward",
         base = supervised(repo, 88, intake_subject="chore: bump things")
         repo.scenario(APPROVE_188.replace("iteration 88 phase 188: ", ""))
         repo.run(env={"MAX_ITERATIONS": "1"})
-        r = subprocess.run(["bash", "scripts/phasekit.sh", "scope", "--json"], cwd=repo.repo,
-                           capture_output=True, text=True, timeout=60)
+        r = cli(repo, "scope", "--json")
         self.assertEqual(r.returncode, 0, r.stderr)
         scope = json.loads(r.stdout)
         self.assertEqual((scope["iteration"], scope["base"]), ("88", base))
         self.assertIn({"path": "lib.txt", "status": "A"}, scope["changed"])
         self.assertEqual([p["phase"] for p in scope["phase_commits"]], ["188"])
-        r = subprocess.run(["bash", "scripts/phasekit.sh", "scope", "--phase", "phase-188", "--json"],
-                           cwd=repo.repo, capture_output=True, text=True, timeout=60)
+        r = cli(repo, "scope", "--phase", "phase-188", "--json")
         self.assertEqual(r.returncode, 0, r.stderr)
         phase = json.loads(r.stdout)
         self.assertTrue(phase["source"].startswith("evidence artifacts/iterations/88/188.json"), phase)
@@ -319,7 +334,7 @@ class ModelVerifyCounts(unittest.TestCase):
         repo = self._repo()
         repo.scenario(r"""
 prompt="$STUB_DIR/prompt-$CALL_N.txt"
-check() { if grep -q "phasekit.sh verify" "$prompt"; then env -u CALL_N -u PHASEKIT_TEST_LOOP_PID bash scripts/phasekit.sh verify >/dev/null 2>&1; else bash scripts/phasekit-verify.sh; fi; }
+check() { if grep -q "phasekit verify" "$prompt"; then env -u CALL_N -u PHASEKIT_TEST_LOOP_PID phasekit verify >/dev/null 2>&1; else bash scripts/phasekit-verify.sh; fi; }
 if [ "$CALL_N" = 1 ]; then
   echo "built" >> src.txt
   check
@@ -438,8 +453,7 @@ fi
         self.addCleanup(repo.cleanup)
         with_cli(repo)
         repo.write("artifacts/phase-verify-failed.json", json.dumps({"verify_failed": True, "attempts": 1}) + "\n")
-        subprocess.run(["bash", "-c", PV], cwd=repo.repo, capture_output=True, text=True, timeout=60,
-                       env={**__import__("os").environ, "STUB_DIR": str(repo.stub)})
+        cli(repo, "verify")
         self.assertTrue(repo.artifact("phase-verify-failed.json").exists())
 
     def test_prose_that_starts_with_the_words_is_not_a_prefix_and_a_bare_prefix_gets_prose(self):
@@ -497,8 +511,7 @@ class ReviewRound2(unittest.TestCase):
             "exit 0\n", 'echo "gate wrote this" >> "$ROOT/notes.md"\nexit 0\n'), executable=True)
         repo.write("notes.md", "the model's notes\n")
         repo.git("add", "-A"); repo.git("commit", "-qm", "noisy gate")
-        r = subprocess.run(["bash", "-c", PV], cwd=repo.repo, capture_output=True, text=True, timeout=60,
-                           env={**__import__("os").environ, "STUB_DIR": str(repo.stub)})
+        r = cli(repo, "verify")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("NOT restored", r.stderr)
         self.assertIn("gate wrote this", (repo.repo / "notes.md").read_text(), "nothing rewritten in a model's turn")
@@ -547,16 +560,14 @@ esac
         repo = self._repo()
         repo.write("src.txt", "base\nw\n")
         repo.write("artifacts/project-complete.json", json.dumps({"done": True}) + "\n")
-        subprocess.run(["bash", "-c", PV], cwd=repo.repo, capture_output=True, text=True, timeout=60,
-                       env={**__import__("os").environ, "STUB_DIR": str(repo.stub)})
+        cli(repo, "verify")
         repo.artifact("project-complete.json").unlink()
         self.assertFalse([ln for ln in repo.git("status", "--porcelain").splitlines() if ln.startswith("AD")])
 
     def test_a_tier_longer_than_a_tool_call_is_skipped_not_run(self):
         repo = self._repo()
         repo.write("artifacts/logs/cost-ledger.json", json.dumps({"schema": 1, "samples": {"g_fast": [800, 820]}}))
-        r = subprocess.run(["bash", "-c", PV], cwd=repo.repo, capture_output=True, text=True, timeout=60,
-                           env={**__import__("os").environ, "STUB_DIR": str(repo.stub)})
+        r = cli(repo, "verify")
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn("skipped", r.stdout)
         self.assertEqual(repo.verify_calls(), 0)
@@ -638,7 +649,7 @@ class ReviewRound5(unittest.TestCase):
 
     def _script(self, d, body):
         return "\n".join([
-            "set -uo pipefail", f'ROOT_DIR="{d}"', f'ARTIFACTS_DIR="{d}/artifacts"', 'SQUASH_TARGET=""',
+            "set -uo pipefail", f'ENGINE_DIR="{engine_dir_for(d)}"', f'ROOT_DIR="{d}"', f'ARTIFACTS_DIR="{d}/artifacts"', 'SQUASH_TARGET=""',
             f'WRAPUP_SENTINEL="{d}/artifacts/wrapup-requested"', f'BOUNDARY_STATE_FILE="{d}/artifacts/boundary-state.json"',
             _all_functions(), "GATE_FOOTPRINT_RULE=r; GATE_FOOTPRINT_RECIPE=r; VERIFY_MAX_ATTEMPTS=3",
             f'cd "{d}"',
@@ -844,8 +855,7 @@ class ReviewRound11Minors(unittest.TestCase):
         repo = self._repo()
         lock = repo.repo / ".git" / "index.lock"
         lock.write_text("")
-        r = subprocess.run(["bash", "-c", PV], cwd=repo.repo, capture_output=True, text=True, timeout=60,
-                           env={**__import__("os").environ, "STUB_DIR": str(repo.stub)})
+        r = cli(repo, "verify")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn(str(lock), r.stderr)
         self.assertIn("rm -f", r.stderr)
@@ -890,7 +900,7 @@ class ReviewRound11Minors(unittest.TestCase):
                          for name in ("run_contracts_gate", "_clear_verify_failed", "verify_command_resolve", "run_verify_gate"))
 
     def _last_gate_red_after(self, root, env_line):
-        script = (f'set -euo pipefail\nROOT_DIR="{root}"\nARTIFACTS_DIR="$ROOT_DIR/artifacts"\n'
+        script = (f'set -euo pipefail\nENGINE_DIR="{engine_dir_for(root)}"\nROOT_DIR="{root}"\nARTIFACTS_DIR="$ROOT_DIR/artifacts"\n'
                   + self._gate_fns() + "\nLAST_GATE_RED=1\n" + env_line
                   + "\nrun_verify_gate >/dev/null 2>&1 || true\necho \"LGR=$LAST_GATE_RED\"\n")
         r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)

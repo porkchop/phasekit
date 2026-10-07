@@ -42,9 +42,14 @@ cd "$ROOT_DIR"
 #
 # Runs FIRST, before any stack check that may fail open on a young repo: a
 # contract violation is not something to skip because pyproject.toml is absent.
-# See docs/CONTRACTS.md.
-if [[ -f contracts.yaml && -f scripts/phasekit-contracts.py ]]; then
-  python3 scripts/phasekit-contracts.py check
+# See docs/CONTRACTS.md. A project pinned to phasekit (.phasekit-version) has
+# no checker in its tree: the engine's runs as `phasekit contracts check`.
+if [[ -f contracts.yaml ]]; then
+  if [[ -f scripts/phasekit-contracts.py ]]; then
+    python3 scripts/phasekit-contracts.py check
+  else
+    phasekit contracts check
+  fi
 fi
 
 

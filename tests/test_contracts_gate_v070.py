@@ -405,7 +405,7 @@ class LoopFunctionalContractsTest(LoopHarness):
     def setUp(self):
         super().setUp()
         self._write("scripts/phasekit-verify.sh", VERIFY_OK, executable=True)
-        shutil.copy2(SCRIPT_PATH, os.path.join(self.repo, "scripts", "phasekit-contracts.py"))
+        self.layout.put("scripts/phasekit-contracts.py", src=SCRIPT_PATH)
 
     def _declare(self, slug="foundry-orchestrator"):
         self._write("contracts.yaml", f"version: 1\ndepends_on:\n  - {slug}\n")
@@ -461,7 +461,8 @@ class LoopFunctionalContractsTest(LoopHarness):
         self.assertIn("DRIFT", r.stdout + r.stderr)
         artifact = self._failure_artifact()
         self.assertEqual(artifact["exit_code"], contracts.EXIT_DRIFT)
-        self.assertIn("python3 scripts/phasekit-contracts.py refresh", artifact["log_tail"])
+        self.assertIn("phasekit contracts refresh" if self.layout.pinned
+                      else "python3 scripts/phasekit-contracts.py refresh", artifact["log_tail"])
 
     def test_an_authentic_vendored_copy_commits_normally(self):
         mount = self._mount()
@@ -490,7 +491,7 @@ class LoopFunctionalContractsTest(LoopHarness):
         the gate silently off in exactly the window where drift is most
         likely. It must refuse."""
         self._declare()
-        os.remove(os.path.join(self.repo, "scripts", "phasekit-contracts.py"))
+        self.layout.remove("scripts/phasekit-contracts.py")
         self._prepare_scenario(APPROVE)
         before = self._messages()
         r = self._run_loop(None, env={"MAX_ITERATIONS": "1"})
@@ -503,7 +504,7 @@ class LoopFunctionalContractsTest(LoopHarness):
     def test_a_repo_with_no_checker_and_no_declaration_is_still_unaffected(self):
         """The refusal must key off the DECLARATION, not the missing file —
         otherwise every pre-v0.7.0 project on earth stops committing."""
-        os.remove(os.path.join(self.repo, "scripts", "phasekit-contracts.py"))
+        self.layout.remove("scripts/phasekit-contracts.py")
         r = self._run_loop(APPROVE, env={"MAX_ITERATIONS": "1"})
         self.assertIn("phase-1: work", self._messages(), r.stdout + r.stderr)
         self.assertIsNone(self._failure_artifact())
@@ -511,7 +512,7 @@ class LoopFunctionalContractsTest(LoopHarness):
     def test_the_operator_hatch_still_wins_over_the_missing_checker(self):
         """Refusing is safe because it stays escapable; pin that it is."""
         self._declare()
-        os.remove(os.path.join(self.repo, "scripts", "phasekit-contracts.py"))
+        self.layout.remove("scripts/phasekit-contracts.py")
         r = self._run_loop(APPROVE, env={
             "MAX_ITERATIONS": "1", "PHASEKIT_CONTRACTS_SKIP": "1"})
         self.assertIn("phase-1: work", self._messages(), r.stdout + r.stderr)

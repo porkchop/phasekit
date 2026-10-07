@@ -359,7 +359,7 @@ class TheLoopRecordsItAndStaysGreen(unittest.TestCase):
     def test_the_gate_stays_green_and_boundary_state_names_the_offenders(self):
         repo = H.Repo(squash=False)
         self.addCleanup(repo.cleanup)
-        shutil.copy(TOOL, repo.repo / "scripts" / "phasekit-surface.py")
+        repo.layout.put("scripts/phasekit-surface.py", src=TOOL)
         repo.write(".scaffold/manifest.json", manifest(["scripts/run-until-done.sh", "scripts/phasekit-surface.py"]))
         repo.write("tests/test_loop_parse.py", OFFENDERS["tests/test_loop_parse.py"])
         repo.write("tests/test_contract.py", CLEAN["tests/test_contract.py"])
@@ -378,7 +378,7 @@ class TheLoopRecordsItAndStaysGreen(unittest.TestCase):
     def test_a_clean_tree_records_an_empty_list(self):
         repo = H.Repo(squash=False)
         self.addCleanup(repo.cleanup)
-        shutil.copy(TOOL, repo.repo / "scripts" / "phasekit-surface.py")
+        repo.layout.put("scripts/phasekit-surface.py", src=TOOL)
         repo.write(".scaffold/manifest.json", manifest(["scripts/run-until-done.sh"]))
         repo.git("add", "-A")
         repo.git("commit", "-qm", "manifest")

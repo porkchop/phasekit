@@ -34,6 +34,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
+from _layout import hook_argv, mark_pinned
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / ".claude" / "hooks" / "deny-dangerous-commands.sh"
@@ -63,6 +64,7 @@ class _GuardBase(unittest.TestCase):
             (d / "sub").mkdir(parents=True)
             subprocess.run(["git", "init", "-q", str(d)], check=True)
         (self.proj / "artifacts").mkdir()
+        mark_pinned(self.proj)
         self.marker = self.tmp / "iter-marker"
         self.marker.write_text("")
 
@@ -78,7 +80,7 @@ class _GuardBase(unittest.TestCase):
         if path is not None:
             e["PATH"] = path
         e.update(env or {})
-        r = subprocess.run(["bash", str(HOOK)], input=payload, capture_output=True, text=True,
+        r = subprocess.run(hook_argv(HOOK, self.proj), input=payload, capture_output=True, text=True,
                            cwd=str(self.proj), env=e, timeout=30)
         return r.returncode, r.stderr
 

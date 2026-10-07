@@ -17,6 +17,7 @@
 #   PHASEKIT_URL   git remote to clone (default: the public GitHub repo)
 #   PHASEKIT_HOME  install location    (default: ${XDG_DATA_HOME:-~/.local/share}/phasekit)
 #   PHASEKIT_BIN   launcher directory  (default: ~/.local/bin)
+#   PHASEKIT_NO_PLUGIN=1  skip installing the Claude Code plugin (v0.19.0)
 #   PHASEKIT_REF   one-shot ref to check out (a tag/branch/sha). Also sets the
 #                  self-update channel: the default branch -> edge, a release tag
 #                  -> stable, anything else -> a pin. Omit to follow the persisted
@@ -120,7 +121,26 @@ chmod +x "$shim"
 version="$(git -C "$PHASEKIT_HOME" describe --tags --always 2>/dev/null || echo "$ref")"
 say "installed phasekit $version → $shim"
 
-# --- 6. PATH advice + next steps --------------------------------------------
+# --- 6. the engine store and the Claude Code plugin (v0.19.0) ---------------
+# A pinned project runs a read-only engine from the store, one per release tag
+# (<home>/engines/<tag>); the release this install sits on goes in now, so a
+# project pinned to it works offline. The plugin gives interactive Claude Code
+# sessions phasekit's guard and agents in a pinned project (the loop passes the
+# engine's plugin itself). Both idempotent; neither fails the install.
+if [[ -f "$PHASEKIT_HOME/scripts/phasekit-pin.py" ]]; then
+  pin_py=("$PHASEKIT_HOME/.venv/bin/python" "$PHASEKIT_HOME/scripts/phasekit-pin.py")
+  tag="$(git -C "$PHASEKIT_HOME" describe --tags --exact-match 2>/dev/null || true)"
+  if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    "${pin_py[@]}" engines install "$tag" >/dev/null 2>&1 \
+      && say "engine store: $tag installed (read-only) under $PHASEKIT_HOME/engines" \
+      || say "NOTE: could not install $tag into the engine store (a pinned project fetches it on first use)"
+  fi
+  if [[ "${PHASEKIT_NO_PLUGIN:-}" != "1" ]]; then
+    "${pin_py[@]}" plugin install || say "NOTE: the Claude Code plugin was not installed; run 'phasekit plugin install' later"
+  fi
+fi
+
+# --- 7. PATH advice + next steps --------------------------------------------
 case ":$PATH:" in
   *":$PHASEKIT_BIN:"*) : ;;
   *) say "NOTE: $PHASEKIT_BIN is not on your PATH. Add it, e.g.:"
@@ -130,11 +150,12 @@ esac
 cat <<EOF
 
 Done. Next:
-  cd your-project && phasekit adopt          # enrich an existing repo
-  cd new-project  && phasekit bootstrap      # greenfield (optionally: phasekit bootstrap <profile>)
+  cd your-project && phasekit init [profile]  # a project pinned to this release (the engine stays outside it)
+  phasekit loop                              # run the phase loop on this machine (or: phasekit run, in a container)
 
 Other commands:
-  phasekit check-version     # is a newer scaffold release out?
-  phasekit upgrade           # re-provision this project against the current scaffold
+  phasekit upgrade           # bump the project's pin to the newest release, through its gate
+  phasekit check             # the project's health (pin installed, no engine files tracked, plugin)
+  phasekit migrate           # convert a vendored (pre-v0.19) project to a pinned one
   phasekit self-update       # move this phasekit install to the latest release tag
 EOF

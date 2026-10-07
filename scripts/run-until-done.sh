@@ -4,15 +4,31 @@ set -euo pipefail
 # Loud but useful for debugging the autonomous loop. See docs/EXECUTION_MODES.md.
 [[ "${PHASEKIT_TRACE:-}" == "1" ]] && set -x
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Where the engine is vs what it works on (v0.19.0). ENGINE_DIR is this
+# script's own checkout: the loop, run-phase.sh, the prompts, the contracts and
+# surface tools, the scaffold docs. ROOT_DIR is the PROJECT: the tree git
+# operates on, artifacts/, the project's docs and gate. A vendored project
+# carries its engine in its own tree, so the two are one directory and nothing
+# below changes (PHASEKIT_PROJECT_DIR unset). A pinned project
+# (.phasekit-version, no vendored loop) runs a read-only engine from outside
+# the tree: the CLI or container-setup.sh sets PHASEKIT_PROJECT_DIR to it.
+ENGINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -n "${PHASEKIT_PROJECT_DIR:-}" ]]; then
+  ROOT_DIR="$(cd "$PHASEKIT_PROJECT_DIR" 2>/dev/null && pwd)" || {
+    echo "run-until-done: PHASEKIT_PROJECT_DIR='$PHASEKIT_PROJECT_DIR' is not a directory" >&2
+    exit 2
+  }
+else
+  ROOT_DIR="$ENGINE_DIR"
+fi
 ARTIFACTS_DIR="$ROOT_DIR/artifacts"
-RUN_PHASE_SCRIPT="$ROOT_DIR/scripts/run-phase.sh"
+RUN_PHASE_SCRIPT="$ENGINE_DIR/scripts/run-phase.sh"
 # The prompt file can be overridden via the first argument.
 # Default is CONTINUE_PROMPT.txt which instructs Claude to find the
 # earliest unapproved phase automatically. KICKOFF_PROMPT.txt and
 # META_KICKOFF_PROMPT.txt exist for legacy/manual use but are not
 # used by the autonomous loop since they target specific phases.
-PROMPT_FILE="${1:-$ROOT_DIR/CONTINUE_PROMPT.txt}"
+PROMPT_FILE="${1:-$ENGINE_DIR/CONTINUE_PROMPT.txt}"
 CLAUDE_MODE="${CLAUDE_MODE:-new}"
 
 # Iteration mode (v0.6.0): "standard" (default) or "light". Light mode is the
@@ -876,7 +892,7 @@ run_contracts_gate() {
   #    scripts/phasekit-verify.sh. A repo that can edit away the check that
   #    polices it is not policed. Same principle as the secret-lint allowlist
   #    living on the operator side of the deploy boundary.
-  local checker="$ROOT_DIR/scripts/phasekit-contracts.py"
+  local checker="${ENGINE_DIR:-$ROOT_DIR}/scripts/phasekit-contracts.py"
   [[ -f "$ROOT_DIR/contracts.yaml" ]] || return 0
 
   if [[ "${PHASEKIT_CONTRACTS_SKIP:-}" == "1" ]]; then
@@ -929,7 +945,7 @@ run_contracts_gate() {
     rm -f "$log"
     return 0
   fi
-  record_verify_failure "python3 scripts/phasekit-contracts.py check" "contracts" "$status" "$log"
+  record_verify_failure "phasekit contracts check" "contracts" "$status" "$log"
   rm -f "$log"
   return 1
 }
@@ -1086,12 +1102,15 @@ run_verify_gate() {
   verify_start="$(date +%s)"
   if [[ "$invoke" == "bash" ]]; then
     # Project's script provides its own set -e/pipefail.
-    bash "$cmd" >"$log" 2>&1 || verify_status=$?
+    # v0.19.0: the project's gate never inherits the engine's project pointer
+    # (a project test that runs a phasekit fixture must not be pointed at the
+    # real tree); unset in a vendored run already, so this changes nothing there.
+    env -u PHASEKIT_PROJECT_DIR bash "$cmd" >"$log" 2>&1 || verify_status=$?
   else
     # PHASEKIT_VERIFY_CMD may be a multi-command compound (e.g.
     # "lint && test"). Force -eo pipefail so a failing earlier
     # command isn't masked by a successful tail.
-    bash -eo pipefail -c "$cmd" >"$log" 2>&1 || verify_status=$?
+    env -u PHASEKIT_PROJECT_DIR bash -eo pipefail -c "$cmd" >"$log" 2>&1 || verify_status=$?
   fi
   verify_elapsed=$(( $(date +%s) - verify_start ))
   if [[ "$fp_measured" -eq 1 ]]; then
@@ -1644,7 +1663,11 @@ staged_touches_security_pair() {
   # Single source of truth for the scope-containment hard-refuse pair
   # (v0.4.8): committed .claude/settings.json and .github/workflows/ are
   # security-critical and never committed by the loop, on any commit path.
-  git diff --cached --name-only | grep -qE '^\.claude/settings\.json$|^\.github/workflows/'
+  # v0.19.0: so is .phasekit-version, the engine pin. It names the engine the
+  # NEXT dispatch runs; it moves only by `phasekit upgrade` (the gated pin
+  # bump), never inside a session's work — the engine that started an
+  # iteration finishes it, and a session cannot choose its successor's engine.
+  git diff --cached --name-only | grep -qE '^\.claude/settings\.json$|^\.github/workflows/|^\.phasekit-version$'
 }
 
 post_verify_commit_gates() {
@@ -1916,7 +1939,7 @@ Make them stageable (an empty or nested repository: remove its .git or move it o
     # uncommitted work is never a mystery state.
     printf '{"scope_refused": true, "reason": "staged changes touch committed .claude/settings.json or .github/workflows/ — security-critical, never committed by the loop (docs/QUALITY_GATES.md scope containment)", "action": "put those files back as HEAD has them (git show HEAD:<path> > <path>; delete a file HEAD does not have) — never git restore/checkout/reset, the loop owns the index — then re-write your signal artifact; the loop retries the commit", "ts": "%s"}\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$ARTIFACTS_DIR/scope-refusal.json"
-    echo "run-until-done: REFUSED — staged changes touch committed .claude/settings.json or .github/workflows/ (security-critical). See artifacts/scope-refusal.json." >&2
+    echo "run-until-done: REFUSED — staged changes touch committed .claude/settings.json or .github/workflows/ (security-critical). See artifacts/scope-refusal.json. (The engine pin .phasekit-version is in this set too: it moves only by \`phasekit upgrade\`.)" >&2
     unstage_verdicts_after_refusal
     return 1
   fi
@@ -4084,6 +4107,7 @@ model_env_differences() {
   python3 - "$snap" <<'ENV_PY' 2>/dev/null || echo "(comparison unavailable)"
 import hmac, os, sys
 IGNORE = {"PWD", "OLDPWD", "SHLVL", "_", "TZ", "CLAUDE_MODE", "PHASEKIT_ITER", "PHASEKIT_RETRY_ATTEMPT",
+          "PHASEKIT_ENGINE_DIR",
           "ANTHROPIC_MODEL", "AI_AGENT", "CLAUDECODE", "CLAUDE_PID", "COREPACK_ENABLE_AUTO_PIN",
           "GIT_EDITOR", "NoDefaultCurrentDirectoryInExePath"}
 def ignored(k):
@@ -4221,7 +4245,7 @@ scaffold_reads_advisory() {
   # the scan is silent (nothing recorded).
   [[ "${SCAFFOLD_READS_ADVISED:-0}" == 1 ]] && return 0
   SCAFFOLD_READS_ADVISED=1
-  local tool="$ROOT_DIR/scripts/phasekit-surface.py" j line
+  local tool="${ENGINE_DIR:-$ROOT_DIR}/scripts/phasekit-surface.py" j line
   [[ -f "$tool" ]] || return 0
   # scaffold_reads_at says when; a scan that failed records null (never a
   # stale list mistaken for a current one)
@@ -5509,6 +5533,46 @@ mktemp() {
   fi
 }
 
+# v0.19.0: the engine this loop runs, named for everything it starts. The
+# model, the gate and the hooks reach phasekit as `phasekit <verb>` (the
+# prompts name the CLI, never a path into the tree): a shim on PATH runs THIS
+# engine's CLI, so a session's `phasekit verify` is this loop's gate — in a
+# vendored project the project's own copy, exactly what `bash
+# scripts/phasekit.sh verify` ran before. The shim also pins the CLI to this
+# engine (PHASEKIT_ENGINE_DIR): a pin edited mid-run never switches the engine
+# a running loop uses — the engine that started an iteration finishes it.
+# Not in `verify`/`scope` (a model's or an operator's `phasekit verify`): the
+# caller already reached phasekit, and the environment it runs the gate in is
+# compared with the loop's (model_env_differences) — this loop must not alter it.
+# A vendored engine copy carries only the project-facing verbs (no
+# enrich-project.py): any other verb goes on to the next `phasekit` on PATH (an
+# installed CLI), exactly as it did before this shim existed.
+if [[ "${1:-}" != verify && "${1:-}" != scope && -n "$PK_LOOP_TMP" ]] \
+   && mkdir -p "$PK_LOOP_TMP/bin" 2>/dev/null \
+   && {
+        # the installed CLI as it stands BEFORE the shim is on PATH (an
+        # absolute path, so a later PATH prefix can never loop the shim)
+        _pk_next="$(command -v phasekit 2>/dev/null || true)"
+        printf '#!/usr/bin/env bash\n'
+        printf 'engine=%q\n' "$ENGINE_DIR"
+        printf 'next=%q\n' "$_pk_next"
+        printf 'case "${1:-}" in\n'
+        printf '  verify|scope|facts|scaffold-reads|contracts|roadmap|hook) ;;\n'
+        printf '  *) if [[ ! -f "$engine/scripts/phasekit-pin.py" && -n "$next" && -x "$next" ]]; then\n'
+        printf '       exec "$next" "$@"\n'
+        printf '     fi ;;\n'
+        printf 'esac\n'
+        printf 'PHASEKIT_ENGINE_DIR="$engine" exec bash "$engine/scripts/phasekit.sh" "$@"\n'
+      } > "$PK_LOOP_TMP/bin/phasekit" 2>/dev/null \
+   && chmod +x "$PK_LOOP_TMP/bin/phasekit" 2>/dev/null; then
+  export PATH="$PK_LOOP_TMP/bin:$PATH"
+fi
+# A pinned run (the engine outside the tree) tells the session where the
+# engine's docs are; a vendored run's docs are in its own tree (docs/).
+if [[ "$ROOT_DIR" != "$ENGINE_DIR" ]]; then
+  export PHASEKIT_ENGINE_DOCS="$ENGINE_DIR/docs"
+fi
+
 wrapup_commit() {
   # Soft wrap-up (v0.6.0). When the outer supervisor signals imminent shutdown
   # (see WRAPUP_SENTINEL below) or deadline pacing fires (v0.6.1), commit
@@ -5685,7 +5749,7 @@ OVERRIDE the standard operating rules below wherever they conflict:
 - The code-reviewer subagent still reviews the change before you finish.
 - The pre-commit verify gate is unchanged and mandatory. The default-model
   final review that follows your turn runs the FULL tier; you run the FAST
-  tier: `bash scripts/phasekit.sh verify` BEFORE you write the completion
+  tier: `phasekit verify` BEFORE you write the completion
   record (the gate runs full exactly when artifacts/project-complete.json
   exists), make it pass, then write the record and end your turn.
 - Stay strictly inside the task's scope. Scaffold-class or config-surface
@@ -5716,7 +5780,7 @@ compose_contracts_prompt() {
   # enforces them.
   local base_prompt="$1"
   local decl="$ROOT_DIR/contracts.yaml"
-  local checker="$ROOT_DIR/scripts/phasekit-contracts.py"
+  local checker="${ENGINE_DIR:-$ROOT_DIR}/scripts/phasekit-contracts.py"
   local listing=""
   if [[ -f "$decl" && -f "$checker" ]]; then
     listing="$(python3 "$checker" --repo "$ROOT_DIR" status 2>/dev/null || true)"
@@ -5747,7 +5811,7 @@ Rules for this session, which OVERRIDE any inference you would otherwise make:
   cache of someone else's file; the pre-commit gate compares it byte-for-byte
   against the mounted original and will refuse the commit.
 - If the contract genuinely changed, run:
-    python3 scripts/phasekit-contracts.py refresh
+    phasekit contracts refresh
   then reconcile this repo's code and tests with the refreshed contract and
   commit both together.
 === END CONTRACTS ===
@@ -5839,7 +5903,7 @@ Do, in order:
    explaining why, and stop.
 4. Otherwise re-write artifacts/project-complete.json — keep its shape,
    update the summary if you changed anything — so the wrapper can commit.
-5. LAST, run `bash scripts/phasekit.sh verify` (the FULL tier: the record
+5. LAST, run `phasekit verify` (the FULL tier: the record
    exists). It runs the gate exactly as the wrapper's commit will, and a
    green verdict is REUSED by that commit instead of run again — so change
    nothing after it. If it is red, fix and run it again.

@@ -2,14 +2,17 @@
 
 The scaffold supports two execution modes. Interactive collaboration is the default; unattended mode is opt-in.
 
+Both modes work in both project layouts. A **pinned** project (v0.19.0 and later) tracks `.phasekit-version` and none of phasekit's engine files: the loop, the hooks, the agents and the process docs run read-only from the engine store, and interactive sessions get the hooks and agents from the phasekit Claude Code plugin. A **vendored** project (before v0.19.0, legacy, supported until migrated) carries the engine in its own tree and wires its hooks in its own `.claude/settings.json`. See "Pinned runs" below and `docs/INSTALL_LIFECYCLE.md`.
+
 ## Mode 1: Interactive collaboration (default)
 
 Used when a human is directly collaborating with Claude on this repository or a downstream project.
 
 ### Behavior
-- `.claude/settings.json` is the active settings file, with conservative allow/deny lists
+- `.claude/settings.json` is the active settings file, with conservative allow/deny lists (in a pinned project it holds permissions only)
 - Claude prompts before running unapproved tools
-- Hooks (`deny-dangerous-commands.sh`) block dangerous operations
+- Hooks (`deny-dangerous-commands.sh`) block dangerous operations — in a pinned project through the phasekit plugin (`phasekit plugin install`, done by `install.sh` and `phasekit init`; `phasekit check` warns loudly when it is missing), in a vendored project through its own settings
+- Subagents are the plugin's, namespaced `phasekit:<agent>`, in a pinned project; `.claude/agents/` in a vendored one
 - No assumption of permissive execution
 
 ### When to use
@@ -39,14 +42,19 @@ Used when the scaffold runs autonomous phase-gated work inside an isolated conta
 - Batch processing of scaffold phases
 
 ### How to enable
-Unattended mode is activated by running the wrapper scripts:
+Unattended mode is activated by running the loop through the CLI, from inside the project:
 ```bash
-# Single phase
-./scripts/run-phase.sh ./CONTINUE_PROMPT.txt
+# Multi-phase loop on the host
+MAX_ITERATIONS=50 phasekit loop
 
-# Multi-phase loop
-MAX_ITERATIONS=50 ./scripts/run-until-done.sh
+# The same loop in the isolated container (docs/CONTAINERIZATION.md)
+phasekit run
+
+# A single iteration
+MAX_ITERATIONS=1 phasekit loop
 ```
+
+In a vendored project (legacy) the CLI runs the project's own copies, and the direct script forms still work there: `./scripts/run-until-done.sh`, and `./scripts/run-phase.sh ./CONTINUE_PROMPT.txt` for a single phase.
 
 These scripts pass `--permission-mode bypassPermissions` to Claude. This flag only takes effect when explicitly invoked — it does not change the project settings for interactive users.
 
@@ -66,6 +74,22 @@ These scripts pass `--permission-mode bypassPermissions` to Claude. This flag on
 | `PHASEKIT_CONTRACTS_SKIP` | (unset) | Set to `1` to bypass the cross-project contracts gate for one run (v0.7.0). Deliberately separate from `VERIFY_SKIP`, which does **not** disable it: VERIFY_SKIP is the routine hatch for red TDD commits, and letting it also switch off contract authenticity would disarm the gate exactly when a red gate applies the pressure to cheat. Announces itself on stderr; operator-only, never a committed setting. |
 | `SSH_AUTH_SOCK` | (host's value) | When invoked via `container-setup.sh run`, the host's SSH agent socket is forwarded into the container so `git push` to SSH remotes works. Run `ssh-add` on the host first. |
 | `GH_TOKEN` / `GITHUB_TOKEN` | (unset) | Passed through to the container if set, for HTTPS-remote push workflows that use a Personal Access Token. |
+| `PHASEKIT_PROJECT_DIR` | (unset) | The project an engine outside the tree works on (v0.19.0). Set by `phasekit loop` / `phasekit run` / `phasekit verify` for a pinned project (`/workspace` in the container); unset means the vendored layout. Not exported to the model's own commands or the project's gate. |
+| `PHASEKIT_ENGINE_DIR` | (set by the loop) | The engine a running loop's `phasekit` shim runs (v0.19.0); a pin edited mid-run never switches it. |
+| `PHASEKIT_ENGINE_DOCS` | (set by the loop, pinned) | The engine's `docs/` directory, exported to a pinned run's sessions. |
+| `PHASEKIT_GUARD_PROBE_TIMEOUT` | `120` | Seconds the pinned guard self-check may take before the turn is refused. (`PHASEKIT_GUARD_PROBE` / `PHASEKIT_GUARD_PROBE_TOKEN` are the probe's own channel, set by `run-phase.sh`; never set them yourself.) |
+| `PHASEKIT_NO_AUTO_FETCH` | (unset) | `1`: a pinned release the engine store lacks is not installed implicitly; the verb exits 6 naming `phasekit engines install <tag>` (`docs/INSTALL_LIFECYCLE.md`). |
+
+### Pinned runs: the engine, the plugin and the guard self-check (v0.19.0)
+
+Every engine script computes `ENGINE_DIR` from its own location and the project, `ROOT_DIR`, from `PHASEKIT_PROJECT_DIR` when set, else `ENGINE_DIR`. In a vendored project the two are the same directory and nothing below applies except the shim. In a pinned run:
+
+- **The plugin is passed, not installed.** `run-phase.sh` starts every turn with `--plugin-dir <engine>/plugin`, so the hooks and agents come from the read-only engine — the only copy a session can reach; it cannot edit its own guard. The installed plugin is not needed for the loop.
+- **The guard self-check (fail closed).** Before EVERY model turn, `run-phase.sh` starts a throwaway, model-free `claude -p --plugin-dir <engine>/plugin` with `PHASEKIT_GUARD_PROBE` set. The plugin's `guard-probe` hook (UserPromptSubmit) checks that all four hooks are present and executable, that the command guard refuses `git reset --hard` (and, under the loop, `git commit`), writes the probe's token to the probe file, and blocks the prompt — so there is no model call and no cost. No token means the plugin did not load: the turn is REFUSED and `run-phase.sh` exits 7 (`phasekit: REFUSING the turn — the guard self-check failed …`). A pinned session never runs without its command guard and stop hook.
+- **The prompt names the engine.** The session prompt starts with a `PHASEKIT ENGINE` preamble (the engine's version and read-only path, where its docs are, that `phasekit <verb>` is on PATH, that the subagents are `phasekit:<agent>`, never to copy engine files into the repository), and every `docs/<NAME>.md` it mentions that the project does not have is rewritten to the engine's real path. `PHASEKIT_ENGINE_DOCS` is exported.
+- **The pin is not the session's.** The loop never commits a change to `.phasekit-version`: like `.claude/settings.json` and `.github/workflows/`, a staged change to it makes the loop refuse the commit (`artifacts/scope-refusal.json`). It moves only by `phasekit upgrade`. The engine that started an iteration finishes it, and a pin bump on the integration branch reaches an open iteration's work branch only at its merge-back (the pin travels with the branch), so a pin bump needs no rest window.
+
+In **both** layouts the prompts name the CLI — `phasekit verify`, `phasekit scope`, `phasekit facts --json`, `phasekit contracts refresh` — never a path into the tree, and the loop puts a `phasekit` shim on PATH for its sessions that runs that loop's own engine (`PHASEKIT_ENGINE_DIR`); in a vendored project that is the project's own copy, exactly what the old script path ran.
 
 ### Session continuity (v0.18.8)
 
@@ -115,9 +139,11 @@ tail -F artifacts/logs/claude-iter-3.log
 After a crash, the most recent `claude-iter-*.log` files contain the rendered transcript of what claude was generating when it failed. If you need more detail than the rendering exposes, run the raw JSONL through the formatter (or `jq`) directly:
 
 ```bash
-bash scripts/phasekit-log-fmt.sh < artifacts/logs/claude-iter-1.jsonl | less
+bash "$(phasekit docs)/../scripts/phasekit-log-fmt.sh" < artifacts/logs/claude-iter-1.jsonl | less   # the engine's formatter
 jq -c 'select(.type == "assistant")' artifacts/logs/claude-iter-1.jsonl
 ```
+
+(In a vendored project the formatter is also at `scripts/phasekit-log-fmt.sh` in the tree.)
 
 `PHASEKIT_TRACE=1` additionally enables `set -x` in the wrapper scripts themselves, so every shell command they run (git commits, verify-gate invocations, artifact cleanup) is printed before execution.
 
@@ -171,9 +197,11 @@ may block per iteration before stepping aside (default `2`).
 - **`PHASEKIT_STOP_BLOCK_LIMIT=0` disables the behavior entirely** (the guard
   is `blocks >= limit`, so zero steps aside on the first check). Reach for
   this if the hook ever blocks a legitimate stop or fights the loop.
-- **The env var is the off switch — file surgery is not.** Deleting the hook
-  file or its `Stop` entry in `.claude/settings.json` silently un-deletes
-  itself: `phasekit upgrade` re-syncs missing scaffold hook registrations by
+- **The env var is the off switch — file surgery is not.** In a pinned
+  project the hook lives in the read-only engine's plugin and cannot be
+  removed per project. In a vendored project, deleting the hook file or its
+  `Stop` entry in `.claude/settings.json` silently un-deletes itself: the
+  vendored `phasekit upgrade` re-syncs missing scaffold hook registrations by
   design (that sync is what fixes the shipped-but-unwired failure class, and
   it is deliberately not overridable per project).
 - The hook is inert outside the autonomous loop: it exits immediately unless
@@ -413,13 +441,13 @@ foundry-meta `designs/DESIGN-session-efficiency.md` (approved 2026-09-28). Sessi
 
 **The loop takes control back.** At T-T_y (light mode: the build turn at T-(T_y+R), so the review still fits) a model turn that has not yielded is ENDED — SIGTERM to the `claude` process whose pid `run-phase.sh` writes to `artifacts/logs/claude.pid` — after an `artifacts/logs/.deadline-yield` marker. The loop reads that as a wrap-up at an iteration boundary: no CLI retry, no verdict retry; a verdict the turn left lands through the usual verify-gated path, and the session wraps up (verify-gated; red falls through to the labelled wip). The session log says `deadline watchdog: took control`; if the watchdog could not write its marker, a turn that ended non-zero across its take-control instant is still read as taken (`took control (inferred …`, v0.18.1), never retried as a CLI failure. Probed before it was built (scaffold-runner, claude 2.1.282): SIGTERM ends the turn in under a second, kills the running tool child with it, keeps every completed write, leaves no `index.lock`. The last-resort commit at T-60 s stays the SIGKILL stage.
 
-**The model's verify counts.** `bash scripts/phasekit.sh verify` runs the gate exactly as the commit will (same preparation and staging, the contracts gate, the footprint, the memo). On a locked index it runs nothing and exits 2, naming the `index.lock` and what to do (v0.18.1). Close-out order: memory writes first, the verdict, `phasekit verify`, end the turn — the commit then reuses the green verdict for the exact tree instead of running the full tier again (light mode: the builder runs the fast tier before writing the record; the reviewer the full one).
+**The model's verify counts.** `phasekit verify` runs the gate exactly as the commit will (same preparation and staging, the contracts gate, the footprint, the memo). On a locked index it runs nothing and exits 2, naming the `index.lock` and what to do (v0.18.1). Close-out order: memory writes first, the verdict, `phasekit verify`, end the turn — the commit then reuses the green verdict for the exact tree instead of running the full tier again (light mode: the builder runs the fast tier before writing the record; the reviewer the full one).
 
 **The nudge reaches the right agent.** The wrap-up nudge is once per iteration **per agent** (the hook payload names a subagent's calls; a subagent can no longer spend the main agent's nudge — xmeo run 999), and PostToolUse repeats it at most once per 60 s.
 
 **Recovery keeps the tree coherent.** On every unverified commit path (the watchdog's kill, the wrap-up fall-through, the gate-pending index commit) `ready-to-deploy.json` and `project-complete.json` are UNSTAGED — never rewritten, never deleted: the wip carries HEAD's copies, the session's stay on disk, and the next start's verify-gated landing stages them with the rest of their coherent tree (restoring one half of a coherent pair is what reddened xmeo's consistency checks). A refused landing never leaves a verdict artifact staged; a refused COMPLETION record is carried on disk into the repair turn (claiming nothing until the session re-writes it), never deleted into an `AD` state.
 
-**Iteration facts are the loop's.** Every loop commit carries `Phasekit-Iteration:` / `Phasekit-Phase:` / `Phasekit-Kind:` trailers (read them with `git log --format='%(trailers:key=Phasekit-Iteration,valueonly)'`, never the subject); approval-class subjects get a generated `iteration N phase P:` prefix (standalone `phase P:`), a stale one corrected; records are stamped (`iteration`, `base`, `final_phase`) and their deferrals composed from `artifacts/deferrals.json` (QUALITY_GATES "The deferral ledger"); every approval landing commits `artifacts/iterations/<N>/<phase>.json`, the phase's changed paths with content hashes; `bash scripts/phasekit.sh scope [--iteration N] [--phase P] [--json]` answers "what changed" from the base and HEAD. A fact that cannot be derived is left as written with a WARN — never a refusal (fork F5).
+**Iteration facts are the loop's.** Every loop commit carries `Phasekit-Iteration:` / `Phasekit-Phase:` / `Phasekit-Kind:` trailers (read them with `git log --format='%(trailers:key=Phasekit-Iteration,valueonly)'`, never the subject); approval-class subjects get a generated `iteration N phase P:` prefix (standalone `phase P:`), a stale one corrected; records are stamped (`iteration`, `base`, `final_phase`) and their deferrals composed from `artifacts/deferrals.json` (QUALITY_GATES "The deferral ledger"); every approval landing commits `artifacts/iterations/<N>/<phase>.json`, the phase's changed paths with content hashes; `phasekit scope [--iteration N] [--phase P] [--json]` answers "what changed" from the base and HEAD. A fact that cannot be derived is left as written with a WARN — never a refusal (fork F5).
 
 **Hermetic tests.** A test reads the tree, never git history (QUALITY_GATES "Hermetic tests"); after the gate the loop names test files that appear to read history, once per session, advisory only.
 
@@ -481,7 +509,7 @@ One recovery added in v0.6.3, closing the trap the atomicity fix created:
 Claude Code resolves settings in this order (later wins):
 1. **Project settings** (`.claude/settings.json`) — checked in, conservative, shared
 2. **Local settings** (`.claude/settings.local.json`) — gitignored, user-specific overrides
-3. **Command-line flags** (`--permission-mode`) — used by wrapper scripts for unattended mode
+3. **Command-line flags** (`--permission-mode`, and `--plugin-dir` in a pinned run) — used by wrapper scripts for unattended mode
 
 ### Override guidance
 - **Never** make project settings permissive to support unattended mode

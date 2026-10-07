@@ -35,6 +35,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
+from _layout import engine_dir_for
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOOP_SCRIPT = REPO_ROOT / "scripts" / "run-until-done.sh"
@@ -235,7 +236,7 @@ class LastResortCommit(unittest.TestCase):
         script = "\n".join(
             [
                 "set -euo pipefail",
-                f'ROOT_DIR="{self.dir}"',
+                f'ENGINE_DIR="{engine_dir_for(self.dir)}"', f'ROOT_DIR="{self.dir}"',
                 f'ARTIFACTS_DIR="{self.artifacts}"',
                 f'WRAPUP_SENTINEL="{self.artifacts}/wrapup-requested"',
                 TRANSIENTS_ARR,
@@ -732,7 +733,7 @@ class LastResortCommitAsTheForkSeesIt(unittest.TestCase):
     def _run_as_fork(self, source=SOURCE):
         script = "\n".join([
             "set -euo pipefail",
-            f'ROOT_DIR="{self.dir}"',
+            f'ENGINE_DIR="{engine_dir_for(self.dir)}"', f'ROOT_DIR="{self.dir}"',
             f'ARTIFACTS_DIR="{self.artifacts}"',
             f'WRAPUP_SENTINEL="{self.artifacts}/wrapup-requested"',
             f'BOUNDARY_STATE_FILE="{self.artifacts}/boundary-state.json"',
@@ -866,7 +867,7 @@ _hspec.loader.exec_module(_H)
 
 TAKE_CONTROL_RUN_PHASE = """#!/usr/bin/env bash
 set -euo pipefail
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+""" + _H.STUB_ROOT_LINE + """
 cd "$ROOT_DIR"
 mkdir -p artifacts/logs
 PIDFILE="artifacts/logs/claude.pid"
@@ -890,10 +891,9 @@ class TakeControl(unittest.TestCase):
     def setUp(self):
         self.repo = _H.Repo(squash=False)
         self.addCleanup(self.repo.cleanup)
-        self.repo.write("scripts/run-phase.sh", TAKE_CONTROL_RUN_PHASE, executable=True)
         (self.repo.stub / "claude").write_text(STUB_CLAUDE)
-        self.repo.git("add", "-A")
-        self.repo.git("commit", "-qm", "stub")
+        self.repo.put_engine("scripts/run-phase.sh", TAKE_CONTROL_RUN_PHASE, executable=True,
+                             commit="stub")
         self.addCleanup(self._reap)
 
     def _reap(self):

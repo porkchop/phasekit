@@ -67,7 +67,25 @@ set -euo pipefail
 #                             built-in non-root `node` user, UID 1000).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# v0.19.0: the engine (this checkout) vs the project. A vendored project runs
+# its own copy of this script from its own tree: one directory, nothing below
+# changes. A pinned project (.phasekit-version, no vendored loop) runs the
+# engine's copy with PHASEKIT_PROJECT_DIR naming the project (the CLI's
+# `phasekit run` sets it): the project is mounted at /workspace, the engine
+# READ-ONLY at /opt/phasekit, the image is never rebuilt per dispatch, and the
+# session gets its own Claude config root (see project_config_mounts).
+ENGINE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [[ -n "${PHASEKIT_PROJECT_DIR:-}" ]]; then
+  ROOT_DIR="$(cd "$PHASEKIT_PROJECT_DIR" 2>/dev/null && pwd)" || {
+    echo "Error: PHASEKIT_PROJECT_DIR='$PHASEKIT_PROJECT_DIR' is not a directory." >&2
+    exit 1
+  }
+else
+  ROOT_DIR="$ENGINE_DIR"
+fi
+PINNED=0
+if [[ "$ROOT_DIR" != "$ENGINE_DIR" ]]; then PINNED=1; fi
+ENGINE_CONTAINER_DIR="/opt/phasekit"
 IMAGE_NAME="${IMAGE_NAME:-scaffold-runner}"
 CLAUDE_VOLUME="${CLAUDE_VOLUME:-scaffold-claude-config}"
 COMMAND="${1:-build}"
@@ -155,6 +173,70 @@ else
 fi'
 PROJECT_SESSIONS_ARGS=()
 
+# A Claude config root per project (v0.19.0, pinned projects only; closes
+# v0.18.8's known limit). v0.18.8 still mounted the WHOLE config volume at
+# /home/node/.claude, so a session running shell commands could read every
+# other project's transcripts, memory, history, shell snapshots and caches.
+# A pinned session instead gets, of that volume, exactly:
+#   * project-config/<key>        mounted AS /home/node/.claude (its own
+#                                 settings, .claude.json, history, caches);
+#   * project-sessions/<key>      over projects/-workspace, as v0.18.8 — the
+#                                 transcripts and memory carried over, nothing
+#                                 moved or deleted;
+#   * .credentials.json           the SHARED login, one file, mounted over the
+#                                 root's placeholder. Read-write on purpose: a
+#                                 session that refreshes an expired token writes
+#                                 the new pair back for everyone (Claude Code
+#                                 renames its staging file over the target;
+#                                 over a mount point that is EBUSY, and its
+#                                 writer then writes in place — probed). A
+#                                 read-only or copied login would strand the
+#                                 rotated refresh token in one session and log
+#                                 the whole fleet out.
+# Nothing else of the volume is visible. A fresh root is seeded atomically
+# with a copy of the shared settings.json and a .claude.json that marks
+# /workspace trusted and onboarding done (no other state). Vendored projects
+# keep v0.18.8's mounts exactly.
+PROJECT_CONFIG_SUBDIR="project-config"
+# Appended to PROJECT_SESSIONS_SEED_SH (same throwaway container, same $1 $2).
+# Prints `config:seeded|exists` and `creds:present|absent`.
+PROJECT_CONFIG_SEED_SH='cbase="$vol/'"$PROJECT_CONFIG_SUBDIR"'"
+cfg="$cbase/$key"
+if [ -d "$cfg" ]; then
+  echo config:exists
+else
+  cwork="$cbase/.seed/$key"
+  mkdir -p "$cwork"
+  find "$cwork" -mindepth 1 -maxdepth 1 -mmin +60 -exec rm -rf {} +
+  ctmp=$(mktemp -d "$cwork/XXXXXX")
+  if [ -f "$vol/settings.json" ]; then cp "$vol/settings.json" "$ctmp/settings.json"; fi
+  # The session works in /workspace as every fleet session has: onboarded and
+  # trusted (an untrusted workspace ignores the project settings allow-list).
+  printf "%s\n" "{\"hasCompletedOnboarding\": true, \"projects\": {\"/workspace\": {\"hasTrustDialogAccepted\": true}}}" > "$ctmp/.claude.json"
+  chmod 600 "$ctmp/.claude.json"
+  chmod 755 "$ctmp"
+  if mv -T "$ctmp" "$cfg" 2>/dev/null; then
+    echo config:seeded
+  else
+    rm -rf "$ctmp"
+    [ -d "$cfg" ]
+    echo config:exists
+  fi
+  rmdir "$cwork" "$cbase/.seed" 2>/dev/null || true
+fi
+mkdir -p "$cfg/projects/-workspace"
+if [ ! -e "$cfg/.credentials.json" ]; then
+  : > "$cfg/.credentials.json"
+  chmod 600 "$cfg/.credentials.json"
+fi
+if [ -f "$vol/.credentials.json" ]; then
+  echo creds:present
+  # when the shared OAuth access token expires (epoch ms; not a secret)
+  echo "creds-expires:$(jq -r '"'"'.claudeAiOauth.expiresAt // 0'"'"' "$vol/.credentials.json" 2>/dev/null || echo 0)"
+else
+  echo creds:absent
+fi'
+
 project_sessions_key() {
   local k
   k="$(basename "$ROOT_DIR")"
@@ -199,10 +281,23 @@ project_sessions_mount() {
   fi
   # Prepared even when the mount below cannot be used: it also creates the
   # mountpoint the tmpfs needs, as the session's user.
-  if ! out="$(docker run "${prep[@]}" "$IMAGE_NAME" -c "$PROJECT_SESSIONS_SEED_SH" sh "$key" \
+  local seed="$PROJECT_SESSIONS_SEED_SH"
+  if [[ "$PINNED" == 1 ]]; then
+    seed="$PROJECT_SESSIONS_SEED_SH
+$PROJECT_CONFIG_SEED_SH"
+  fi
+  if ! out="$(docker run "${prep[@]}" "$IMAGE_NAME" -c "$seed" sh "$key" \
                 "$CLAUDE_CONFIG_CONTAINER_DIR" 2>&1)"; then
+    if [[ "$PINNED" == 1 ]]; then
+      echo "container: sessions: could not prepare $PROJECT_CONFIG_SUBDIR/$key in '$CLAUDE_VOLUME' (${out:0:200}); refusing — a pinned session never mounts the whole config volume" >&2
+      return 1
+    fi
     echo "container: sessions: could not prepare $PROJECT_SESSIONS_SUBDIR/$key in '$CLAUDE_VOLUME' (${out:0:200}); this session's transcripts and memory are empty and not kept" >&2
     PROJECT_SESSIONS_ARGS=("${fallback[@]}")
+    return 0
+  fi
+  if [[ "$PINNED" == 1 ]]; then
+    project_config_mounts "$key" "$out" "$user_spec" || return 1
     return 0
   fi
   if ! docker_supports_volume_subpath; then
@@ -227,6 +322,120 @@ project_sessions_mount() {
     *seeded*)                echo "container: sessions: $PROJECT_SESSIONS_SUBDIR/$key (first run: empty)" ;;
     *)                       echo "container: sessions: $PROJECT_SESSIONS_SUBDIR/$key" ;;
   esac
+}
+
+# A pinned session's login must outlive the session (v0.19.0, review M4).
+# Its .credentials.json is a FILE mount: it pins the file's inode. Claude Code
+# writes credentials by renaming a staging file over the target wherever it
+# can — every whole-volume session does (a vendored project's, `setup`, a
+# supervisor's own containers) — and refresh tokens ROTATE (measured
+# 2026-10-07). A pinned session that refreshed after such a rename would
+# present the rotated-away refresh token from its stale inode. So a pinned
+# session never refreshes: it starts only with a token valid through its
+# session (PHASEKIT_SESSION_DEADLINE, else two hours) plus a margin. When the
+# shared token expires sooner, it is refreshed FIRST, here: a throwaway,
+# networked container gives a copy of the login (marked expired) to a tiny
+# `claude -p` (haiku) in a throwaway config dir, then writes the refreshed
+# login back IN PLACE (same inode: every running pinned session sees it).
+# Nothing is printed but the new expiry. Serialised by a lock in the volume,
+# with the expiry re-checked under it. PHASEKIT_LOGIN_REFRESH=0: refuse
+# instead of refreshing. An unbounded pinned session (`shell`, a run with no
+# PHASEKIT_SESSION_DEADLINE) is guaranteed two hours; past that it may refresh
+# itself, which is safe only while no whole-volume writer has renamed the file
+# since it started.
+LOGIN_REFRESH_SH='set -eu
+vol=$1; need_ms=$2
+# One refresher at a time, across every pinned prep sharing this volume, and a
+# re-check under the lock: a concurrent prep that already refreshed leaves
+# nothing to do (refresh tokens rotate: a second refresh would present a
+# rotated-away token).
+exec 9>>"$vol/.phasekit-login.lock"
+flock -w 180 9
+cur=$(jq -r '"'"'.claudeAiOauth.expiresAt // 0'"'"' "$vol/.credentials.json")
+if [ "$cur" -le "$need_ms" ]; then
+  tmp=$(mktemp -d /tmp/phasekit-login.XXXXXX)
+  trap '"'"'rm -rf "$tmp"'"'"' EXIT
+  jq '"'"'.claudeAiOauth.expiresAt = 0'"'"' "$vol/.credentials.json" > "$tmp/.credentials.json"
+  chmod 600 "$tmp/.credentials.json"
+  HOME=$tmp CLAUDE_CONFIG_DIR=$tmp timeout 120 claude -p ok --model haiku --no-session-persistence >/dev/null 2>&1 || true
+  if jq -e '"'"'(.claudeAiOauth.accessToken | length > 20) and (.claudeAiOauth.refreshToken | length > 20) and (.claudeAiOauth.expiresAt > 0)'"'"' "$tmp/.credentials.json" >/dev/null 2>&1; then
+    cat "$tmp/.credentials.json" > "$vol/.credentials.json"
+  fi
+fi
+jq -r '"'"'.claudeAiOauth.expiresAt // 0'"'"' "$vol/.credentials.json"'
+
+# $1 = the seed's output, $2 = the docker --user spec. Returns 1 to refuse.
+ensure_login_outlives_session() {
+  local out="$1" user_spec="$2" exp_ms now need line
+  line="$(grep -o 'creds-expires:[0-9]*' <<<"$out" | head -n1)" || line=""
+  exp_ms="${line#creds-expires:}"
+  [[ "$exp_ms" =~ ^[0-9]+$ && "$exp_ms" -gt 0 ]] || return 0   # not an OAuth login (API key, or unreadable)
+  now="$(date +%s)"
+  need=$(( now + 7200 ))
+  if [[ "${PHASEKIT_SESSION_DEADLINE:-}" =~ ^[0-9]+$ ]]; then need="$PHASEKIT_SESSION_DEADLINE"; fi
+  need=$(( need + 900 ))
+  if (( exp_ms / 1000 > need )); then return 0; fi
+  if [[ "${PHASEKIT_LOGIN_REFRESH:-1}" == "0" ]]; then
+    echo "container: login: the shared login expires before this session would end; refusing (PHASEKIT_LOGIN_REFRESH=0) — a pinned session never refreshes it itself" >&2
+    return 1
+  fi
+  echo "container: login: the shared login expires before this session would end — refreshing it first (in place)"
+  local run=(--rm -v "$CLAUDE_VOLUME":"$CLAUDE_CONFIG_CONTAINER_DIR" --entrypoint /bin/sh)
+  if [[ -n "$user_spec" ]]; then
+    run+=(--user "$user_spec" -e HOME=/home/node)
+    [[ "$user_spec" == "0:0" ]] && run+=(--cap-add=DAC_OVERRIDE)
+  fi
+  exp_ms="$(docker run "${run[@]}" "$IMAGE_NAME" -c "$LOGIN_REFRESH_SH" sh "$CLAUDE_CONFIG_CONTAINER_DIR" \
+               "$(( need * 1000 ))" 2>/dev/null | tail -n1)" || exp_ms=0
+  if [[ "$exp_ms" =~ ^[0-9]+$ ]] && (( exp_ms / 1000 > need )); then
+    echo "container: login: refreshed"
+    return 0
+  fi
+  echo "container: login: could not refresh the shared login (run 'setup' to log in again); refusing — a pinned session never starts on a login that expires inside it" >&2
+  return 1
+}
+
+# Pinned sessions: sets PROJECT_SESSIONS_ARGS to the per-project config root,
+# its transcripts, and the shared login (see PROJECT_CONFIG_SEED_SH). $1 = the
+# key, $2 = the seed's output. Returns 1 (refuse) when the root cannot be
+# mounted alone — never the whole volume.
+project_config_mounts() {
+  local key="$1" out="$2" user_spec="${3:-}" creds=0
+  case "$out" in *creds:present*) creds=1 ;; esac
+  if [[ "$creds" == 1 ]]; then
+    ensure_login_outlives_session "$out" "$user_spec" || return 1
+  fi
+  if [[ "$CLAUDE_VOLUME" == *,* ]]; then
+    echo "container: config: '$CLAUDE_VOLUME' contains a comma, which a --mount value cannot carry; refusing" >&2
+    return 1
+  fi
+  if [[ "$CLAUDE_VOLUME" == /* ]]; then
+    PROJECT_SESSIONS_ARGS=(
+      --mount "type=bind,src=$CLAUDE_VOLUME/$PROJECT_CONFIG_SUBDIR/$key,dst=$CLAUDE_CONFIG_CONTAINER_DIR"
+      --mount "type=bind,src=$CLAUDE_VOLUME/$PROJECT_SESSIONS_SUBDIR/$key,dst=$CLAUDE_PROJECT_CONTAINER_DIR")
+    if [[ "$creds" == 1 ]]; then
+      PROJECT_SESSIONS_ARGS+=(--mount "type=bind,src=$CLAUDE_VOLUME/.credentials.json,dst=$CLAUDE_CONFIG_CONTAINER_DIR/.credentials.json")
+    fi
+  else
+    if ! docker_supports_volume_subpath; then
+      echo "container: config: docker's API is older than $PROJECT_SESSIONS_MIN_API (no volume-subpath); refusing — a pinned session gets its own config root or none. Upgrade Docker (>= 26), or set CLAUDE_VOLUME to a host directory." >&2
+      return 1
+    fi
+    PROJECT_SESSIONS_ARGS=(
+      --mount "type=volume,src=$CLAUDE_VOLUME,dst=$CLAUDE_CONFIG_CONTAINER_DIR,volume-subpath=$PROJECT_CONFIG_SUBDIR/$key"
+      --mount "type=volume,src=$CLAUDE_VOLUME,dst=$CLAUDE_PROJECT_CONTAINER_DIR,volume-subpath=$PROJECT_SESSIONS_SUBDIR/$key")
+    if [[ "$creds" == 1 ]]; then
+      PROJECT_SESSIONS_ARGS+=(--mount "type=volume,src=$CLAUDE_VOLUME,dst=$CLAUDE_CONFIG_CONTAINER_DIR/.credentials.json,volume-subpath=.credentials.json")
+    fi
+  fi
+  local how="own config root $PROJECT_CONFIG_SUBDIR/$key"
+  case "$out" in *config:seeded*) how="$how (first run: seeded with the shared settings.json)" ;; esac
+  if [[ "$creds" == 1 ]]; then
+    echo "container: config: $how + $PROJECT_SESSIONS_SUBDIR/$key; the shared login is mounted as one file"
+  else
+    echo "container: config: $how + $PROJECT_SESSIONS_SUBDIR/$key; no shared login in '$CLAUDE_VOLUME' (ANTHROPIC_API_KEY, or run setup)"
+  fi
+  return 0
 }
 
 # Resolve the container user (see header docs).
@@ -267,8 +476,24 @@ build_image() {
   if [[ -n "${PLAYWRIGHT_MCP_VERSION:-}" ]]; then
     build_args+=(--build-arg "PLAYWRIGHT_MCP_VERSION=$PLAYWRIGHT_MCP_VERSION")
   fi
-  docker build "${build_args[@]}" -t "$IMAGE_NAME" "$ROOT_DIR/.devcontainer/"
+  # The ENGINE's Dockerfile (in a vendored project, its own vendored copy —
+  # the same directory, as before).
+  docker build "${build_args[@]}" -t "$IMAGE_NAME" "$ENGINE_DIR/.devcontainer/"
   echo "Image built successfully: $IMAGE_NAME"
+}
+
+# A pinned run never builds or retags the shared image per dispatch (a
+# project on an older engine could otherwise retag the image every project
+# runs): the image is built by `build` (maintenance, a release), from the
+# engine. Only when it does not exist at all is it built here, from this
+# engine — the one-time first run of a standalone install.
+pinned_image() {
+  if [[ "${PHASEKIT_IMAGE_PREBUILT:-}" == "1" ]] || docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+    echo "Image: $IMAGE_NAME (not rebuilt per dispatch; \`container-setup.sh build\` rebuilds it)"
+    return 0
+  fi
+  echo "Image $IMAGE_NAME not found — building it once from the engine ($ENGINE_DIR/.devcontainer)"
+  build_image
 }
 
 check_auth() {
@@ -298,10 +523,23 @@ run_container() {
     --cap-add=NET_RAW
     --cap-add=SETUID
     --cap-add=SETGID
-    -v "$CLAUDE_VOLUME":/home/node/.claude
-    -v "$ROOT_DIR":/workspace
-    -e CLAUDE_CONFIG_DIR=/home/node/.claude
   )
+  if [[ "$PINNED" == 1 ]]; then
+    # The config root is project_config_mounts' (below): never the volume.
+    docker_args+=(
+      -v "$ROOT_DIR":/workspace
+      -v "$ENGINE_DIR":"$ENGINE_CONTAINER_DIR":ro
+      -e PHASEKIT_PROJECT_DIR=/workspace
+      -e CLAUDE_CONFIG_DIR=/home/node/.claude
+    )
+    echo "Engine: $ENGINE_DIR -> $ENGINE_CONTAINER_DIR (read-only)"
+  else
+    docker_args+=(
+      -v "$CLAUDE_VOLUME":/home/node/.claude
+      -v "$ROOT_DIR":/workspace
+      -e CLAUDE_CONFIG_DIR=/home/node/.claude
+    )
+  fi
 
   # Forward MAX_ITERATIONS only when the caller set it — run-until-done.sh
   # owns the default (50 standard, 2 light). Unconditionally injecting 50 here
@@ -529,6 +767,11 @@ run_container() {
     docker_args+=(-e CLAUDE_MODE="$CLAUDE_MODE")
   fi
 
+  # v0.19.0: the guard probe's bound, read by run-phase.sh in the container.
+  if [[ -n "${PHASEKIT_GUARD_PROBE_TIMEOUT:-}" ]]; then
+    docker_args+=(-e PHASEKIT_GUARD_PROBE_TIMEOUT="$PHASEKIT_GUARD_PROBE_TIMEOUT")
+  fi
+
   # PHASEKIT_ITER_RETRY caps per-iteration retries on transient claude CLI
   # failures (filter trips, 5xx, etc.). See scripts/run-until-done.sh.
   if [[ -n "${PHASEKIT_ITER_RETRY:-}" ]]; then
@@ -574,7 +817,7 @@ run_container() {
   if [[ "$sessions_user" == "root" ]]; then
     sessions_user="0:0"
   fi
-  project_sessions_mount "$sessions_user"
+  project_sessions_mount "$sessions_user" || exit 1
   docker_args+=("${PROJECT_SESSIONS_ARGS[@]}")
 
   docker run "${docker_args[@]}" "$IMAGE_NAME" "${cmd[@]}"
@@ -585,6 +828,9 @@ case "$COMMAND" in
     build_image
     ;;
   setup)
+    # The login is the SHARED credential every project's session mounts: a
+    # pinned project's setup logs in to the whole volume, as a vendored one does.
+    PINNED=0
     build_image
     echo ""
     echo "=== Claude Code Login Setup ==="
@@ -595,14 +841,29 @@ case "$COMMAND" in
     run_container bash
     ;;
   run)
-    build_image
-    check_auth
-    run_container bash scripts/run-until-done.sh
+    if [[ "$PINNED" == 1 ]]; then
+      pinned_image
+      check_auth
+      # /opt/phasekit/bin first on PATH: `phasekit` in the container is the
+      # mounted engine (the loop also puts its own shim first).
+      run_container bash -c 'export PATH="'"$ENGINE_CONTAINER_DIR"'/bin:$PATH"; exec bash "$0" "$@"' \
+        "$ENGINE_CONTAINER_DIR/scripts/run-until-done.sh"
+    else
+      build_image
+      check_auth
+      run_container bash scripts/run-until-done.sh
+    fi
     ;;
   shell)
-    build_image
-    check_auth
-    run_container bash
+    if [[ "$PINNED" == 1 ]]; then
+      pinned_image
+      check_auth
+      run_container bash -c 'export PATH="'"$ENGINE_CONTAINER_DIR"'/bin:$PATH"; exec bash'
+    else
+      build_image
+      check_auth
+      run_container bash
+    fi
     ;;
   *)
     echo "Unknown command: $COMMAND" >&2

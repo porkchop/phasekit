@@ -168,9 +168,7 @@ class TheLoopNeverStagesTheLock(unittest.TestCase):
     def test_phasekit_verify_does_not_stage_it(self):
         # RED on v0.18.5: `A .scaffold/manifest.json.lock` after the run.
         repo = self._repo()
-        r = subprocess.run(["bash", str(repo.repo / "scripts" / "run-until-done.sh"), "verify"],
-                           cwd=repo.repo, capture_output=True, text=True, timeout=120,
-                           env={**os.environ, "STUB_DIR": str(repo.stub), "PHASEKIT_NO_UPDATE_CHECK": "1"})
+        r = repo.run_verb("verify")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotIn(LOCK, repo.git("diff", "--cached", "--name-only").split())
 

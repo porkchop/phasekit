@@ -1,0 +1,9 @@
+{
+  "name": "phasekit",
+  "description": "phasekit's guardrails and subagents for Claude Code: the command guard, the stop-without-verdict hook, the wrap-up nudge, the compaction re-anchor, and the phase-gated workflow's agents. Active only in a pinned phasekit project (.phasekit-version) and under the phasekit loop; its hooks are inert in any other repository (its phasekit:* agents are listed everywhere it is installed), and it steps aside in a vendored project whose own .claude/settings.json wires the same hooks.",
+  "author": {
+    "name": "phasekit"
+  },
+  "homepage": "https://github.com/porkchop/phasekit",
+  "license": "MIT"
+}

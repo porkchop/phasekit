@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# The engine's own `phasekit` (v0.19.0): what a pinned run's container puts on
+# PATH (/opt/phasekit/bin) and what an engine in the store answers with. It is
+# this engine's CLI, nothing more: scripts/phasekit.sh resolves the project
+# and its pin from the working directory.
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+exec bash "$here/../scripts/phasekit.sh" "$@"

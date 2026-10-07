@@ -26,6 +26,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
+from _layout import engine_dir_for
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOOP_SCRIPT = REPO_ROOT / "scripts" / "run-until-done.sh"
@@ -124,7 +125,7 @@ class Fixture(unittest.TestCase):
     def bash(self, body, env=None, target=None):
         prelude = [
             f'cd "{self.repo}"',
-            f'ROOT_DIR="{self.repo}"',
+            f'ENGINE_DIR="{engine_dir_for(self.repo)}"', f'ROOT_DIR="{self.repo}"',
             f'ARTIFACTS_DIR="{self.artifacts}"',
             f'SQUASH_TARGET="{self.target if target is None else target}"',
             'ITERATION_MODE="standard"',

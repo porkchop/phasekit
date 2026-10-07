@@ -1,16 +1,24 @@
 # Usage patterns
 
+These patterns assume a **pinned** project (phasekit v0.19.0 and later): the project tracks `.phasekit-version` and its own files, and phasekit's engine — the loop, the hooks, the agents, these process docs — runs read-only from the engine store outside the repository (`docs/INSTALL_LIFECYCLE.md`). In a pinned project:
+
+- the process docs (`QUALITY_GATES.md`, this file, ...) are the engine's: `phasekit docs` prints their directory, and a session the loop starts is told where they are (`$PHASEKIT_ENGINE_DOCS`);
+- the agents come from the phasekit Claude Code plugin and are namespaced `phasekit:<agent>` (`phasekit:project-lead`, `phasekit:strategy-planner`, ...); the agent names below are given without the prefix;
+- the loop runs as `phasekit loop` (host) or `phasekit run` (container), and refuses any model turn whose command guard did not load (`docs/EXECUTION_MODES.md`).
+
+Vendored projects (created before v0.19.0) work the same way with the engine in their own tree; Pattern 11 converts one.
+
 ## Pattern 1 - Greenfield product build
 Use when a repository is new or nearly empty.
 
 Workflow:
 1. from the new project directory, run:
    ```
-   bash /path/to/scaffold/scripts/bootstrap-new-project.sh [PROFILE]
+   phasekit init [PROFILE]
    ```
-   This copies agents, docs, hooks, and generates `.claude/CLAUDE.md` using the manifest profile (default: `default`).
-2. customize `docs/SPEC.md`, `docs/ARCHITECTURE.md`, `docs/PHASES.md`, and `docs/PROD_REQUIREMENTS.md`
-3. commit the scaffold-installed files. See `docs/INSTALL_LIFECYCLE.md` § "What to commit (and what to gitignore)" for the canonical list and a `.gitignore` snippet for runtime-only paths (`.claude/settings.local.json`, `.scaffold/manifest.json.lock`, `*.scaffold-tmp`).
+   This writes `.phasekit-version` and the project's own files (the docs below, `AGENTS.md`, `.claude/CLAUDE.md`, permissions-only `.claude/settings.json`, the gate `scripts/phasekit-verify.sh`) for the profile (default: `default`), commits them in one commit, and installs the plugin if it is missing.
+2. customize `docs/SPEC.md`, `docs/ARCHITECTURE.md`, `docs/PHASES.md`, and `docs/PROD_REQUIREMENTS.md`, and commit them. See `docs/INSTALL_LIFECYCLE.md` § "What to commit in a pinned project".
+3. make `scripts/phasekit-verify.sh` run your stack's fast checks (a stack profile seeds a working one); `phasekit verify` runs it as the loop will
 4. let `project-lead` start at phase 0
 5. require planning memos for architecture choices
 6. iterate phase by phase until `project-complete.json`
@@ -21,9 +29,9 @@ Use when code already exists and needs methodical continuation.
 Workflow:
 1. from the existing project directory, run:
    ```
-   bash /path/to/scaffold/scripts/adopt-existing-repo.sh [PROFILE]
+   phasekit init [PROFILE]
    ```
-   This copies agents, hooks, and doc templates without overwriting existing files.
+   This pins the project and writes the project's own files without overwriting existing ones (an existing `AGENTS.md` or `docs/SPEC.md` is kept). A project that already carries a vendored phasekit uses Pattern 11 instead.
 2. adapt `docs/` to the current state of the codebase
 3. start the lead in audit mode
 4. re-vet already-built phases before continuing
@@ -107,11 +115,11 @@ Workflow (each step labelled with its preferred surface):
 5. **(Optional) Design pass.** *(Claude Code)* If the project's complexity warrants — multiple subsystems, scaling concerns, async/sync decisions worth being explicit about — opt into the M10 design artifact via the `with-design` profile. `strategy-planner` produces the initial `docs/DESIGN.md`; `architecture-red-team` reviews it. See "When to use docs/DESIGN.md" above.
 6. **Phase plan.** *(Claude Code)* Ask `strategy-planner` to break the SPEC into phases such that each phase ends in a verifiable, deployable, reviewable increment. Output: `docs/PHASES.md`.
 7. **Adversarial review.** *(Claude Code)* Run `architecture-red-team` against SPEC + ARCHITECTURE (+ DESIGN if present) + PHASES. Address blocking concerns; record non-blocking ones as `Open questions` in DESIGN.md if used, or in a planning memo. The red-team should flag scaling concerns, missing non-goals, weak phase acceptance criteria, and integration risks.
-8. **Initialize the project.** *(Claude Code)* Run Pattern 1 (`bootstrap-new-project.sh`). The SPEC, ARCHITECTURE, PHASES, and PROD_REQUIREMENTS.md you've drafted slot in directly — the scaffold's templates are *defaults*, not *requirements*. Override the rendered files with what you've already written. (If you ran Pattern 1 earlier in step 4 to use Claude Code's filesystem, you've already done this.)
+8. **Initialize the project.** *(Claude Code)* Run Pattern 1 (`phasekit init`). The SPEC, ARCHITECTURE, PHASES, and PROD_REQUIREMENTS.md you've drafted slot in directly — the scaffold's templates are *defaults*, not *requirements*. Override the rendered files with what you've already written. (If you ran Pattern 1 earlier in step 4 to use Claude Code's filesystem, you've already done this.)
 
 Notes:
 - **Steps 1–3** happen *outside* any specific repo. claude.ai for the conversation, external tools for UI, scratch notes for everything else.
-- **Steps 4–8** happen *inside* Claude Code. The scaffold's `strategy-planner` and `architecture-red-team` agents are the value here — claude.ai cannot replicate them faithfully even if you describe the personas in a system prompt. The real agent files in `.claude/agents/*.md` carry specific instructions and output formats that took adversarial reviews to settle.
+- **Steps 4–8** happen *inside* Claude Code. The scaffold's `strategy-planner` and `architecture-red-team` agents are the value here — claude.ai cannot replicate them faithfully even if you describe the personas in a system prompt. The real agent definitions (the engine's `.claude/agents/*.md`, served by the plugin as `phasekit:<agent>`) carry specific instructions and output formats that took adversarial reviews to settle.
 - **The exact handoff point** is flexible. Some teams cross between steps 3 and 4 (claude.ai for SPEC + UI, Claude Code for ARCH + DESIGN + PHASES). Others run Pattern 1 immediately after step 2, paste the SPEC draft into the rendered `docs/SPEC.md`, and do steps 3–7 inside Claude Code with file references. Both are fine. The single hard rule: don't try to run `strategy-planner` or `architecture-red-team` from claude.ai by play-acting — you lose what makes them work.
 - **If the concept genuinely fits in 30 minutes of conversation**, skip the formal walk-through entirely. This pattern is for ideas worth at least a half-day of work.
 - **For ongoing ideation on an existing project**, prefer `decision-memo.md` artifacts under `artifacts/` rather than reopening SPEC. SPEC describes the steady-state product; decision memos describe each material change.
@@ -123,12 +131,14 @@ The phase model maps cleanly onto the routine model: each routine invocation adv
 
 Workflow:
 1. **Push the project to GitHub** (or another remote Claude Code routines can clone). The routine's sandbox is ephemeral, so all state must round-trip through git.
-2. **First-time enrichment.** Easier to do once locally (Pattern 1 / Pattern 2) before scheduling the loop. The downstream `.scaffold/manifest.json` is then committed and the cloud routine can take over.
+2. **First-time setup.** Easier to do once locally (Pattern 1 / Pattern 2) before scheduling the loop. The project's `.phasekit-version` and own files are then committed and the cloud routine can take over. The engine is not in the repository, so the routine's sandbox needs phasekit installed (`install.sh`, which also installs the plugin and the pinned release's engine when it is the release installed; any other pin is fetched on first use).
 3. **Schedule the routine.** Use the `/schedule` slash command (or claude.ai/code/routines UI) to create a recurring or one-time CCR routine pointing at the project's GitHub URL. Prompt skeleton:
    ```
    You are continuing the phasekit phase loop on this repo.
    1. Read AGENTS.md and docs/PHASES.md.
-   2. Run: python3 scripts/enrich-project.py --check . to verify clean state.
+   2. Install phasekit if `phasekit` is not on PATH (curl -fsSL
+      https://raw.githubusercontent.com/porkchop/phasekit/master/install.sh | bash),
+      then run `phasekit check` to verify a clean state.
    3. Identify the next unapproved phase (the earliest phase without a
       matching artifacts/phase-approval.json entry).
    4. Execute it per the audit-first protocol — invoke project-lead;
@@ -144,12 +154,12 @@ Workflow:
 6. **Handle blockers.** When a routine writes `artifacts/phase-blocked.json`, the scheduled loop pauses pending your input. Resolve out-of-band (locally, in conversation), commit your resolution, and the next scheduled run resumes.
 
 What translates from local to cloud:
-- Subagents (`.claude/agents/*`), skills (`.claude/skills/*`), and the lifecycle scripts (`enrich-project.py` and friends) — pure files; run anywhere with git + Python.
-- The phase model, manifest schema, and approval-then-commit flow — the *outer wrapper* changes (cron instead of `run-until-done.sh`) but the inner contract is identical.
+- Subagents, hooks and skills (through the plugin), and the `phasekit` CLI — pure files; run anywhere with git + Python once phasekit is installed.
+- The phase model and approval-then-commit flow — the *outer wrapper* changes (cron instead of `phasekit loop`) but the inner contract is identical.
 
 What does NOT translate:
 - The `.devcontainer/` + firewall *containerized autonomous mode*. CCR is already a sandboxed cloud environment; running Docker-in-Docker inside it is not supported by most cloud sandboxes anyway, and isn't needed because the sandbox itself provides the isolation that mode was designed to give.
-- The `run-until-done.sh` host-side loop. The scheduling system *is* the loop; don't run a wrapper inside the routine.
+- The `phasekit loop` host-side loop. The scheduling system *is* the loop; don't run a wrapper inside the routine.
 
 When local still wins:
 - **Active interactive development.** Fast feedback, lower token cost per turn, no commit/push round-trip.
@@ -161,7 +171,29 @@ When cloud actually wins:
 - **Scheduled drift audits** — cron `--check` against a downstream project; alert on non-zero exit.
 - **Team collaboration** without per-developer local-clone setup (especially once M9.3 ships and the agents are plugin-installable).
 
-Future improvement (queued, not blocking): once **M9.3 (plugin distribution)** lands, the routine prompt can drop the "clone phasekit alongside" step and instead `/plugin install phasekit-agents` at the start. Until then, the routine either includes phasekit as a git submodule of the project, or the prompt instructs Claude to clone it on-demand.
+Since v0.19.0 the agents and hooks are distributed as a Claude Code plugin, installed by `install.sh`; the routine installs phasekit at its start (step 2 of the prompt above) rather than carrying a copy of the engine in the project.
+
+## Pattern 10 - Keeping a project current
+Use whenever a new phasekit release is out.
+
+Workflow:
+1. `phasekit self-update` — moves the install to the newest release on its channel and installs that release into the engine store
+2. `phasekit upgrade` in the project — a pin bump: installs the engine, writes `.phasekit-version`, runs the project's gate under the new engine, commits one line (`chore(phasekit): pin vA -> vB`); red leaves everything as it was (exit 4)
+3. push when ready (or `phasekit upgrade --push`)
+
+A pin bump can land at any time: a running iteration finishes on the engine it started with, and a bump on the integration branch reaches an open iteration's work branch only at its merge-back. There is nothing to merge and no keep-local decision, because no engine file is in the tree. `phasekit check` (exit 0 / 3 / 6) confirms the pin is installed and nothing of the engine is tracked.
+
+## Pattern 11 - Migrating a vendored project
+Use for a project enriched before v0.19.0 (it has `scripts/run-until-done.sh` and `.scaffold/manifest.json` in its tree).
+
+Workflow:
+1. commit or stash so the tree is clean
+2. move any edits to engine files into project-owned files (`docs/project/<NAME>.md` for a process doc)
+3. `phasekit migrate --dry-run` — the exact files it would delete, the settings change, the pin
+4. `phasekit migrate` — deletes the manifest's scaffold-class files and `.scaffold/`, strips the hook wiring from `.claude/settings.json`, writes the pin, runs the gate under the engine, one commit; never pushes. Edited engine files make it refuse unless `--discard-local`; a red gate leaves the tree exactly as it was (exit 4)
+5. `phasekit check` should print `clean`; push
+
+If a supervisor dispatches the project by running its vendored `scripts/container-setup.sh`, migrate only once that supervisor resolves pins. See `docs/INSTALL_LIFECYCLE.md` § "`phasekit migrate`".
 
 ## When to use docs/DESIGN.md
 
@@ -177,7 +209,7 @@ Skip it for:
 - prototypes, single-file scripts, throwaway experiments, or projects under a few hours of work
 - pure CRUD apps with one obvious shape and no scaling concerns
 
-Enable it via the `with-design` profile at enrichment time, or by editing the project's `.scaffold/manifest.json` profile to `with-design` and running `--upgrade`. Keep `DESIGN.md` under one screen — push detail into per-decision memos in `artifacts/` rather than letting the design itself grow. `strategy-planner` produces and updates the design; `architecture-red-team` reviews it alongside decision memos.
+Enable it via the `with-design` profile at `phasekit init`, or later by adding `docs/DESIGN.md` yourself from the engine's `templates/design.template.md` (it is a project-owned file). (Legacy, vendored projects: edit the manifest's profile to `with-design` and run the vendored upgrade.) Keep `DESIGN.md` under one screen — push detail into per-decision memos in `artifacts/` rather than letting the design itself grow. `strategy-planner` produces and updates the design; `architecture-red-team` reviews it alongside decision memos.
 
 ## Companion plugins
 
@@ -194,7 +226,8 @@ The [agent-skills plugin](https://github.com/addyosmani/agent-skills) ships 21 s
 
 **Resolution rules** (handled by Claude Code):
 
-- Project-local `.claude/agents/<name>.md` (installed by our enrich) wins over plugin agents. Their `code-reviewer` persona is shadowed by our `.claude/agents/code-reviewer.md`; this is intentional — local customizations (like meewar2-style project extensions) take precedence.
+- In a pinned project phasekit's agents are plugin agents too, namespaced by plugin (`phasekit:code-reviewer` next to the other plugin's `code-reviewer` persona), so both are available and the prompt names which one it means; phasekit's loop names its own (`phasekit:<agent>`).
+- In a vendored project, project-local `.claude/agents/<name>.md` (installed by the vendored enrich) wins over plugin agents: their `code-reviewer` persona is shadowed by the vendored `.claude/agents/code-reviewer.md`.
 - Project-local skills under `.claude/skills/<name>/` similarly win over plugin skills with the same name.
 - Slash commands from the plugin become available globally inside the project. There is no override mechanism today.
 

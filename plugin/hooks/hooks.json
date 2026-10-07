@@ -1,0 +1,65 @@
+{
+  "description": "phasekit's hooks: the same (event, matcher, hook) set as templates/settings.template.json (tests/test_engine_outside.py pins it), plus the loop's guard probe on UserPromptSubmit (inert unless PHASEKIT_GUARD_PROBE is set).",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" deny-dangerous-commands"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" wrapup-nudge"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" compact-reanchor"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" require-verdict"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" wrapup-nudge"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" guard-probe"
+          }
+        ]
+      }
+    ]
+  }
+}

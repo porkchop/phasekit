@@ -26,3 +26,23 @@ jobs:
 
       - name: Unit tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+  # v0.19.0: every loop-behaviour module again with the engine OUTSIDE the
+  # project (tests/_layout.py): a case green vendored and red pinned is a
+  # release blocker.
+  pinned-layout:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: python3 -m pip install --upgrade pip pyyaml
+
+      - name: Loop-behaviour tests, pinned layout
+        run: bash tests/run-layouts.sh pinned

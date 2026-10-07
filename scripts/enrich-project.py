@@ -271,13 +271,22 @@ def copy_file(src, dest, force=False, dry_run=False, target_root=None):
     return True
 
 
-def render_template_text(template_path, project_name):
+# v0.19.0: one template, two layouts. `{{#vendored}}…{{/vendored}}` keeps its
+# text in a vendored project (the engine's files in the tree) and drops it in a
+# pinned one; `{{#pinned}}…{{/pinned}}` the reverse. A vendored rendering is
+# byte-identical to the template without the pinned blocks.
+_LAYOUT_BLOCK = re.compile(r"\{\{#(vendored|pinned)\}\}(.*?)\{\{/\1\}\}", re.S)
+
+
+def render_template_text(template_path, project_name, layout="vendored"):
     """Render a scaffold template's text by substituting placeholders.
 
-    Currently supports `{{PROJECT_NAME}}` and `{{OPTIONAL_REFERENCES}}`.
-    Idempotent (substitutions on a fully-rendered file are no-ops).
+    Currently supports `{{PROJECT_NAME}}`, `{{OPTIONAL_REFERENCES}}` and the
+    layout blocks above. Idempotent (substitutions on a fully-rendered file
+    are no-ops).
     """
     text = Path(template_path).read_text()
+    text = _LAYOUT_BLOCK.sub(lambda m: m.group(2) if m.group(1) == layout else "", text)
     text = re.sub(r"\{\{PROJECT_NAME\}\}", project_name, text)
     text = re.sub(r"\{\{OPTIONAL_REFERENCES\}\}", "", text)
     return text
@@ -1592,6 +1601,7 @@ UNVERIFIED_SUFFIX = " (unverified: --no-verify)"
 # container-setup.sh's CONTRACTS_CONTAINER_DIR and phasekit-contracts.py's
 # DEFAULT_MOUNT_DIR; RUNNER_HOME is where container-setup.sh pins HOME for a
 # --user override.
+ENGINE_CONTAINER_DIR = "/opt/phasekit"
 CONTRACTS_CONTAINER_DIR = "/contracts"
 RUNNER_HOME = "/home/node"
 RUNNER_HOME_USERS = ("0", "root", "1000", "node")  # root, and the image's `node` user, own it
@@ -1827,7 +1837,7 @@ def _tail(text, lines=UPGRADE_GATE_TAIL_LINES):
     return "\n".join((text or "").rstrip().splitlines()[-lines:])
 
 
-def run_upgrade_gate(target, mode, killers=None):
+def run_upgrade_gate(target, mode, killers=None, engine=None):
     """Run the project's gate on the upgraded tree; never raises except
     UpgradeInterrupted. Returns {status: passed|failed|infra, where, label,
     detail, tail}. The gate's footprint (anything it changed outside ignored
@@ -1839,7 +1849,7 @@ def run_upgrade_gate(target, mode, killers=None):
                 "detail": f"no usable temporary directory for the gate ({type(exc).__name__})",
                 "tail": ""}
     try:
-        return _run_upgrade_gate(target, mode, killers, scratch)
+        return _run_upgrade_gate(target, mode, killers, scratch, engine)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
@@ -1857,7 +1867,7 @@ def _gate_scratch(target):
     return tempfile.mkdtemp(prefix="phasekit-upgrade-gate-")
 
 
-def _run_upgrade_gate(target, mode, killers, scratch):
+def _run_upgrade_gate(target, mode, killers, scratch, engine=None):
     target = Path(target).resolve()
     killers = killers if killers is not None else []
     label, command = resolve_upgrade_gate(target)
@@ -1918,6 +1928,13 @@ def _run_upgrade_gate(target, mode, killers, scratch):
             session += ["--mount", _mount_arg(Path(contracts_path).resolve(),
                                               CONTRACTS_CONTAINER_DIR, readonly=True),
                         "-e", f"PHASEKIT_CONTRACTS_DIR={CONTRACTS_CONTAINER_DIR}"]
+        preamble = GATE_IDENTITY_PREAMBLE
+        if engine is not None:
+            # v0.19.0: a pinned project's gate reaches phasekit as `phasekit`
+            # (e.g. `phasekit contracts check`): the engine read-only, on PATH.
+            session += ["--mount", _mount_arg(Path(engine).resolve(), ENGINE_CONTAINER_DIR,
+                                              readonly=True)]
+            preamble += f'\nexport PATH="{ENGINE_CONTAINER_DIR}/bin:$PATH"'
         # Forwarded project keys first: docker's last -e wins, and the names
         # above belong to this script (the forward list also refuses them).
         argv = ["docker", "run", "--rm", "--name", name, "--entrypoint", "bash",
@@ -1929,13 +1946,15 @@ def _run_upgrade_gate(target, mode, killers, scratch):
                 "-e", "GIT_CONFIG_VALUE_0=*",
                 *session,
                 image, "-eo", "pipefail", "-c",
-                GATE_IDENTITY_PREAMBLE + "\n" + command]
+                preamble + "\n" + command]
         cwd = None
         env = None
     else:
         argv = ["bash", "-eo", "pipefail", "-c", command]
         cwd = str(target)
         env = _host_gate_env(target, scratch)
+        if engine is not None:
+            env["PATH"] = str(Path(engine) / "bin") + os.pathsep + env.get("PATH", "")
     try:
         proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True,

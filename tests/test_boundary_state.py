@@ -61,6 +61,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_tmp.py)
+from _layout import STUB_ROOT_LINE, Layout, engine_dir_for, mark_pinned
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOOP_SCRIPT = REPO_ROOT / "scripts" / "run-until-done.sh"
@@ -107,12 +108,12 @@ def _transient_array():
 
 STUB_RUN_PHASE = """#!/usr/bin/env bash
 set -euo pipefail
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+""" + STUB_ROOT_LINE + """
 cd "$ROOT_DIR"
 : "${STUB_DIR:?stub state dir must be set}"
 n=$(( $(cat "$STUB_DIR/calls" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$STUB_DIR/calls"
-cp "$1" "$STUB_DIR/prompt-$n.txt"
+cat "$1" > "$STUB_DIR/prompt-$n.txt"
 export PHASEKIT_TEST_LOOP_PID="$PPID"
 CALL_N="$n" bash "$STUB_DIR/scenario.sh"
 """
@@ -183,7 +184,7 @@ class Repo:
     """A scratch repo on `main` with the shipped loop, a stub model, and a
     logging verify gate. squash=True runs branch-per-iteration."""
 
-    def __init__(self, squash, gate="logging"):
+    def __init__(self, squash, gate="logging", pinned=None):
         self.tmp = Path(tempfile.mkdtemp(prefix="pk-boundary-"))
         self.repo = self.tmp / "repo"
         self.stub = self.tmp / "stub"
@@ -193,18 +194,20 @@ class Repo:
         (self.repo / "artifacts").mkdir()
         (self.repo / "docs").mkdir()
         self.stub.mkdir()
-        shutil.copy(LOOP_SCRIPT, self.repo / "scripts" / "run-until-done.sh")
-        self.write("scripts/run-phase.sh", STUB_RUN_PHASE, executable=True)
+        self.layout = Layout(self.repo, pinned=pinned)
+        self.layout.put("scripts/run-until-done.sh", src=LOOP_SCRIPT)
+        self.layout.put("scripts/run-phase.sh", STUB_RUN_PHASE, executable=True)
+        self.layout.put("CONTINUE_PROMPT.txt", "prompt\n")
         self.write("scripts/phasekit-verify.sh",
                    VERIFY_CONSISTENCY if gate == "consistency" else VERIFY_LOGGING, executable=True)
         if gate == "consistency":
             self.write("artifacts/ready-to-deploy.json", '{"deploy_ready": true, "digest": "d0"}\n')
             self.write("artifacts/evidence/transcript.json", '{"digest": "d0"}\n')
             self.write("artifacts/iteration-mode.json", '{"mode": "standard", "iteration": 7}\n')
-        self.write("CONTINUE_PROMPT.txt", "prompt\n")
         self.write("docs/PHASES.md", "# Phases\n")
         self.write("src.txt", "base\n")
         self.scenario(NOTHING_SCENARIO)
+        mark_pinned(self.repo, self.layout.pinned)   # pinned: the project carries its pin, nothing else of the engine
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.email", "t@t")
         self.git("config", "user.name", "t")
@@ -216,7 +219,24 @@ class Repo:
             self.git("checkout", "-q", "-b", "iter/1-test")
         self.branch = "iter/1-test" if squash else "main"
 
+    def put_engine(self, rel, content, executable=False, commit=None):
+        """An engine file (a stub run-phase.sh, a prompt): into the tree when
+        vendored, into the separate engine when pinned. `commit` keeps the
+        fixture's history the same shape in both layouts."""
+        self.layout.put(rel, content, executable=executable)
+        if commit:
+            self.git("add", "-A")
+            self.git("commit", "--allow-empty", "-qm", commit)
+
+    def run_verb(self, verb, env=None, timeout=120):
+        """`run-until-done.sh <verb>` (verify/scope) in this layout."""
+        run_env = self.layout.env({**os.environ, "STUB_DIR": str(self.stub),
+                                   "PHASEKIT_NO_UPDATE_CHECK": "1", **(env or {})})
+        return subprocess.run(self.layout.loop_cmd(verb), cwd=self.repo, capture_output=True,
+                              text=True, timeout=timeout, env=run_env)
+
     def cleanup(self):
+        self.layout.cleanup()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     # -- plumbing -------------------------------------------------------
@@ -267,8 +287,9 @@ class Repo:
             run_env["PHASEKIT_SQUASH_TARGET"] = "main"
             run_env["PHASEKIT_WORK_BRANCH"] = "iter/1-test"
         run_env.update(env or {})
+        run_env = self.layout.env(run_env)
         return subprocess.run(
-            ["bash", str(self.repo / "scripts" / "run-until-done.sh")],
+            self.layout.loop_cmd(),
             cwd=self.repo, env=run_env, capture_output=True, text=True, timeout=timeout)
 
     # -- observations ---------------------------------------------------
@@ -746,7 +767,7 @@ class Primitives(unittest.TestCase):
     def bash(self, body, env=None):
         prelude = [
             "set -uo pipefail",
-            f'cd "{self.tmp}"', f'ROOT_DIR="{self.tmp}"', f'ARTIFACTS_DIR="{self.artifacts}"',
+            f'cd "{self.tmp}"', f'ENGINE_DIR="{engine_dir_for(self.tmp)}"', f'ROOT_DIR="{self.tmp}"', f'ARTIFACTS_DIR="{self.artifacts}"',
             'SQUASH_TARGET="${SQUASH_TARGET:-}"', 'ITERATION_MODE=standard',
             _transient_array(), STUBS, BOUNDARY_BLOCK,
         ]
@@ -1937,7 +1958,7 @@ class FootprintPrimitives(unittest.TestCase):
             subprocess.run(["git", *args], cwd=self.tmp, check=True, capture_output=True)
 
     def bash(self, body):
-        prelude = ["set -uo pipefail", f'cd "{self.tmp}"', f'ROOT_DIR="{self.tmp}"',
+        prelude = ["set -uo pipefail", f'cd "{self.tmp}"', f'ENGINE_DIR="{engine_dir_for(self.tmp)}"', f'ROOT_DIR="{self.tmp}"',
                    f'ARTIFACTS_DIR="{self.tmp}/artifacts"', _transient_array(), FOOTPRINT_BLOCK]
         return subprocess.run(["bash", "-c", "\n".join(prelude) + "\n" + body], capture_output=True,
                               text=True, timeout=60, env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"})
