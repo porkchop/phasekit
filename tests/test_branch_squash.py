@@ -65,7 +65,8 @@ def _function(name):
 FUNCTIONS += "\n" + "\n".join(_function(n) for n in (
     "artifact_never_landed", "boundary_get", "supervising_iteration_json",
     "normalize_iteration_label", "supervising_iteration_label", "normalize_phase_id",
-    "this_iterations_approval_phase", "verdict_phase_id", "iteration_base_sha",
+    "this_iterations_approval_phase", "record_names_another_iteration", "completion_record_phase",
+    "completion_phase_as_written", "verdict_phase_id", "iteration_base_sha",
     "phasekit_trailers", "compose_commit_message"))
 
 # The loop's transient vocabulary, extracted rather than restated (v0.14.4:

@@ -2368,7 +2368,12 @@ class StructuralPins(unittest.TestCase):
     def test_the_final_unrecorded_discriminator_requires_no_completion_touch_since_the_approval(self):
         fn = _extract_block(r"^approval_final_unrecorded\(\) \{", r"^\}")
         self.assertIn('git rev-list "$ap_commit..HEAD" -- artifacts/project-complete.json', fn)
-        self.assertIn('== "$blob" ]] || continue', fn, "the anchor is the OLDEST commit carrying the current blob")
+        # v0.19.1: the anchor moved into _landing_commit_of (one source, also
+        # read by the unstamped-final-approval rule)
+        self.assertIn('ap_commit="$(_landing_commit_of artifacts/phase-approval.json)"', fn)
+        anchor = _extract_block(r"^_landing_commit_of\(\) \{", r"^\}")
+        self.assertIn('== "$blob" ]] || continue', anchor, "the anchor is the OLDEST commit carrying the current blob")
+        self.assertNotIn("|| break", anchor)
         self.assertNotIn("|| break", fn)
         self.assertIn("approval_final_unrecorded", SOURCE.split("# --- Boundary recovery at loop start")[1])
 

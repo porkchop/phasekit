@@ -183,7 +183,15 @@ The loop also stamps the facts it owns into the record at landing —
 corrected, and says so), `base` (the commit the iteration started from) and,
 on a completion record, `final_phase` and `recorded_by` when absent — and
 generates the commit subject's `iteration N phase P:` prefix from the record
-(write only the prose; a stale prefix is corrected, never refused).
+(write only the prose; a stale prefix is corrected, never refused). A
+completion record's phase is, in order: the approval that lands with it; the
+record's own `phase` (name it when the completion closes a phase of its own —
+the last phase of a multi-phase iteration closed by the record alone); else
+this iteration's last approval, when it says `final_phase: true` or
+`docs/PHASES.md` plans no phase after it. Otherwise the phase is left out,
+with a WARN (v0.19.1). A record that names another iteration is a copy: its
+iteration is corrected, its `phase` is kept as `phase_as_written`, and it
+names no phase.
 
 ## Verification sprint gate
 Before starting a phase that builds on a completed user-visible or end-to-end foundation, run a full verification of the cumulative system to confirm prior work still functions:

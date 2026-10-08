@@ -38,9 +38,10 @@ TARGETS=("$@")
 # v0.18.2: the command guard's parse runs on the image's python and git too.
 # v0.18.3: the guard's scope, the scaffold-reads advisory and the declared
 # facts' proofs (they run the loop's own functions on the image's jq/grep).
+# v0.19.1: multi-phase landings (the plan parser, the evidence base).
 [[ ${#TARGETS[@]} -gt 0 ]] || TARGETS=("tests.test_boundary_state" "tests.test_loop_owns_commits"
   "tests.test_guard_scope" "tests.test_scaffold_reads" "tests.test_declared_surface"
-  "tests.test_engine_outside")
+  "tests.test_engine_outside" "tests.test_multiphase_invariance")
 
 command -v docker >/dev/null 2>&1 || { echo "verify-in-container: docker not found" >&2; exit 2; }
 docker image inspect "$IMAGE_NAME" >/dev/null 2>&1 || {

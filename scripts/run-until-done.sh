@@ -1406,7 +1406,7 @@ ensure_work_branch() {
       # already held (the target may have advanced since — an intake commit
       # after a finished iteration; v0.14.0 review, MINOR-4).
       if ! git log -n 500 --format=%T "refs/heads/$SQUASH_TARGET" 2>/dev/null \
-           | grep -qx "$(git rev-parse "refs/heads/$want^{tree}")"; then
+           | grep -x "$(git rev-parse "refs/heads/$want^{tree}")" >/dev/null; then
         # v0.14.4: a kept branch that differs from the target ONLY by the
         # loop's own transient signals or batons (a kill-path wip commits
         # session-handoff.json with `add -A`; the squash never carries it) is
@@ -1546,7 +1546,7 @@ squash_to_target() {
     # never judged in HEAD's place (the squash waits, named, for the next
     # verify-gated commit to carry the difference).
     local _sq_dirty
-    _sq_dirty="$(_boundary_dirty_paths | sed -E 's/^.. //' | head -n 8 | paste -sd' ' -)"
+    _sq_dirty="$(_boundary_dirty_paths | sed -E 's/^.. //' | sed -n '1,8p' | paste -sd' ' -)"
     if [[ -n "$_sq_dirty" ]]; then
       if boundary_final; then
         write_landing_block "$_sq_dirty"
@@ -1629,7 +1629,7 @@ catchup_squash() {
   d="$(mktemp -d)"
   git show "HEAD:artifacts/$src" > "$d/$src" 2>/dev/null || : > "$d/$src"
   msg="$(jq -r '.suggested_commit_message // empty' "$d/$src" 2>/dev/null)" || msg=""
-  [[ -n "$msg" ]] || msg="$(jq -r '.summary // empty | tostring' "$d/$src" 2>/dev/null | head -n1 | cut -c1-120)" || msg=""
+  [[ -n "$msg" ]] || msg="$(jq -r '.summary // empty | tostring' "$d/$src" 2>/dev/null | sed -n '1p' | cut -c1-120)" || msg=""
   [[ -n "$msg" ]] || msg="$fallback"
   FACTS_ITERATION="$(normalize_iteration_label "$(jq -c '.iteration // null' "$d/$src" 2>/dev/null)")"
   msg="$(compose_commit_message "$msg" "$d/$src" 2>/dev/null)" || true
@@ -1667,7 +1667,7 @@ staged_touches_security_pair() {
   # NEXT dispatch runs; it moves only by `phasekit upgrade` (the gated pin
   # bump), never inside a session's work — the engine that started an
   # iteration finishes it, and a session cannot choose its successor's engine.
-  git diff --cached --name-only | grep -qE '^\.claude/settings\.json$|^\.github/workflows/|^\.phasekit-version$'
+  git diff --cached --name-only | grep -E '^\.claude/settings\.json$|^\.github/workflows/|^\.phasekit-version$' >/dev/null
 }
 
 post_verify_commit_gates() {
@@ -1720,7 +1720,7 @@ PY
   # SPEC change attestation (v0.4.8, ADOPTIONS item 2 simplified): make SPEC
   # edits visible, never gated — record the staged numstat for the
   # orchestrator to surface (brief line; advisory only above its threshold).
-  if echo "$staged" | grep -q '^docs/SPEC\.md$'; then
+  if grep -q '^docs/SPEC\.md$' <<<"$staged"; then
     read -r spec_added spec_removed _ < <(git diff --cached --numstat -- docs/SPEC.md)
     printf '{"spec_changed": true, "added_lines": %s, "removed_lines": %s, "ts": "%s"}\n' \
       "${spec_added:-0}" "${spec_removed:-0}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -1870,7 +1870,7 @@ _commit_from_artifact() {
   msg="$(jq -r '.suggested_commit_message // empty' "$file")"
   if [[ -z "$msg" && "$kind" != update ]]; then
     # No message: the record's own summary says more than a generic chore.
-    msg="$(jq -r '.summary // empty | tostring' "$file" 2>/dev/null | head -n1 | cut -c1-120)" || msg=""
+    msg="$(jq -r '.summary // empty | tostring' "$file" 2>/dev/null | sed -n '1p' | cut -c1-120)" || msg=""
   fi
   if [[ -z "$msg" ]]; then
     msg="$fallback_msg"
@@ -2236,7 +2236,7 @@ write_session_handoff() {
     [[ -n "$phase" ]] || phase="unknown"
   fi
   local files in_flight
-  files="$(git diff --cached --name-only | grep -v '^artifacts/' | head -8 | tr '\n' ' ')" || files=""
+  files="$(git diff --cached --name-only | grep -v '^artifacts/' | sed -n '1,8p' | tr '\n' ' ')" || files=""
   in_flight="uncommitted work in: ${files:-(only artifacts/ signals)}"
   jq -n \
     --arg phase "$phase" \
@@ -2533,15 +2533,42 @@ approval_final_unrecorded() {
   # one genuinely ambiguous shape (an operator re-asserted final_phase on a
   # resumed project) and is an accepted limitation, stated in
   # docs/QUALITY_GATES.md.
-  local blob c
-  blob="$(git rev-parse -q --verify "HEAD:artifacts/phase-approval.json" 2>/dev/null)" || return 1
-  ap_commit=""
+  ap_commit="$(_landing_commit_of artifacts/phase-approval.json)"
+  [[ -n "$ap_commit" ]] || return 1
+  [[ -z "$(git rev-list "$ap_commit..HEAD" -- artifacts/project-complete.json 2>/dev/null)" ]]
+}
+
+_landing_commit_of() {
+  # $1 = a tracked path. The OLDEST commit anywhere in the path's history
+  # that carries HEAD's blob of it (a later re-touch with identical content
+  # does not move it); nothing when HEAD lacks the path.
+  local rel="$1" blob c out=""
+  blob="$(git rev-parse -q --verify "HEAD:$rel" 2>/dev/null)" || return 0
   while IFS= read -r c; do
     [[ -n "$c" ]] || continue
-    [[ "$(git rev-parse -q --verify "$c:artifacts/phase-approval.json" 2>/dev/null)" == "$blob" ]] || continue
-    ap_commit="$c"
-  done < <(git log --format=%H -- artifacts/phase-approval.json 2>/dev/null)
+    [[ "$(git rev-parse -q --verify "$c:$rel" 2>/dev/null)" == "$blob" ]] || continue
+    out="$c"
+  done < <(git log --format=%H -- "$rel" 2>/dev/null)
+  printf '%s' "$out"
+}
+
+unstamped_final_approval_is_this_iterations() {
+  # A landed final approval that carries no iteration (a standalone run, or
+  # one landed by hand) closes THIS iteration only when it landed with the
+  # completion record being judged — in the same commit as the landed
+  # record, or, the record not landed yet, with no completion record in HEAD
+  # and none touched since it (a kill between the two). A resumed project's
+  # old final approval fails both: its record landed with it and was
+  # retired since, or HEAD still carries that old record (round-2 review).
+  local ap_commit rc_commit
+  ap_commit="$(_landing_commit_of artifacts/phase-approval.json)"
   [[ -n "$ap_commit" ]] || return 1
+  if [[ -f "$ARTIFACTS_DIR/project-complete.json" ]] && ! artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then
+    rc_commit="$(_landing_commit_of artifacts/project-complete.json)"
+    [[ -n "$rc_commit" && "$rc_commit" == "$ap_commit" ]]
+    return
+  fi
+  git cat-file -e "HEAD:artifacts/project-complete.json" 2>/dev/null && return 1
   [[ -z "$(git rev-list "$ap_commit..HEAD" -- artifacts/project-complete.json 2>/dev/null)" ]]
 }
 
@@ -3147,7 +3174,7 @@ normalize_iteration_label() {
   local v
   v="$(jq -r 'if type == "number" then (if . == floor then (floor | tostring) else empty end)
               elif type == "string" then (gsub("^\\s+|\\s+$"; "") | sub("^iteration[-_ ]*"; ""; "i"))
-              else empty end' <<<"$1" 2>/dev/null | head -n1)" || v=""
+              else empty end' <<<"$1" 2>/dev/null | sed -n '1p')" || v=""
   [[ "$v" =~ ^[A-Za-z0-9._-]{1,64}$ ]] && printf '%s' "$v"
   return 0
 }
@@ -3178,7 +3205,10 @@ this_iterations_approval_phase() {
   # The phase of the approval on disk IF it belongs to this iteration: never
   # landed (this session's), or stamped with this iteration's label. A light
   # iteration writes no approval; the one on disk is then an older
-  # iteration's and names nothing about this one.
+  # iteration's and names nothing about this one. NOTE (v0.19.1): "this
+  # iteration's" is not "this boundary's" — a landed approval may close an
+  # EARLIER phase of the same iteration; only completion_record_phase decides
+  # whether it names a completion.
   local ap="$ARTIFACTS_DIR/phase-approval.json" n
   [[ -f "$ap" ]] || return 0
   n="$(supervising_iteration_label)"
@@ -3189,6 +3219,104 @@ this_iterations_approval_phase() {
   return 0
 }
 
+completion_record_phase() {
+  # $1 = a completion record. The phase it closes, as written (normalize it),
+  # or nothing — ONE derivation for the record's `final_phase` stamp, its
+  # commit subject and trailer, its planned title and its plan_paths.
+  #
+  # v0.19.1 (round-clock iterations 19 and 21, 2026-10-08): v0.18.0 took the
+  # phase of ANY approval stamped with this iteration, before the record's
+  # own `phase`. When the last phase of a multi-phase iteration is closed by
+  # the completion record alone (`{"phase": "phase-35", …}`, no approval of
+  # its own), the approval on disk is the PREVIOUS phase's, landed at that
+  # phase's boundary and stamped with this iteration: the record was stamped
+  # final_phase "phase-34" and phase 35's commit landed as "iteration 21
+  # phase 34" with phase 34's plan title and plan check. Layout-independent;
+  # single-phase iterations escaped because the approval on disk was the
+  # previous ITERATION's. In order:
+  #   1. an approval that has never landed: it rides this landing;
+  #   2. the record's own `phase`, unless the record names ANOTHER iteration
+  #      (a record copied forward from an older iteration carries that
+  #      iteration's phase too — the stamp corrects its iteration, so this
+  #      test only bites before the stamp, which is where the phase is fixed);
+  #   3. a landed approval of this iteration, only when docs/PHASES.md plans
+  #      no later phase after it: the completion then closes that last
+  #      planned phase (an approval and its record landed as two commits — a
+  #      kill between them). A later phase in the plan means the completion
+  #      may close a phase no approval names: underivable, left out (F5).
+  #      An approval that says `final_phase: true` closes the iteration by
+  #      definition: no plan check — and one nobody stamped (standalone, or
+  #      landed by hand with its record) counts as this iteration's.
+  # $2 = "copied": the stamp found the record naming another iteration — its
+  # own phase is not evidence (step 2 skipped). $3 = "warn": say so when the
+  # phase is underivable (the stamp's call only: one WARN per landing).
+  local f="$1" copied="${2:-}" warn="${3:-}" v ap="$ARTIFACTS_DIR/phase-approval.json"
+  [[ -f "$f" ]] || return 0
+  if artifact_never_landed "$ap"; then
+    v="$(jq -r '.phase // empty | tostring' "$ap" 2>/dev/null)" || v=""
+    if [[ -n "$(normalize_phase_id "$v")" ]]; then printf '%s' "$v"; return 0; fi
+  fi
+  if [[ "$copied" != copied ]] && ! record_names_another_iteration "$f"; then
+    v="$(jq -r '.phase | select(type == "string" or type == "number") | tostring' "$f" 2>/dev/null)" || v=""
+    if [[ -n "$(normalize_phase_id "$v")" ]]; then printf '%s' "$v"; return 0; fi
+  fi
+  v="$(this_iterations_approval_phase)"
+  if [[ -z "$(normalize_phase_id "$v")" && -f "$ap" ]] \
+     && [[ "$(jq -r '.final_phase // false' "$ap" 2>/dev/null)" == "true" ]] \
+     && { [[ -z "$(supervising_iteration_label)" ]] || [[ "$(jq -c '.iteration // null' "$ap" 2>/dev/null)" == null ]]; } \
+     && unstamped_final_approval_is_this_iterations; then
+    # A final approval nobody stamped (a standalone run; a hand landing of
+    # the approval and its record together) names the phase it closes.
+    v="$(jq -r '.phase // empty | tostring' "$ap" 2>/dev/null)" || v=""
+  fi
+  [[ -n "$(normalize_phase_id "$v")" ]] || return 0
+  if [[ "$(jq -r '.final_phase // false' "$ap" 2>/dev/null)" != "true" ]] \
+     && [[ -n "$(cd "$ROOT_DIR" && _phase_plan_py later "$(normalize_phase_id "$v")" 2>/dev/null)" ]]; then
+    if [[ "$warn" == warn ]]; then
+      echo "run-until-done: WARN — the completion record names no phase and docs/PHASES.md plans a phase after $(normalize_phase_id "$v") (the last approval's): its phase cannot be derived (F5)." >&2
+    fi
+    return 0
+  fi
+  printf '%s' "$v"
+  return 0
+}
+
+record_names_another_iteration() {
+  # $1 = a record. Does it name, legibly, an iteration other than the
+  # supervisor's (a copy from an older iteration, until the stamp corrects
+  # it)? A label that does not normalize ("21 (light)", an object) names
+  # nothing — the stamp still corrects it, but the record's phase stays its
+  # own; numeric labels compare as numbers ("iteration-021" is 21).
+  local f="$1" n cur
+  n="$(supervising_iteration_label)"
+  [[ -n "$n" ]] || return 1
+  cur="$(normalize_iteration_label "$(jq -c '.iteration // null' "$f" 2>/dev/null)")"
+  [[ -n "$cur" ]] || return 1
+  if [[ "$cur" =~ ^[0-9]{1,15}$ && "$n" =~ ^[0-9]{1,15}$ ]]; then
+    [[ "$((10#$cur))" != "$((10#$n))" ]]
+  else
+    [[ "$cur" != "$n" ]]
+  fi
+}
+
+completion_phase_as_written() {
+  # $1 = a completion record. Its `final_phase` when that names a phase (the
+  # stamp's decision, once made) and the record is this iteration's, else
+  # completion_record_phase — as written (raw: "phase-35"). The boundary
+  # record, the subject and the trailer all read this one.
+  local f="$1" v
+  if record_names_another_iteration "$f"; then completion_record_phase "$f" copied; return 0; fi
+  # An approval riding this landing names it, even over a final_phase a
+  # `phasekit verify` stamped before that approval was written (round 2).
+  if artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json"; then
+    v="$(jq -r '.phase // empty | tostring' "$ARTIFACTS_DIR/phase-approval.json" 2>/dev/null)" || v=""
+    if [[ -n "$(normalize_phase_id "$v")" ]]; then printf '%s' "$v"; return 0; fi
+  fi
+  v="$(jq -r '.final_phase | select(type == "string" or type == "number") | tostring' "$f" 2>/dev/null)" || v=""
+  if [[ -n "$(normalize_phase_id "$v")" ]]; then printf '%s' "$v"; return 0; fi
+  completion_record_phase "$f"
+}
+
 verdict_phase_id() {
   # $1 = an artifact file (phase-approval.json, project-complete.json,
   # phase-update.json, or a copy of one). The phase it closes, normalized;
@@ -3197,8 +3325,7 @@ verdict_phase_id() {
   [[ -f "$f" ]] || return 0
   case "$(basename "$f")" in
     *project-complete*)
-      v="$(jq -r '[.final_phase, .phase] | map(select(type == "string" or type == "number")) | .[0] // empty | tostring' "$f" 2>/dev/null)" || v=""
-      [[ -n "$(normalize_phase_id "$v")" ]] || v="$(this_iterations_approval_phase)" ;;
+      v="$(completion_phase_as_written "$f")" ;;
     *)
       v="$(jq -r '.phase // empty | tostring' "$f" 2>/dev/null)" || v="" ;;
   esac
@@ -3218,7 +3345,7 @@ iteration_base_sha() {
   local n="$1" c v run=""
   if [[ -n "$n" ]]; then
     c="$(git log -n 400 --format='%H%x09%(trailers:key=Phasekit-Kind,valueonly,separator=%x2C)%x09%(trailers:key=Phasekit-Iteration,valueonly,separator=%x2C)' HEAD 2>/dev/null \
-         | awk -F'\t' -v n="$n" '$2 == "intake" && $3 == n { print $1; exit }')" || c=""
+         | awk -F'\t' -v n="$n" '!f && $2 == "intake" && $3 == n { print $1; f = 1 }')" || c=""
     if [[ -n "$c" ]]; then printf '%s' "$c"; return 0; fi
     while IFS= read -r c; do
       [[ -n "$c" ]] || continue
@@ -3275,10 +3402,11 @@ phasekit_trailers() {
 # progress or status record (`### Phase 109 — progress record …`), and
 # `## Phase 193 continuation — …` is not a heading of phase 193.
 _phase_plan_py() {
-  # $1 = title | check, $2 = phase id, $3 = since (check only). Reads the plan
-  # from docs/PHASES.md; check reads the changed
+  # $1 = title | check | later, $2 = phase id, $3 = since (check only). Reads
+  # the plan from docs/PHASES.md; check reads the changed
   # paths from `git diff --cached` since $3. Prints the title (or nothing),
-  # or the plan_paths JSON object.
+  # the plan_paths JSON object, or (later) `later` when the plan names
+  # another phase in a heading after the one that plans $2.
   python3 - "$@" <<'PLAN_PY'
 import json, os, re, subprocess, sys
 
@@ -3295,7 +3423,7 @@ def plan_file():
 PROGRESS = re.compile(r"^(progress|status)(\s+(record|records|report|update|updates|log|note|notes)\b|\s*$|\s*[(:\u2014\u2013-])", re.I)
 
 def section(lines, pid):
-    """(title, body lines) of the heading that PLANS phase pid: `Phase <pid>`
+    """(title, body lines, heading line index) of the heading that PLANS phase pid: `Phase <pid>`
     (or `Meta Phase <pid>`; a bare id only when it is not purely numeric,
     `## M9.4 — …`) followed by a separator. Of those: never a progress or
     status record (`### Phase 109 — progress record …`), then the SHALLOWEST
@@ -3330,7 +3458,32 @@ def section(lines, pid):
         if j > i and l2 <= lvl:
             end = j
             break
-    return title, lines[i + 1:end]
+    return title, lines[i + 1:end], i
+
+# Any heading that plans a phase: `Phase <id>` (or `Meta Phase <id>`), or a
+# bare id with a letter and a digit (`M9.5`), and a separator — never a
+# progress or status record, never `Phase 193 continuation — …` (v0.19.1,
+# mode `later`; a bare heading that is not a phase errs toward "later", i.e.
+# toward leaving a phase out, never toward a wrong one).
+ANY_PHASE = re.compile(r"^#{1,6}\s+(?:\*\*|__)?\s*(?:(?:meta[\s_-]*)?phase[\s_-]*([A-Za-z0-9._]*[0-9][A-Za-z0-9._]*)"
+                       r"|([A-Za-z][A-Za-z0-9._]*[0-9][A-Za-z0-9._]*))"
+                       r"(?![A-Za-z0-9._-])\s*(?:\*\*|__)?\s*(?:[\u2014\u2013:\-]|\.\s)\s*(.*?)\s*#*\s*$", re.I)
+
+def planned_after(lines, pid, start):
+    """Does the plan name a phase other than pid in a heading after line
+    `start` (the heading that plans pid)?"""
+    fence = False
+    for ln in lines[start + 1:]:
+        if ln.lstrip().startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        if fence:
+            continue
+        m = ANY_PHASE.match(ln)
+        if m and (m.group(1) or m.group(2)).lower() != pid.lower() \
+           and not PROGRESS.match(re.sub(r"(\*\*|__)", "", m.group(3)).strip()):
+            return True
+    return False
 
 def clean_title(t):
     t = re.sub(r"(\*\*|__)", "", t).strip()
@@ -3399,6 +3552,12 @@ def declared_globs(body):
 rel = plan_file()
 lines = open(rel, encoding="utf-8", errors="replace").read().splitlines() if rel else []
 sec = section(lines, pid)
+if mode == "later":
+    # Fail closed: a plan that does not plan pid (or no plan) cannot show
+    # that nothing is planned after it.
+    if not sec or planned_after(lines, pid, sec[2]):
+        print("later")
+    sys.exit(0)
 if mode == "title":
     if sec:
         t = clean_title(sec[0])
@@ -3528,7 +3687,7 @@ compose_commit_message() {
   if [[ -n "$mn" && -n "$n" && "$mn" != "${n,,}" ]]; then disagree=1; fi
   if [[ -n "$mp" && -n "$p" && "$mp" != "${p,,}" ]]; then disagree=1; fi
   if [[ "$disagree" -eq 1 || -z "${prose//[[:space:]]/}" ]]; then
-    repl="$(jq -r '[.iteration_label, .summary] | map(select(type == "string" and length > 0)) | .[0] // empty' "$f" 2>/dev/null | head -n1)" || repl=""
+    repl="$(jq -r '[.iteration_label, .summary] | map(select(type == "string" and length > 0)) | .[0] // empty' "$f" 2>/dev/null | sed -n '1p')" || repl=""
     repl="$(printf '%s' "$repl" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | cut -c1-160)"
     [[ -n "$repl" ]] && prose="$repl"
   fi
@@ -3571,7 +3730,7 @@ stamp_verdict_facts() {
   # supervisor's value, written when absent and CORRECTED when the record
   # names another iteration), `base`, and on a completion record
   # `final_phase` and `recorded_by` when absent. Keeps the file's mtime.
-  local f="$1" raw n cur base kind="approval" p="" out msg=""
+  local f="$1" raw n cur base kind="approval" p="" out msg="" copied=""
   jq -e 'type == "object"' "$f" >/dev/null 2>&1 || return 0
   [[ "$(basename "$f")" == project-complete.json ]] && kind="completion"
   raw="$(supervising_iteration_json)"; n="$(normalize_iteration_label "$raw")"
@@ -3579,17 +3738,41 @@ stamp_verdict_facts() {
   if [[ -n "$n" && "$cur" != "null" && "$(normalize_iteration_label "$cur")" != "$n" ]]; then
     msg="run-until-done: record corrected: $(basename "$f") named iteration $cur; the supervisor's is $raw (the record says so from now on)"
   fi
+  if record_names_another_iteration "$f"; then copied=copied; fi
   base="$(iteration_base_sha "$n")"
-  if [[ "$kind" == completion ]]; then p="$(this_iterations_approval_phase)"; fi
-  out="$(jq --argjson raw "${raw:-null}" --arg n "$n" --arg base "$base" --arg kind "$kind" --arg p "$p" '
+  local rides=""
+  if [[ "$kind" == completion ]]; then
+    p="$(completion_record_phase "$f" "$copied" warn)"
+    if artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json" \
+       && [[ -n "$(normalize_phase_id "$(jq -r '.phase // empty | tostring' "$ARTIFACTS_DIR/phase-approval.json" 2>/dev/null)")" ]]; then
+      rides=1
+    fi
+  fi
+  # v0.19.1 (review F1): a completion record that named another iteration is
+  # a copy — its phase and a stamped final_phase are that iteration's. The
+  # correction is persisted, not re-derived: the copy's phase moves to
+  # `phase_as_written` and its final_phase is replaced, so no later reader
+  # (the subject, the trailer, the evidence, a second `phasekit verify`)
+  # can fall back to them once the iteration reads as this one's.
+  if [[ -n "$copied" && "$kind" == completion ]] \
+     && jq -e '(.phase | type) == "string" or (.phase | type) == "number"' "$f" >/dev/null 2>&1; then
+    msg="$msg; its phase $(jq -c '.phase' "$f" 2>/dev/null) is kept as phase_as_written"
+  fi
+  out="$(jq --argjson raw "${raw:-null}" --arg n "$n" --arg base "$base" --arg kind "$kind" --arg p "$p" --arg copied "$copied" --arg rides "$rides" '
       def itlabel: if type == "number" then (if . == floor then (floor | tostring) else "" end)
                  elif type == "string" then (gsub("^\\s+|\\s+$"; "") | sub("^iteration[-_ ]*"; ""; "i"))
                  else "" end;
-      (if $n == "" then .
+      (if $copied != "" and $kind == "completion" then
+         (if ((.phase | type) == "string" or (.phase | type) == "number") then .phase_as_written = .phase | del(.phase) else . end)
+         | (if ((.final_phase | type) == "string" or (.final_phase | type) == "number") then del(.final_phase) else . end)
+       else . end)
+      | (if $n == "" then .
        elif (.iteration // null) == null then .iteration = $raw
        elif (.iteration | itlabel) != $n then .iteration = $raw
        else . end)
       | (if $base != "" then .base = $base else . end)
+      | (if $kind == "completion" and $rides != "" and $p != ""
+            and ((.final_phase | type) == "string" or (.final_phase | type) == "number") then .final_phase = $p else . end)
       | (if $kind == "completion" and ((.final_phase // null) == null) and $p != "" then .final_phase = $p else . end)
       | (if $kind == "completion" and ((.recorded_by // null) == null) then
            .recorded_by = "the session; stamped at landing by phasekit run-until-done.sh (v0.18.0): iteration, base and final_phase from the loop, deferrals = the open set in artifacts/deferrals.json"
@@ -3780,7 +3963,7 @@ write_phase_evidence() {
     since="$(git rev-parse -q --verify "refs/heads/$SQUASH_TARGET" 2>/dev/null)" || since=""
   else
     since="$(git log -n 400 --format='%H%x09%(trailers:key=Phasekit-Kind,valueonly,separator=%x2C)%x09%(trailers:key=Phasekit-Iteration,valueonly,separator=%x2C)' HEAD 2>/dev/null \
-             | awk -F'\t' -v n="$n" '($2 == "phase" || $2 == "completion") && $3 == n { print $1; exit }')" || since=""
+             | awk -F'\t' -v n="$n" '!f && ($2 == "phase" || $2 == "completion") && $3 == n { print $1; f = 1 }')" || since=""
   fi
   [[ -n "$since" ]] || since="$base"
   [[ -n "$since" ]] || since="$(git rev-parse -q --verify HEAD 2>/dev/null)" || since=""
@@ -4229,7 +4412,7 @@ hermetic_tests_advisory() {
           | xargs -r -d '\n' grep -l -E "$re" -- 2>/dev/null)" || true
   [[ -n "$hits" ]] || return 0
   n="$(printf '%s\n' "$hits" | wc -l | tr -d ' ')"
-  first="$(printf '%s\n' "$hits" | head -n 5 | paste -sd, - | sed 's/,/, /g')"
+  first="$(printf '%s\n' "$hits" | sed -n '1,5p' | paste -sd, - | sed 's/,/, /g')"
   echo "ADVISORY: $n test files appear to read git history ($first$( [[ "$n" -gt 5 ]] && echo ", …")) — a test reads the tree and declared fixtures, never the project's history; a fact about the past is an evidence file (artifacts/iterations/<N>/<phase>.json). See docs/QUALITY_GATES.md \"Hermetic tests\" (a test over a scratch repository it builds itself is fine). Advisory only: the gate is unchanged."
   return 0
 }
@@ -4344,7 +4527,15 @@ _boundary_derive() {
       if artifact_never_landed "$ap" || approval_final_unrecorded; then final=true; fi
     fi
   fi
-  if completion_record_claims; then final=true; fi
+  if completion_record_claims; then
+    final=true
+    # v0.19.1: a completion boundary is the phase its RECORD closes — the
+    # one derivation the stamp and the commit subject use. The approval on
+    # disk may be an earlier phase's of the same iteration (round-clock
+    # iteration 21: the phase-35 boundary was recorded as phase-34). A
+    # never-landed approval still wins there (it rides this landing).
+    phase="$(completion_phase_as_written "$ARTIFACTS_DIR/project-complete.json" 2>/dev/null)" || phase=""
+  fi
   if [[ -z "$phase" ]]; then
     if [[ "$final" == true ]]; then phase=project; else phase=unknown; fi
   fi
@@ -4545,7 +4736,7 @@ land_completion_leftovers() {
   # Step 3's action when the completion record is already committed and the
   # tree is not clean (v0.18.2, row 1233 shape 1). Returns commit_from_artifact's rc.
   local paths rc=0 cc head0 t0
-  paths="$(_boundary_dirty_paths | sed -E 's/^.. //; s/^"//; s/"$//' | head -n 50 | paste -sd, - | sed 's/,/, /g')"
+  paths="$(_boundary_dirty_paths | sed -E 's/^.. //; s/^"//; s/"$//' | sed -n '1,50p' | paste -sd, - | sed 's/,/, /g')"
   head0="$(git rev-parse -q --verify HEAD 2>/dev/null)" || head0=""
   t0="$(date +%s)"
   cc="$(git log -1 --format=%h HEAD -- artifacts/project-complete.json 2>/dev/null)" || cc=""
@@ -4609,7 +4800,7 @@ plain_verify_head() {
   # IS HEAD's (the gate judges exactly what the target carries); otherwise
   # stop, named: the next verify-gated commit carries the difference.
   local dirty
-  dirty="$(_boundary_dirty_paths | sed -E 's/^.. //' | head -n 8 | paste -sd' ' -)"
+  dirty="$(_boundary_dirty_paths | sed -E 's/^.. //' | sed -n '1,8p' | paste -sd' ' -)"
   if [[ -n "$dirty" ]]; then
     if boundary_final; then
       write_landing_block "$dirty"
