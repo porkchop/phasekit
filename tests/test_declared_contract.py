@@ -248,14 +248,19 @@ class TheMigrationReads(_Scratch):
 
     def test_the_scaffold_reads_record_is_unchanged_and_the_hint_rides_beside_it(self):
         """A vendored project's contract read is still the declared surface for
-        `scaffold_reads` (no supervisor fix row); the migration hint names it."""
+        `scaffold_reads`, never a scaffold-owned read; the migration hint names
+        it. v0.19.3: these fixture files read the contract and touch NO project
+        code, so they have phasekit as their only subject and the widening
+        names them (docs/QUALITY_GATES.md "A project's tests test the project")."""
         root = self.make({**DASHBOARD, **XMEO})
         r = subprocess.run([sys.executable, str(TOOL), "scaffold-reads", "--json", str(root)],
                            capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         out = json.loads(r.stdout)
-        self.assertEqual(out["scaffold_reads"], [])
-        self.assertEqual(out["line"], "")
+        self.assertEqual({e["test"]: e["paths"] for e in out["scaffold_reads"]}, {
+            p: ["contracts/interface.json"] for p in (
+                "test/declared-surface.test.js", "test/learnings-harvest.test.js",
+                "test/spec-contract-criteria.test.js", "tests/tooling/phasekit-facts.test.ts")})
         self.assertEqual(sorted(e["file"] for e in out["migration_reads"]), sorted([
             "test/declared-surface.test.js", "test/learnings-harvest.test.js",
             "test/spec-contract-criteria.test.js", "tests/tooling/lib/phasekit-facts.ts",

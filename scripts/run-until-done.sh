@@ -2476,6 +2476,7 @@ boundary_begin() {
       sha_at_step: {}, deploy: null, killed_after: null, killed_mode: null, killed_at: null,
       verify_memo: (.verify_memo // null), verify_red: (.verify_red // null),
       work_base: (.work_base // null), scaffold_reads: (.scaffold_reads // null), scaffold_reads_at: (.scaffold_reads_at // null),
+      process_reads: (.process_reads // null), process_reads_at: (.process_reads_at // null),
       previous: (if (.step // 0) > 0 then (del(.verify_memo) | del(.previous)) else (.previous // null) end)
     } + (if (.unlanded // null) != null and $ucc != "" and ((.unlanded.completion_commit // "") == $ucc)
             and (if $iteration != null and (.iteration // null) != null then .iteration == $iteration
@@ -4441,11 +4442,18 @@ scaffold_reads_advisory() {
   # stale list mistaken for a current one)
   j="$(cd "$ROOT_DIR" && timeout 60 python3 "$tool" scaffold-reads --json . 2>/dev/null)" || j=""
   if ! jq -e '(.scaffold_reads | type) == "array"' <<<"$j" >/dev/null 2>&1; then
-    _boundary_write '.scaffold_reads = null | .scaffold_reads_at = $now'
+    _boundary_write '.scaffold_reads = null | .scaffold_reads_at = $now | .process_reads = null | .process_reads_at = $now'
     return 0
   fi
-  _boundary_write '.scaffold_reads = $r | .scaffold_reads_at = $now' --argjson r "$(jq -c '.scaffold_reads' <<<"$j")"
+  # v0.19.3: the process-reads advisory rides the same scan — test files that
+  # read process documents (docs/QUALITY_GATES.md:
+  # "A project's tests test the project"); null = that half of the scan failed
+  _boundary_write '.scaffold_reads = $r | .scaffold_reads_at = $now | .process_reads = $p | .process_reads_at = $now' \
+    --argjson r "$(jq -c '.scaffold_reads' <<<"$j")" \
+    --argjson p "$(jq -c 'if (.process_reads | type) == "array" then .process_reads else null end' <<<"$j")"
   line="$(jq -r '.line // ""' <<<"$j" 2>/dev/null)" || line=""
+  if [[ -n "$line" ]]; then echo "$line"; fi
+  line="$(jq -r '.process_line // ""' <<<"$j" 2>/dev/null)" || line=""
   if [[ -n "$line" ]]; then echo "$line"; fi
   # v0.19.2: the migration-readiness hint (printed, never recorded)
   line="$(jq -r '.migration_line // ""' <<<"$j" 2>/dev/null)" || line=""

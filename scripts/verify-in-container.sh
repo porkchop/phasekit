@@ -39,9 +39,12 @@ TARGETS=("$@")
 # v0.18.3: the guard's scope, the scaffold-reads advisory and the declared
 # facts' proofs (they run the loop's own functions on the image's jq/grep).
 # v0.19.1: multi-phase landings (the plan parser, the evidence base).
+# v0.19.3: the process-reads record, and the adopted gate checks on the image's
+# own node (20: its piped reporter is TAP).
 [[ ${#TARGETS[@]} -gt 0 ]] || TARGETS=("tests.test_boundary_state" "tests.test_loop_owns_commits"
   "tests.test_guard_scope" "tests.test_scaffold_reads" "tests.test_declared_surface"
-  "tests.test_engine_outside" "tests.test_multiphase_invariance")
+  "tests.test_engine_outside" "tests.test_multiphase_invariance" "tests.test_project_tests"
+  "tests.test_adopted_checks")
 
 command -v docker >/dev/null 2>&1 || { echo "verify-in-container: docker not found" >&2; exit 2; }
 docker image inspect "$IMAGE_NAME" >/dev/null 2>&1 || {
@@ -70,6 +73,17 @@ fi
 # The reserved-word regression (v0.14.11): a modern jq accepts `$label`.
 if ! jq -n --arg label x '{l: $label}' >/dev/null 2>&1; then
   echo "verify-in-container: FAIL — the image's jq rejects \$label as a variable (jq 1.6 behaviour)" >&2
+  exit 3
+fi
+# v0.19.3: the browser is pinned (.devcontainer/Dockerfile CHROMIUM_VERSION);
+# an image built before the pin, or from another Dockerfile, reports another
+# browser — stale, rebuild it.
+want="$(sed -n 's/^ARG CHROMIUM_VERSION=//p' /workspace/.devcontainer/Dockerfile | head -1)"
+chrome="$(ls -d /home/node/.cache/ms-playwright/chromium-*/chrome-linux*/chrome 2>/dev/null | head -1 || true)"
+got="$( [ -n "$chrome" ] && "$chrome" --version 2>/dev/null | tr -s ' ' | sed 's/ *$//' || true)"
+echo "verify-in-container: browser ${got:-none} (pinned: Google Chrome for Testing $want)"
+if [ -z "$want" ] || [ "$got" != "Google Chrome for Testing $want" ]; then
+  echo "verify-in-container: FAIL — the image's browser is not the pinned one (rebuild the image: .devcontainer/Dockerfile pins CHROMIUM_VERSION)" >&2
   exit 3
 fi
 cd /workspace

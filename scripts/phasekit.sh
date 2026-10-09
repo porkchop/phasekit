@@ -18,7 +18,8 @@
 #   phasekit facts [--json]       the facts phasekit DECLARES for downstream tests
 #                                 (contracts/interface.json `facts`; read-only)
 #   phasekit scaffold-reads [--json]  the `scaffold-reads` advisory: test files that
-#                                 read scaffold-owned files instead (warn-only)
+#                                 read scaffold-owned files instead, or test only
+#                                 phasekit; plus `process-reads` (warn-only)
 #
 # The engine outside the repository (v0.19.0). A PINNED project tracks
 # .phasekit-version and no engine files; the verbs below run the pinned engine

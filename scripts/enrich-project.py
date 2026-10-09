@@ -3557,16 +3557,18 @@ def cmd_check(target_dir, strict=False, include_templates=False):
 def _scaffold_reads_advisory(target):
     """v0.18.3 (queue row 1194): the `scaffold-reads` advisory — project test
     files that read scaffold-owned files instead of phasekit's declared surface
-    (docs/QUALITY_GATES.md "Tests read the declared surface"). Warn-only: it
-    prints and never changes check's exit code; any failure is silent."""
+    (docs/QUALITY_GATES.md "Tests read the declared surface"); v0.19.3: also
+    test files whose only subject is phasekit, the `process-reads` and
+    `criterion-suites` advisories ("A project's tests test the project").
+    Warn-only: it prints and never changes check's exit code; any failure is
+    silent."""
     try:
         import importlib.util
         src = Path(__file__).resolve().parent / "phasekit-surface.py"
         spec = importlib.util.spec_from_file_location("phasekit_surface", src)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        reads = mod.scaffold_reads(target)
-        line = mod.advisory_line(reads)
+        lines = mod.check_lines(target)
     except Exception:  # noqa: BLE001 — an advisory never fails the check
         return
     try:
@@ -3576,10 +3578,8 @@ def _scaffold_reads_advisory(target):
         mline = mod.migration_line(mreads)
     except Exception:  # noqa: BLE001 — an advisory never fails the check
         mreads, mline = [], ""
-    if line:
+    for line in lines:
         print(f"  {line}")
-        for entry in reads:
-            print(f"    {entry['test']}: {', '.join(entry['paths'])}")
     if mline:
         print(f"  {mline}")
         for entry in mod.migration_lines(mreads):

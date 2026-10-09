@@ -140,10 +140,27 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 # Chromium's OS dependencies, then back to node for the browser binary.
 ARG PLAYWRIGHT_MCP_VERSION=0.0.70
 RUN npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION}
+# SCAFFOLD: the browser is PINNED (v0.19.3). A bare `npx playwright-core`
+# fetched whatever playwright-core was newest at build time, and each release
+# carries its own browser build: on 2026-10-08 a rebuild with no Dockerfile
+# change moved Chrome for Testing 153.0.8010.12 -> 156.0.8078.4 and turned a
+# project's browser-evidence test red. playwright-core 1.64.0 installs
+# chromium-1248 = Chrome for Testing 156.0.8078.4 (the image the fleet ran on
+# 2026-10-09), so the same Dockerfile always builds the same browser; the
+# build fails unless the installed binary reports CHROMIUM_VERSION, and
+# scripts/verify-in-container.sh asserts it again on a built image. To move
+# the browser, change both ARGs together.
+ARG PLAYWRIGHT_CORE_VERSION=1.64.0
+ARG CHROMIUM_VERSION=156.0.8078.4
 USER root
-RUN npx playwright-core install-deps chromium
+RUN npx -y "playwright-core@${PLAYWRIGHT_CORE_VERSION}" install-deps chromium
 USER node
-RUN npx playwright-core install chromium
+RUN npx -y "playwright-core@${PLAYWRIGHT_CORE_VERSION}" install chromium && \
+  set -- /home/node/.cache/ms-playwright/chromium-*/chrome-linux*/chrome && \
+  test "$#" -eq 1 && test -x "$1" && \
+  reported="$("$1" --version | tr -s ' ' | sed 's/ *$//')" && \
+  echo "browser: $reported" && \
+  test "$reported" = "Google Chrome for Testing ${CHROMIUM_VERSION}"
 
 # Copy and set up firewall script
 COPY init-firewall.sh /usr/local/bin/

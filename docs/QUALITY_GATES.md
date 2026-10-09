@@ -68,7 +68,7 @@ A phase is only complete when all of the following are true:
 
 ## Testing gate
 A phase is not complete unless:
-- every new module, endpoint, or public behavior has at least one test exercising its primary path
+- every new module, endpoint, or public behavior has at least one test that exercises the project's code on its primary path
 - every bug fix includes a regression test that would fail without the fix
 - tests are written before or alongside implementation code, not retrofitted after
 - test names describe the behavior under test, not implementation details
@@ -77,6 +77,21 @@ A phase is not complete unless:
 When coverage tooling is available in the target project, aim for meaningful branch coverage of new code. Do not pursue a numeric target at the expense of test quality — a focused test that catches real regressions is worth more than broad shallow coverage.
 
 "Relevant tests pass" (from the universal gate) means: tests exist that would fail if the feature were removed or the bug fix reverted.
+
+### A project's tests test the project (v0.19.3)
+
+A test exercises this project's code, scripts or deliverables. It never asserts the content of a process document, and it never asserts phasekit's behaviour.
+
+- **Process documents are not test subjects.** `docs/SPEC.md` acceptance criteria and their annotations, `docs/PHASES.md` records, `docs/LEARNINGS*.md` and their ledgers, the deferral ledger, decision memos, iteration and evidence records under `artifacts/`, and the status lines of plan and backlog docs are governed by phasekit's gates (spec integrity, progress-record discipline, deferred-scope, evidence integrity). A test that a document *says* something, that a criterion *exists*, that a record *passed*, or that a ledger *balances* tests the paperwork, not the product. Delete it; do not write it.
+- **phasekit is not a test subject.** Do not test the loop, the hooks, the firewall, the verify wrapper's plumbing, the contract or its facts. phasekit's suite proves its own behaviour; a guarantee you rely on that it does not prove is a request to phasekit. A project test reads phasekit's declared surface only where the project's *own code* consumes it, to check that a name the code reads is declared ("Tests read the declared surface" below).
+- **Tests about tests are not tests.** No census of how other tests are written, no tier or headroom pins, no guard tests for these rules. The advisories below are phasekit's job.
+- **"Asserted, not claimed" means: assert it in the product.** When a criterion says a property holds, the test exercises the code that makes it hold. A *source* invariant ("no private key header in the shipped bundle", "the engine never imports the network layer") is a product test; "the SPEC says the bundle has no key" is not.
+- **Deliverable docs are the exception.** A doc the project ships as a normative contract to its users (a protocol spec, a public API doc) is product, and testing it against the code is welcome. Name it as a deliverable in `docs/ARCHITECTURE.md` so the line is visible.
+- **A criterion yields product tests, not one test per criterion.** "Every new public behavior has a test" never means "every SPEC line has a test".
+
+Why: in October 2026 about 84k lines and 1,860 tests across three projects tested SPEC wording, ledgers, records and phasekit's own loop. One file pinning SPEC wording reached 32k lines. These tests grew with every append-only criterion, broke on every phasekit reshape and cost about a fifth of one project's gate time, while testing nothing a user could observe.
+
+The rule is adopted, not enforced (a refusal is a stall). After the gate the loop prints, once per session, `ADVISORY process-reads: N test file(s) read process documents (…first 5…)` and records each in `artifacts/boundary-state.json` `process_reads` (`[{"test": <file>, "paths": [<the documents it reads>]}]`), decided by the scaffold-reads lexer (a path in a string sample, a comment or a list of names is data) and counting only reads rooted in this project (a supervisor's fixture trees are not). `phasekit check` prints the same advisory, the widened `scaffold-reads` (a test whose only subject is phasekit, below), and `criterion-suites`: test files over 3,000 lines whose tests are mostly named for criteria or iterations (`ac[0-9]+`, `iteration-NN`, `spec_declares`), and families of test files named per iteration or phase. Never a red gate; `phasekit migrate` reports the process-reads count as information and never refuses on it.
 
 ## DRY and reuse gate
 - business rules and validation logic must exist in exactly one place
@@ -456,6 +471,7 @@ Adopted at the iteration-10 close, after it decided three consecutive signoffs. 
 - **Before citing a gate result, compare — do not infer.** Recompute the md5s and diff them against the record. "Is this evidence still valid?" then has a yes/no answer instead of an argument.
 - **A fix round that touches a file the gate judged INVALIDATES that gate.** Either keep fix rounds to tests, docs and artifacts — which is what makes the original evidence still citable — or re-run the gate. Do not reason that a change "cannot have affected" what was measured.
 - **Never stitch a partial run into a signoff.** An interrupted gate with no verdict is VOID; re-run it. Overlapping numbers from the dead run are not a verdict, and salvaging them is how a phase gets signed off on evidence nobody ever finished producing.
+- **Records are not test fixtures (v0.19.3).** Evidence records are compared by the session when it cites them. A test that a record exists or passed is paperwork ("A project's tests test the project").
 
 Why this is a gate and not a nicety: at Phase 29 a memo cited a browser round that predated its own final source edits, *in the same paragraph* that explained why superseded evidence must not be cited. At Phase 30 the identical defect recurred one phase later — a session updated the memo to say "all 23 md5s matched", then changed three of the 23 files before it was interrupted. Both were caught by comparison, and neither would have been caught by reading.
 
@@ -589,8 +605,8 @@ The variable is the primitive (a file path: any language, no subprocess, set whe
 
 Why (queue row 1194): downstream tests that parsed the vendored loop's bash bodies, its rm lists and its quoted grep literals broke on every loop reshape that kept the behaviour — four fix rows in two weeks, each blocking a phasekit upgrade at its gate. phasekit's own suite proves every declared fact against the loop's BEHAVIOUR (`tests/test_declared_surface.py`), so a reshape that keeps the facts true cannot break a consumer that reads them, and a change to a fact is a visible, versioned contract change.
 
-- "The commit gate refuses a credential in LEARNINGS": read `facts.learnings_credential_scan` (the patterns, as one ERE, and the files it covers), never the grep line.
-- "Every commit path reaches the post-verify gates": read `facts.commit_surfaces`, never a function body.
+**The declared surface is for the project's own CODE that consumes it** — a supervisor such as foundry-orchestrator, whose code reads phasekit's artifacts. The one legitimate test shape: the code reads `boundary-state.json`'s `pass`; a test that `pass` is declared in the contract's artifact entries. **A test whose only subject is a phasekit fact is a phasekit test: it belongs upstream** ("A project's tests test the project" above). The `scaffold-reads` advisory names such a file too (v0.19.3): one that reads the contract or `phasekit facts` and imports no project module.
+
 - A test that RUNS a scaffold script (the project's gate, `phasekit verify`) is not reading it; this rule is about parsing its text.
 
 The rule is adopted, not enforced (enforcement would refuse, and a refusal is a stall). The `scaffold-reads` advisory names offenders: after the gate the loop prints, once per session, `ADVISORY scaffold-reads: N test file(s) read scaffold-owned files (…first 5…)` and records every offender in `artifacts/boundary-state.json` `scaffold_reads` (`[{"test": <file>, "paths": [<scaffold-owned paths it reads>]}]`); `phasekit check` prints the same advisory (its exit code is unchanged) and `phasekit scaffold-reads --json` prints the record. Never a red gate. A read is decided on the test's code (v0.18.5): a scaffold path inside a string (a planted code sample), a comment, a list of forbidden paths or an expected value is data, so a guard test that refuses scaffold reads is not itself named.

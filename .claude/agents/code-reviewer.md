@@ -16,6 +16,7 @@ Reject the change (blocking issue) if any of the following are true:
 
 ## Review focus
 - test quality: tests verify behavior, not implementation; would fail if the feature were removed
+- a test that only checks process documents (SPEC, PHASES, LEARNINGS, ledgers, `artifacts/` records) or phasekit's behaviour is a finding (remove it), not coverage — QUALITY_GATES.md "A project's tests test the project"
 - DRY compliance: shared utilities used where they exist; no silent duplication across modules
 - architecture compliance: change fits the documented layer boundaries and conventions
 - typing and interfaces: no stringly-typed or fragile contracts

@@ -74,12 +74,17 @@ OFFENDERS = {
 }
 
 CLEAN = {
-    # the declared surface itself
+    # the declared surface itself, consumed by the project's own code (v0.19.3:
+    # a test that reads it and touches NO project code has phasekit as its only
+    # subject, and the advisory names it — tests/test_project_tests.py)
+    "app.py": "KEYS = ('pass',)\n",
+    "src/keys.js": "export const KEYS = ['pass'];\n",
     "tests/test_contract.py":
-        'import json\nfacts = json.load(open("contracts/interface.json"))["facts"]\n',
+        'import json\nfrom app import KEYS\nfacts = json.load(open("contracts/interface.json"))["facts"]\n',
     "tests/test_vendored_contract.py":
         'from pathlib import Path\nC = Path("vendor/contracts/phasekit/interface.json").read_text()\n',
     "tests/tooling/facts.test.ts":
+        "import { KEYS } from '../../src/keys.js';\n"
         "const facts = JSON.parse(execFileSync('bash', ['scripts/phasekit.sh', 'facts', '--json']));\n",
     # RUNNING a scaffold script is not reading it
     "tests/test_run_gate.py":
@@ -220,7 +225,9 @@ DATA_ONLY = {
         "const LOOP = 'scripts/run-until-done.sh';\n"
         "const planted = `${libText}\\nconst x = readFileSync(resolve(repoRoot, '${LOOP}'), 'utf8');`;\n"
         "expect(forbiddenReads(planted, owned, pathConstants(planted))).toEqual([LOOP]);\n",
+    "src/keys.js": "export const KEYS = ['pass'];\n",
     "tests/tooling/comment.test.ts":
+        "import { KEYS } from '../../src/keys.js';\n"
         "// reads .devcontainer/init-firewall.sh no more\n/* read('docs/QUALITY_GATES.md') */\n"
         "const c = read('contracts/interface.json');\n",
     # a regex literal with quotes in it opens no string
@@ -363,6 +370,7 @@ class TheLoopRecordsItAndStaysGreen(unittest.TestCase):
         repo.write(".scaffold/manifest.json", manifest(["scripts/run-until-done.sh", "scripts/phasekit-surface.py"]))
         repo.write("tests/test_loop_parse.py", OFFENDERS["tests/test_loop_parse.py"])
         repo.write("tests/test_contract.py", CLEAN["tests/test_contract.py"])
+        repo.write("app.py", CLEAN["app.py"])
         repo.git("add", "-A")
         repo.git("commit", "-qm", "tests")
         repo.scenario(H.APPROVE_SCENARIO)

@@ -25,7 +25,14 @@ Two verbs, stdlib only, read-only:
       files (tests, scripts, source) that read an engine file by its in-tree
       path, the declared contract included, with file:line — which is what
       `phasekit migrate` refuses before its gate (JSON: `migration_reads`,
-      `migration_line`; never recorded in boundary-state.json).
+      `migration_line`; never recorded in boundary-state.json). v0.19.3 (docs/
+      QUALITY_GATES.md "A project's tests test the project"): `scaffold_reads`
+      also names test files whose only subject is phasekit (they read the
+      contract or `phasekit facts` and no project code), and the JSON carries
+      the `process-reads` advisory (`process_reads`, `process_line`: test files
+      that read a process document — SPEC, PHASES, LEARNINGS, the deferral
+      ledger, records under artifacts/), which the loop records in
+      boundary-state.json. `phasekit check` adds `criterion-suites`.
 
 The rule it advises on (docs/QUALITY_GATES.md "Tests read the declared
 surface"): a test reads the project's own tree and phasekit's declared surface
@@ -40,6 +47,7 @@ import posixpath
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ADVISORY_ID = "scaffold-reads"
@@ -471,9 +479,26 @@ def _q(s):
     return r"""["'`]""" + re.escape(s) + r"""["'`]"""
 
 
+class Family(str):
+    """A family of paths, matched by a regex (v0.19.3): `docs/PHASES*.md`,
+    everything under `artifacts/iterations/`. Its value is the label the
+    advisory names; `rx` is the path family (no anchors), `hint` a word its
+    spelling must contain (the cheap prefilter). Wherever the lexer compares
+    a spelling with an exact path, a Family compares it with its regex, under
+    a directory prefix at most — the same rule (`_names_path`)."""
+
+    def __new__(cls, label, rx, hint):
+        self = super().__new__(cls, label)
+        self.rx, self.hint = rx, hint
+        self.whole = re.compile(r"(?:.*/)?(?:" + rx + r")")
+        return self
+
+
 def _refs(path):
     """A shell test's spelling of `path`: the literal under any prefix (`$ROOT/`,
     `../`), or its pieces quoted and joined."""
+    if isinstance(path, Family):
+        return r"(?<![A-Za-z0-9_.-])(?:" + path.rx + r")(?![A-Za-z0-9_.-])"
     parts = path.split("/")
     alts = [r"(?<![A-Za-z0-9_.-])" + re.escape(path) + r"(?![A-Za-z0-9_.-])"]
     if len(parts) > 1:
@@ -485,6 +510,8 @@ def _refs(path):
 def _names_path(s, path):
     """Whether a spelling IS `path`: the whole value, under a directory
     prefix at most — never a fragment of longer text."""
+    if isinstance(path, Family):
+        return path.whole.fullmatch(s) is not None
     return s == path or s.endswith("/" + path)
 
 
@@ -494,8 +521,8 @@ MAX_PIECES = 8  # a path joined from more literal pieces than this is not looked
 def _spellings(lx, toks, last=None):
     """Every path `toks` spell: one literal, or adjacent literals with only a
     joiner between them (when `last` is given, only spellings ending there).
-    Text with whitespace in it is never a path."""
-    out, run = set(), []
+    Text with whitespace in it is never a path. {spelling: its first piece}."""
+    out, run = {}, []
     for tk in toks:
         if run and not JOIN_SEP.fullmatch(lx.text, run[-1][1], tk[0]):
             run = []
@@ -507,7 +534,7 @@ def _spellings(lx, toks, last=None):
             joined = piece[2] + ("/" + joined if joined else "")
             s = re.sub(r"/+", "/", joined)
             if not re.search(r"\s", s):
-                out.add(s)
+                out.setdefault(s, piece)
     return out
 
 
@@ -545,7 +572,7 @@ def _sites(lx):
             j = k
             while j >= 0 and re.match(IDENT, t[j]):
                 j -= 1
-            sites.append(("member", set(), t[j + 1:k + 1], m.start()))
+            sites.append(("member", {}, t[j + 1:k + 1], m.start()))
     if lx.lang == "sh":
         for m in SHELL_CMD.finditer(t):
             if not lx.code_at(m.end() - 1):
@@ -553,7 +580,7 @@ def _sites(lx):
             b = m.end()
             while b < len(t) and not (t[b] in "|;&\n" and lx.code_at(b)):
                 b += 1
-            sites.append(("shell", set(), (m.end(), b), m.start()))
+            sites.append(("shell", {}, (m.end(), b), m.start()))
         return sites
     for tk in lx.strings:
         if not QUOTED_CMD.match(tk[2]):
@@ -564,7 +591,7 @@ def _sites(lx):
         if e == -1 or not RUNNER_RE.search(lx.callee(e)):
             continue
         if not re.fullmatch(r"\s*" + SHELL_WORDS + r"\s*", tk[2]):
-            sites.append(("command-line", set(), tk[2], tk[0]))
+            sites.append(("command-line", {}, tk[2], tk[0]))
         else:
             # argv: the rest of the bracket the command word sits in
             end = lx.close.get(lx.inner[tk], len(t))
@@ -572,31 +599,48 @@ def _sites(lx):
     return sites
 
 
-def _site_reads(lx, site, path=None, name=None):
-    """Whether one read site reads `path` (a literal spelling) or `name` (a bound name)."""
+def _site_reads(lx, site, path=None, name=None, own=None):
+    """Whether one read site reads `path` (a literal spelling) or `name` (a bound name).
+    `own`, when given (v0.19.3), must also accept where the path is rooted:
+    `own(lx, piece, spelling, path)` for a literal spelling, `own(lx, None, None,
+    None, at=offset)` for a bound name used at `at` (THIS project, not a
+    fixture tree), and `own(lx, None, text_before, path, shell=True, at=offset)`
+    for a shell spelling."""
     kind, spelled, where = site[:3]
-    if path is not None and any(_names_path(s, path) for s in spelled):
+    if path is not None and any(_names_path(s, path) and (own is None or own(lx, piece, s, path))
+                                for s, piece in spelled.items()):
         return True
     t = lx.text
     if kind == "call" and name is not None:
         o, c = where
-        return any(lx.args_only(o, lx.innermost(p)) for p in lx.idents(name, o + 1, c))
+        return any(lx.args_only(o, lx.innermost(p))
+                   and (own is None or own(lx, None, None, None, at=p))
+                   for p in lx.idents(name, o + 1, c))
     if kind == "member":
-        return name is not None and where == name
+        if name is None or where != name:
+            return False
+        return own is None or own(lx, None, None, None, at=t.rfind(name, 0, site[3]))
     if kind == "shell":
         a, b = where
         if path is not None:
             return any(lx.kind[m.start()] in (CODE, STRING)
+                       and (own is None or own(lx, None, t[max(0, m.start() - 200):m.start()], path,
+                                               shell=True, at=m.start()))
                        for m in re.compile(_refs(path)).finditer(t, a, b))
-        return re.search(r"\$\{?" + re.escape(name) + r"(?!" + IDENT + r")", t[a:b]) is not None
+        var = re.compile(r"\$\{?" + re.escape(name) + r"(?!" + IDENT + r")")
+        return any(own is None or own(lx, None, t[max(0, m.start() - 200):m.start()], None,
+                                      shell=True, at=m.start())
+                   for m in var.finditer(t, a, b))
     if kind == "command-line":
-        return path is not None and re.search(_refs(path), where) is not None
+        return path is not None and any(
+            own is None or own(lx, None, where[:m.start()], path, shell=True, at=site[3])
+            for m in re.compile(_refs(path)).finditer(where))
     if kind == "argv" and name is not None:
         return bool(lx.idents(name, *where))
     return False
 
 
-def _bindings(lx, paths):
+def _bindings(lx, paths, own=None):
     """{name: path} for each name bound, in code, to a path (never to a list or map)."""
     names, off = {}, 0
     for line in lx.text.split("\n"):
@@ -610,8 +654,11 @@ def _bindings(lx, paths):
             rhs_text = line[m.end():]
             for p in paths:
                 # a shell binding may be an unquoted word: LOOP=$ROOT/scripts/x.sh
-                if any(_names_path(s, p) for s in spelled) or (
-                        lx.lang == "sh" and re.search(_refs(p), rhs_text)):
+                if any(_names_path(s, p) and (own is None or own(lx, piece, s, p))
+                       for s, piece in spelled.items()) or (
+                        lx.lang == "sh" and any(
+                            own is None or own(lx, None, rhs_text[:r.start()], p, shell=True, at=a)
+                            for r in re.finditer(_refs(p), rhs_text))):
                     names[m.group(1)] = p
                     break
         off += len(line) + 1
@@ -633,7 +680,7 @@ def _lang(rel):
     return "py" if rel.endswith(".py") else "js"
 
 
-def _reads_at(text, paths, lang="js", names=None):
+def _reads_at(text, paths, lang="js", names=None, own=None):
     """{path: [line, …]} for each of `paths` this code reads — directly, or
     through a name bound to the path (`LOOP = ROOT / "scripts" / "x.sh"` …
     `LOOP.read_text()`); `names` adds bindings made elsewhere ({name: path},
@@ -648,43 +695,601 @@ def _reads_at(text, paths, lang="js", names=None):
 
     for p in paths:
         for site in sites:
-            if _site_reads(lx, site, path=p):
+            if _site_reads(lx, site, path=p, own=own):
                 hit(p, site)
-    bound = _bindings(lx, list(paths))
+    bound = _bindings(lx, list(paths), own)
     for name, p in {**(names or {}), **bound}.items():
         for site in sites:
-            if _site_reads(lx, site, name=name):
+            if _site_reads(lx, site, name=name, own=own):
                 hit(p, site)
     return {p: sorted(lines) for p, lines in found.items()}
 
 
-def _reads_in(text, paths, lang="js"):
+def _reads_in(text, paths, lang="js", own=None):
     """Which of `paths` this test text reads (see _reads_at)."""
-    return sorted(_reads_at(text, paths, lang))
+    return sorted(_reads_at(text, paths, lang, own=own))
 
 
-def scaffold_reads(root):
-    """[{"test": <test file>, "paths": [<scaffold-owned paths it reads>]}], sorted."""
-    root = Path(root)
-    paths = scaffold_owned(root)
-    if not paths:
-        return []
-    out = []
-    for rel in _tracked(root):
-        if rel in paths or SKIP_RE.search(rel):
+# v0.19.3: the process-reads and phasekit-only advisories name test files by
+# their NAME (a helper module under tests/ is support code; "belongs upstream"
+# is the wrong advice for it); scaffold-reads keeps the path selection.
+TEST_NAME_RE = re.compile(r"\.(?:test|spec)\.[A-Za-z]+$|_test\.[A-Za-z]+$|(?:^|/)test_[^/]*\.py$"
+                          r"|\.(?:sh|bash|bats)$")  # a shell file under a test path is a test
+
+
+def _test_files(root, tracked, skip=(), named=False):
+    """(rel, text) for each tracked test CODE file (fixtures and node_modules
+    excluded), in tracked order; `named`: only files whose name says test."""
+    for rel in tracked:
+        if rel in skip or SKIP_RE.search(rel):
             continue
         if not (TEST_FILE_RE.search(rel) and CODE_RE.search(rel)):
             continue
+        if named and not TEST_NAME_RE.search(rel):
+            continue
         try:
-            text = (root / rel).read_text(encoding="utf-8", errors="replace")
+            yield rel, (Path(root) / rel).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+
+
+def scaffold_reads(root):
+    """[{"test": <test file>, "paths": [<what it reads>]}], sorted: test files
+    that read a scaffold-owned file, and (v0.19.3) test files whose only
+    subject is phasekit — they read its contract or its facts and touch none
+    of the project's own code (`phasekit_only_reads`)."""
+    root = Path(root)
+    paths = scaffold_owned(root)
+    tracked = _tracked(root)
+    found = {}
+    for rel, text in (_test_files(root, tracked, set(paths)) if paths else ()):
         # cheap prefilter: only the paths whose file name the text mentions
         cand = [p for p in paths if p.rsplit("/", 1)[-1] in text]
         hit = _reads_in(text, cand, _lang(rel)) if cand else []
         if hit:
-            out.append({"test": rel, "paths": hit})
+            found[rel] = set(hit)
+    try:
+        for e in phasekit_only_reads(root, tracked, time.monotonic() + SCAN_BUDGET_S):
+            found.setdefault(e["test"], set()).update(e["paths"])
+    except Exception:  # noqa: BLE001 - the widening never costs the scaffold-owned reads
+        pass
+    return [{"test": rel, "paths": sorted(found[rel])} for rel in sorted(found)]
+
+
+# --- phasekit as a test's only subject (v0.19.3) ---------------------------------
+# docs/QUALITY_GATES.md "A project's tests test the project": phasekit's suite
+# proves phasekit; a project test reads phasekit's declared surface only where
+# the project's OWN code consumes it (a supervisor checking that a name its
+# code reads is declared). A test file that reads the contract or the facts and
+# touches none of the project's own code — it imports no project module and
+# names no project file — has phasekit as its only subject: it belongs
+# upstream. Named in `scaffold_reads` with what it reads:
+ONLY_ENV_SPELLING = "$PHASEKIT_CONTRACT"    # the exported path (env, any spelling)
+ONLY_CLI_SPELLING = "phasekit facts"        # the CLI, as argv or a command line
+CONTRACT_PATH = "contracts/interface.json"  # the in-tree copy (a vendored project's)
+# A supervisor's vendored provider copy (vendor/contracts/<provider>/) is the
+# project's own file and is never one of these.
+_ENV_NAME = "PHASEKIT_CONTRACT"
+_FACTS_CMD = re.compile(r"(?:^|[\s/])phasekit(?:\.sh)?\s+facts(?![A-Za-z0-9_-])")
+_FACTS_TOOL_WORD = re.compile(r"(?:^|/)phasekit(?:\.sh)?$")
+_ENV_CALLEES = re.compile(r"^(?:get|getenv|environ|env|fetch)$")
+JS_IMPORT = re.compile(
+    r"""(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|^\s*import\s+)['"]([^'"]+)['"]""", re.M)
+PY_IMPORT = re.compile(
+    r"^[ \t]*(?:from\s+([.\w]+)\s+import|import\s+([\w.]+(?:\s*,\s*[\w.]+)*))", re.M)
+JS_EXTS = ("", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".jsx")
+
+
+def _executables(root):
+    """Tracked files with the executable bit (a `bin/tool` with no extension)."""
+    try:
+        out = subprocess.run(["git", "ls-files", "-s", "-z"], cwd=root, capture_output=True,
+                             timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {e.split("\t", 1)[1] for e in out.stdout.decode("utf-8", "replace").split("\0")
+            if e.startswith("100755 ") and "\t" in e}
+
+
+def _source_index(root, tracked, owned):
+    """What counts as the project's own code: its tracked code files that are
+    not tests, not fixtures and not engine files; the Python names they
+    provide; and the package names of its tracked package.json files."""
+    exe = _executables(root)
+    src = {rel for rel in tracked
+           if (CODE_RE.search(rel) or rel in exe) and not TEST_FILE_RE.search(rel)
+           and not SKIP_RE.search(rel) and rel not in owned and not rel.startswith(".scaffold/")}
+    py = set()
+    for rel in src:
+        if rel.endswith(".py"):
+            parts = rel[:-3].split("/")
+            py.add(parts[-1] if parts[-1] != "__init__" else (parts[-2] if len(parts) > 1 else ""))
+            py.update(parts[:-1])
+    py.discard("")
+    packages = set()
+    for rel in tracked:
+        if rel.endswith("package.json") and not SKIP_RE.search(rel):
+            try:
+                name = json.loads((Path(root) / rel).read_text(encoding="utf-8")).get("name")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if isinstance(name, str) and name:
+                packages.add(name)
+    return src, py, packages
+
+
+def _touches_project(lx, rel, src, py, packages):
+    """Whether this test file reaches the project's own code: it imports a
+    project module (a relative import that resolves to a project file, a
+    workspace package, a Python name a project file provides), or a literal
+    in it names a project file (a script it runs, a module it loads)."""
+    t, here = lx.text, posixpath.dirname(rel)
+    if lx.lang == "py":
+        for m in PY_IMPORT.finditer(t):
+            if not lx.code_at(m.end(0) - 1):
+                continue
+            specs = [m.group(1)] if m.group(1) else [s.strip() for s in m.group(2).split(",")]
+            for spec in specs:
+                if spec.startswith("."):
+                    return True  # a relative import is this tree's code (a package's test)
+                if spec.split(".")[0] in py:
+                    return True
+    elif lx.lang == "js":
+        for m in JS_IMPORT.finditer(t):
+            spec = m.group(1)
+            if spec.startswith("."):
+                base = posixpath.normpath(posixpath.join(here, spec))
+                stem = JS_EXT.sub("", base)
+                for cand in [base + x for x in JS_EXTS] + [stem + x for x in JS_EXTS[1:]] + [
+                        base + "/index" + x for x in JS_EXTS[1:]]:
+                    if cand in src:
+                        return True
+            elif spec in packages or any(spec.startswith(p + "/") for p in packages):
+                return True
+    # a literal naming a project file — a script the test runs, a module it
+    # loads — whole or joined from pieces (`ROOT / "scripts" / "check.py"`)
+    for s in _spellings(lx, lx.strings):
+        parts = s.strip().lstrip("./").split("/")
+        if any("/".join(parts[i:]) in src for i in range(len(parts))):
+            return True
+    if lx.lang == "sh":
+        for p in src:
+            if re.search(r"(?<![A-Za-z0-9_.-])" + re.escape(p) + r"(?![A-Za-z0-9_.-])", t):
+                return True
+    return False
+
+
+def _phasekit_surface_reads(lx, contract_is_phasekit, names=None):
+    """What of phasekit's declared surface this test file reads: the exported
+    path, the facts CLI, the in-tree contract (decided by the same lexer: a
+    spelling in prose, a comment or a list of names is data)."""
+    t, found = lx.text, set()
+    if lx.lang == "sh":
+        for m in re.finditer(r"\$\{?" + _ENV_NAME + r"(?![A-Za-z0-9_])", t):
+            if lx.kind[m.start()] in (CODE, STRING):
+                found.add(ONLY_ENV_SPELLING)
+        for m in re.finditer(r"phasekit(?:\.sh)?[ \t]+facts(?![A-Za-z0-9_-])", t):
+            if lx.kind[m.start()] in (CODE, STRING):
+                found.add(ONLY_CLI_SPELLING)
+    else:
+        for m in re.finditer(r"(?<![A-Za-z0-9_$])" + _ENV_NAME + r"(?![A-Za-z0-9_$])", t):
+            if lx.code_at(m.start()):
+                found.add(ONLY_ENV_SPELLING)  # process.env.PHASEKIT_CONTRACT
+        for tk in lx.strings:
+            e = lx.inner[tk]
+            if tk[2] == _ENV_NAME and e != -1:
+                # os.environ.get("…"), os.getenv("…"), environ["…"], process.env['…']
+                if ((lx.text[e] == "(" and _ENV_CALLEES.match(lx.callee(e)))
+                        or (lx.text[e] == "[" and re.search(r"(?:environ|env)\s*$",
+                                                            lx.text[max(0, e - 40):e]))):
+                    found.add(ONLY_ENV_SPELLING)
+            elif _FACTS_CMD.search(tk[2]):
+                o = e
+                while o != -1 and lx.text[o] != "(":
+                    o = lx.parent.get(o, -1)
+                if o != -1 and RUNNER_RE.search(lx.callee(o)):
+                    found.add(ONLY_CLI_SPELLING)
+            elif tk[2] == "facts":
+                o = e
+                while o != -1 and lx.text[o] != "(":
+                    o = lx.parent.get(o, -1)
+                if o != -1 and any(_FACTS_TOOL_WORD.search(x[2])
+                                   for x in lx.literals(o + 1, lx.close.get(o, len(t)))):
+                    found.add(ONLY_CLI_SPELLING)
+    if (contract_is_phasekit and (names or CONTRACT_PATH.rsplit("/", 1)[-1] in t)
+            and _reads_at(t, [CONTRACT_PATH], lx.lang, names)):
+        found.add(CONTRACT_PATH)
+    return found
+
+
+def phasekit_only_reads(root, tracked=None, deadline=None):
+    """[{"test": <test file>, "paths": [<what of phasekit's surface it reads>]}]:
+    the test files whose only subject is phasekit (see above), sorted."""
+    root = Path(root)
+    tracked = _tracked(root) if tracked is None else tracked
+    try:
+        own = json.loads((root / CONTRACT_PATH).read_text(encoding="utf-8"))
+        contract_is_phasekit = isinstance(own, dict) and own.get("interface") == "phasekit"
+    except (OSError, ValueError):
+        contract_is_phasekit = True  # none here: a read of it can only mean phasekit's
+    index = None
+    files = [(rel, text, _lang(rel)) for rel, text in _test_files(root, tracked)]
+    named = {rel for rel, _ in _test_files(root, tracked, named=True)} if files else set()
+    # a test helper's exported binding of the contract path, followed into the
+    # tests that import it (xmeo-v3's lib/phasekit-facts.ts and its test)
+    exported = {}
+    for rel, text, lang in files:
+        if contract_is_phasekit and "interface.json" in text:
+            for name, p in _exported(text, lang, [CONTRACT_PATH]).items():
+                exported[(rel, name)] = p
+    out = []
+    for rel, text, lang in files:
+        _budget(deadline)
+        if rel not in named:
+            continue  # a helper: its exported binding is followed into the tests above
+        names = _imported(text, lang, rel, exported) if exported else {}
+        if (not names and _ENV_NAME not in text and "facts" not in text
+                and "interface.json" not in text):
+            continue
+        lx = _Lexed(text, lang)
+        reads = _phasekit_surface_reads(lx, contract_is_phasekit, names)
+        if not reads:
+            continue
+        if index is None:
+            index = _source_index(root, tracked, set(engine_owned(root)))
+        if not _touches_project(lx, rel, *index):
+            out.append({"test": rel, "paths": sorted(reads)})
     return sorted(out, key=lambda e: e["test"])
+
+
+# --- process documents as test subjects (v0.19.3) ---------------------------------
+# docs/QUALITY_GATES.md "A project's tests test the project": process documents
+# are governed by phasekit's gates, never re-tested by the project. The
+# `process-reads` advisory names the test files that READ one by path, decided
+# by the same lexer as scaffold-reads (a path in a string sample, a comment, a
+# list of names, an expected value, argv of a script the test runs is data;
+# `open(…, "w")` writes). Recorded in boundary-state.json `process_reads`.
+# Advisory only: never a red gate, never a refusal.
+PROCESS_ID = "process-reads"
+PROCESS_FIELD = "process_reads"
+_A = "artifacts" + "/"  # (joined: these are the PROJECT's records, not phasekit artifacts)
+PROCESS_DOCS = (
+    Family("docs/SPEC.md", r"docs/SPEC\.md", "SPEC"),
+    Family("docs/PHASES*.md", r"docs/PHASES[^/]*\.md", "PHASES"),
+    Family("docs/LEARNINGS*.md", r"docs/LEARNINGS[^/]*\.md", "LEARNINGS"),
+    Family("docs/ROADMAP.md", r"docs/ROADMAP\.md", "ROADMAP"),
+    Family("docs/BACKLOG.md", r"docs/BACKLOG\.md", "BACKLOG"),
+    Family(_A + "deferrals.json", _A + r"deferrals\.json", "deferrals"),
+    Family(_A + "decision-memo*", _A + r"decision-memo[^/]*", "decision-memo"),
+    Family(_A + "iterations/", _A + r"iterations(?:/[^/]+)*", "iterations"),
+    Family(_A + "ac*", _A + r"ac[0-9][^/]*", "artifacts"),
+    Family(_A + "project-complete.json", _A + r"project-complete\.json", "project-complete"),
+    Family(_A + "phase-approval.json", _A + r"phase-approval\.json", "phase-approval"),
+)
+
+
+# A supervisor's tests build OTHER projects' trees and read their SPEC and
+# records back (foundry-orchestrator: `(project / "docs" / "PHASES.md")` over a
+# fixture). Only a read rooted in THIS project counts:
+#   * the spelling is the document's own path, under `./` or `../` at most
+#     (`tests/fixtures/x/docs/SPEC.md`, `site/docs/SPEC.md` are other trees);
+#   * and it is joined onto nothing (cwd-relative, or a helper joins it), or
+#     onto a base derived from the test file's location or the working
+#     directory (`Path(__file__)…`, `import.meta.url`, `__dirname`, `cwd()`),
+#     or onto a name that is the repository root's conventional constant
+#     (`ROOT`, `REPO_ROOT`, `PROJECT_ROOT`, `repoRoot`, `rootDir`) and is not
+#     bound here to something else.
+# A parameter, an attribute, a subscript (`fx["project"]`), a lower-case
+# `root`/`repo`, or anything bound to a scratch tree (mkdtemp, tmp_path,
+# TemporaryDirectory, fixtures) is a fixture. Python bindings are looked up in
+# the enclosing function, then at module level.
+_ROOT_MARK = re.compile(r"__file__|import\.meta|__dirname|\bcwd\b|getcwd|fileURLToPath|rev-parse"
+                        r"|BASH_SOURCE|BATS_TEST_DIRNAME|dirname \"?\$0|\bpwd\b")
+_TMP_MARK = re.compile(r"(?i)mkdtemp|mktemp|tmpdir|tmp_?path|tmp_?dir|temporarydirectory|tempfile"
+                       r"|gettempdir|os\.tmpdir|\$TMPDIR|\bfixtures?\b|scratch|sandbox")
+_ROOT_NAME = re.compile(r"_?(?:(?:REPO|PROJECT|REPOSITORY)_)?(?:ROOT|REPO)(?:_(?:DIR|PATH))?"
+                        r"|(?:repo|project)Root|root(?:Dir|Path)|repoDir")
+_PY_DEF = re.compile(r"^([ \t]*)(?:async[ \t]+)?def[ \t]+\w+[ \t]*\(", re.M)
+_HERE_PREFIX = re.compile(r"(?:\.\.?/)*")
+_SH_BASE = re.compile(r"""^['"]?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/((?:\.\.?/)*)$""")
+
+
+def _rootish(name):
+    return _ROOT_NAME.fullmatch(name) is not None
+
+
+def _base_expr(lx, a):
+    """The expression the code at `a` (a path's first literal piece, or a name)
+    is joined onto: "" when none, "<literal>" when another literal precedes it
+    (a longer spelling of the same path decides), else its text (`REPO_ROOT`,
+    `fx["project"]`, `Path(__file__).parent`)."""
+    t = lx.text
+    k = a - 1
+    while k >= 0 and t[k] in " \t\n":
+        k -= 1
+    if k < 0 or t[k] not in "/,+" or not lx.code_at(k):
+        return ""
+    if t[k] == "," and lx.innermost(k) == -1:
+        return ""
+    k -= 1
+    while k >= 0 and t[k] in " \t\n":
+        k -= 1
+    if k >= 0 and lx.kind[k] == STRING:
+        return "<literal>"
+    end = k + 1
+    opener = lx.__dict__.setdefault("_opener", {c: o for o, c in lx.close.items()})
+    while k >= 0:
+        if t[k] in ")]" and k in opener:
+            k = opener[k] - 1
+        elif re.match(IDENT, t[k]):
+            while k >= 0 and re.match(IDENT, t[k]):
+                k -= 1
+        else:
+            break
+        if k >= 0 and t[k] == ".":
+            k -= 1
+            continue
+        if k >= 0 and t[k] in ")]" and k in opener and t[k + 1] in "([":
+            continue
+        break
+    return t[k + 1:end].strip()
+
+
+def _py_defs(lx):
+    """[(start, indent, params text)] of every `def` in code, once per file."""
+    defs = lx.__dict__.get("_defs")
+    if defs is None:
+        defs = []
+        for m in _PY_DEF.finditer(lx.text):
+            o = m.end() - 1
+            if lx.code_at(o):
+                defs.append((m.start(), len(m.group(1)), lx.text[o + 1:lx.close.get(o, o + 1)]))
+        lx._defs = defs
+    return defs
+
+
+def _scope(lx, at):
+    """(start, params) of the Python function around `at`; (0, None) at module level."""
+    if lx.lang != "py":
+        return 0, None
+    t = lx.text
+    line_start = t.rfind("\n", 0, at) + 1
+    indent = len(t[line_start:at]) - len(t[line_start:at].lstrip(" \t"))
+    defs = _py_defs(lx)
+    starts = lx.__dict__.setdefault("_def_starts", [d[0] for d in defs])
+    i = bisect.bisect_left(starts, line_start) - 1
+    while i >= 0:
+        if defs[i][1] < indent:
+            return defs[i][0], defs[i][2]
+        i -= 1
+    return 0, None
+
+
+def _bound_rhs(lx, name, at):
+    """The right-hand side of the binding of `name` that reaches offset `at`:
+    "" for a parameter of the Python function around it, None when it is
+    bound nowhere here (an import, a fixture argument)."""
+    t = lx.text
+    start, params = _scope(lx, at)
+    if params is not None and re.search(r"(?<![\w.])" + re.escape(name) + r"\s*(?=[:,=)]|$)",
+                                        params):
+        return ""
+    rx = re.compile(r"^[ \t]*(?:export\s+)?(?:const\s+|let\s+|var\s+|readonly\s+)?"
+                    + re.escape(name) + r"\s*(?::[^=\n]*)?=(?!=)(.*)$", re.M)
+    rhs = None
+    for m in rx.finditer(t, start, at):
+        if lx.code_at(m.start(1) - 1):
+            rhs = m.group(1)
+    if rhs is None and start:
+        # a module-level binding, seen from inside a function
+        top = re.compile(r"^" + re.escape(name) + r"\s*(?::[^=\n]*)?=(?!=)(.*)$", re.M)
+        for m in top.finditer(t, 0, start):
+            if lx.code_at(m.start(1) - 1):
+                rhs = m.group(1)
+    return rhs
+
+
+def _expr_is_own(lx, expr, at, depth=0):
+    """Whether a base expression names THIS project's root (see above). Memoised
+    per file: a 30k-line test module calls it thousands of times."""
+    key = (expr, _scope(lx, at)[0] if lx.lang == "py" else at, depth)
+    cache = lx.__dict__.setdefault("_own", {})
+    if key not in cache:
+        cache[key] = _expr_is_own_uncached(lx, expr, at, depth)
+    return cache[key]
+
+
+def _expr_is_own_uncached(lx, expr, at, depth):
+    if not expr:
+        return True
+    if expr == "<literal>" or _TMP_MARK.search(expr):
+        return False
+    if _ROOT_MARK.search(expr):
+        return True
+    # a parent of a base is as much the project's as the base (`HERE.parent`)
+    expr = re.sub(r"(?:\.parent|\.parents\[\d+\]|\.resolve\(\))+$", "", expr)
+    if not re.fullmatch(r"[A-Za-z_$][\w$]*", expr):
+        return False  # an attribute, a subscript, a call of anything else: a fixture
+    rhs = _bound_rhs(lx, expr, at) if depth < 4 else None
+    if rhs == "":
+        return False  # a parameter: whatever the caller passes, a fixture
+    if rhs is None:
+        return _rootish(expr)  # bound nowhere here (an import): the name decides
+    if _TMP_MARK.search(rhs):
+        return False
+    if _ROOT_MARK.search(rhs):
+        return True
+    # bound here: to a root it derives from (`ROOT = resolve(HERE, '..')`), or not
+    names = [i for i in re.findall(r"(?<![\w$.'\"])[A-Za-z_$][\w$]*", rhs) if i != expr][:6]
+    return any(_expr_is_own(lx, i, at, depth + 1) for i in names
+               if _rootish(i) or _bound_rhs(lx, i, at))
+
+
+def _family_prefix(s, path):
+    """What a spelling carries before the document's own path ("" when none)."""
+    rx = path.rx if isinstance(path, Family) else re.escape(path)
+    m = re.fullmatch(r"(.*?/)?(?:" + rx + r")", s)
+    return (m.group(1) or "") if m else s
+
+
+_RUN_DEADLINE = [None]  # process_reads' deadline, checked per read site (review R2)
+
+
+def _own_root(lx, piece, spelling, path, shell=False, at=0):
+    """The `own` filter of process_reads: whether a read is rooted in THIS project."""
+    _budget(_RUN_DEADLINE[0])
+    if shell:
+        # the text before a shell spelling: `$ROOT/`, `../`, or nothing
+        before = re.search(r"""['"]?[A-Za-z0-9_./${}-]*$""", spelling or "").group(0)
+        if _HERE_PREFIX.fullmatch(before.lstrip("'\"")):
+            return True
+        m = _SH_BASE.match(before)
+        return bool(m) and _expr_is_own(lx, m.group(1), at)
+    if piece is None:
+        # a bound name used at `at`: what it is joined onto there
+        return _expr_is_own(lx, _base_expr(lx, at), at)
+    m = re.match(r"\$?\{([A-Za-z_$][\w$]*)\}/", spelling)
+    rest = spelling[m.end():] if m else spelling
+    if not _HERE_PREFIX.fullmatch(_family_prefix(rest, path)):
+        return False
+    return _expr_is_own(lx, m.group(1) if m else _base_expr(lx, piece[0]), piece[0])
+
+
+class _OutOfTime(Exception):
+    pass
+
+
+SCAN_BUDGET_S = 25  # each v0.19.3 scan; the loop runs the whole tool under `timeout 60`
+RUN_BUDGET_S = 50   # the whole `scaffold-reads` run: past it, process_reads is null
+
+
+def _budget(deadline):
+    if deadline is not None and time.monotonic() > deadline:
+        raise _OutOfTime()
+
+
+def process_reads(root, tracked=None, deadline=None):
+    """[{"test": <test file>, "paths": [<process-document families it reads>]}], sorted.
+    Raises _OutOfTime past `deadline` (time.monotonic()), so a huge tree costs
+    this record (null) and never the scaffold-reads one."""
+    root = Path(root)
+    tracked = _tracked(root) if tracked is None else tracked
+    out = []
+    _RUN_DEADLINE[0] = deadline
+    try:
+        for rel, text in _test_files(root, tracked, named=True):
+            _budget(deadline)
+            out.extend(_process_reads_in(rel, text))
+    finally:
+        _RUN_DEADLINE[0] = None
+    return sorted(out, key=lambda e: e["test"])
+
+
+def _process_reads_in(rel, text):
+    """[the entry for one test file] or []."""
+    cand = [p for p in PROCESS_DOCS if p.hint in text]
+    hit = _reads_in(text, cand, _lang(rel), own=_own_root) if cand else []
+    return [{"test": rel, "paths": [str(p) for p in hit]}] if hit else []
+
+
+def process_line(reads):
+    """The one-line `process-reads` advisory (empty when there is nothing to say)."""
+    if not reads:
+        return ""
+    names = [e["test"] for e in reads]
+    shown = ", ".join(names[:5]) + (", …" if len(names) > 5 else "")
+    return (f"ADVISORY {PROCESS_ID}: {len(names)} test file(s) read process documents ({shown}) "
+            "— SPEC, PHASES, LEARNINGS, ROADMAP/BACKLOG, the deferral ledger and the records "
+            "under artifacts/ are governed by phasekit's gates, not tested by the project; a test "
+            "exercises the project's code. See docs/QUALITY_GATES.md \"A project's tests test the "
+            "project\". Advisory only: the gate is unchanged.")
+
+
+# --- per-criterion suites (v0.19.3; `phasekit check` only) ---------------------------
+# A large test file whose tests are named for criteria or iterations
+# (`test_ac123_…`, `iteration-41 …`, `test_spec_declares_…`) is the shape the
+# 2026-10-09 sweep found growing without bound: one test per append-only SPEC
+# line. Reported by `phasekit check`, never recorded, never a red gate.
+SUITES_ID = "criterion-suites"
+SUITE_MIN_LINES = 3000
+SUITE_MIN_SHARE = 0.5
+FAMILY_MIN_FILES = 5
+CRITERION_NAME = re.compile(r"(?i)(?:^|[^a-z0-9])ac[\s_#-]*\d|iteration[\s_-]*\d|spec_declares")
+_PY_TEST = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+(test\w*)", re.M)
+_JS_TEST = re.compile(r"""(?<![A-Za-z0-9_$.])(?:it|test|describe)(?:\.\w+)?\s*\(\s*"""
+                      r"""(['"`])((?:\\.|(?!\1)[^\\])*)\1""")
+_FAMILY_FILE = re.compile(r"(?i)(?:^|[^a-z])(?:iteration|phase)[-_]?\d+[^/]*$")
+
+
+def criterion_suites(root, tracked=None):
+    """{"large": [{"test", "lines", "tests", "criterion_tests"}], "family": {"files",
+    "lines", "examples"}}: test files over SUITE_MIN_LINES lines whose tests are mostly
+    named for criteria or iterations, and the files named per iteration or phase."""
+    root = Path(root)
+    tracked = _tracked(root) if tracked is None else tracked
+    large, family = [], []
+    for rel, text in _test_files(root, tracked):
+        lines = text.count("\n") + (0 if text.endswith("\n") or not text else 1)
+        if _FAMILY_FILE.search(posixpath.basename(rel)):
+            family.append((rel, lines))
+        if lines <= SUITE_MIN_LINES:
+            continue
+        names = ([m.group(1) for m in _PY_TEST.finditer(text)] if rel.endswith(".py")
+                 else [m.group(2) for m in _JS_TEST.finditer(text)])
+        hits = sum(1 for n in names if CRITERION_NAME.search(n))
+        if names and hits / len(names) >= SUITE_MIN_SHARE:
+            large.append({"test": rel, "lines": lines, "tests": len(names),
+                          "criterion_tests": hits})
+    fam = {"files": 0, "lines": 0, "examples": []}
+    if len(family) >= FAMILY_MIN_FILES:
+        fam = {"files": len(family), "lines": sum(n for _, n in family),
+               "examples": [r for r, _ in family[:3]]}
+    return {"large": large, "family": fam}
+
+
+def suites_line(report):
+    """The `criterion-suites` line (empty when there is nothing to say)."""
+    large, fam = report["large"], report["family"]
+    if not large and not fam["files"]:
+        return ""
+    parts = []
+    if large:
+        shown = ", ".join(f"{e['test']} ({e['lines']} lines, {e['criterion_tests']} of "
+                          f"{e['tests']} tests)" for e in large[:5])
+        shown += ", …" if len(large) > 5 else ""
+        parts.append(f"{len(large)} test file(s) over {SUITE_MIN_LINES} lines are mostly tests "
+                     f"named for criteria or iterations ({shown})")
+    if fam["files"]:
+        parts.append(f"{fam['files']} test files are named per iteration or phase "
+                     f"({fam['lines']} lines; {', '.join(fam['examples'])}, …)")
+    return (f"ADVISORY {SUITES_ID}: " + "; ".join(parts) + " — a criterion yields product tests, "
+            "not one test per criterion (docs/QUALITY_GATES.md \"A project's tests test the "
+            "project\"). Advisory only: the check's exit code is unchanged.")
+
+
+def check_lines(root):
+    """What `phasekit check` prints for the test-subject advisories, in both
+    layouts: scaffold-reads (with the phasekit-only widening), process-reads,
+    criterion-suites. Each is isolated: one failing never costs another."""
+    root = Path(root)
+    tracked = _tracked(root)
+    out = []
+    for fn in (lambda: _named(advisory_line, scaffold_reads(root)),
+               lambda: _named(process_line, process_reads(root, tracked,
+                                                          time.monotonic() + SCAN_BUDGET_S)),
+               lambda: [suites_line(criterion_suites(root, tracked))]):
+        try:
+            out.extend(x for x in fn() if x)
+        except Exception:  # noqa: BLE001 - an advisory never fails the check
+            continue
+    return out
+
+
+def _named(line_fn, reads):
+    line = line_fn(reads)
+    if not line:
+        return []
+    return [line] + [f"  {e['test']}: {', '.join(e['paths'])}" for e in reads]
 
 
 # --- migration readiness (v0.19.2) ---------------------------------------------
@@ -864,11 +1469,12 @@ def advisory_line(reads):
     names = [e["test"] for e in reads]
     shown = ", ".join(names[:5]) + (", …" if len(names) > 5 else "")
     return (f"ADVISORY {ADVISORY_ID}: {len(names)} test file(s) read scaffold-owned files "
-            f"({shown}) — a test reads the project's own tree and phasekit's declared surface "
-            "(contracts/interface.json `facts`, `phasekit facts --json`), never the vendored "
-            "loop, scripts, hooks or scaffold docs; a fact the surface lacks is a request to "
-            "phasekit. See docs/QUALITY_GATES.md \"Tests read the declared surface\". Advisory "
-            "only: the gate is unchanged.")
+            f"({shown}) — a test reads the project's own tree, never the vendored loop, "
+            "scripts, hooks or scaffold docs, and reads phasekit's declared surface "
+            "($PHASEKIT_CONTRACT, `phasekit facts`) only where the project's own code consumes "
+            "it: a test that reads it and no project code has phasekit as its only subject, is "
+            "named here too, and belongs upstream. See docs/QUALITY_GATES.md \"Tests read the "
+            "declared surface\". Advisory only: the gate is unchanged.")
 
 
 def _contract(root):
@@ -936,22 +1542,26 @@ def main(argv):
     if verb == "scaffold-reads":
         # the project's top level, from any subdirectory (never a silent all-clear)
         top = _top(root)
+        run_end = time.monotonic() + RUN_BUDGET_S  # the loop runs this under `timeout 60`
         reads = scaffold_reads(top)
         try:
             # the hint is isolated: it never costs the scaffold_reads record
             mreads = migration_reads(top)
         except Exception:  # noqa: BLE001 - an advisory never fails
             mreads = []
+        try:
+            # v0.19.3: isolated the same way; null = the scan failed
+            preads = process_reads(top, deadline=min(time.monotonic() + SCAN_BUDGET_S, run_end))
+        except Exception:  # noqa: BLE001 - an advisory never fails
+            preads = None
         if as_json:
             record = {"advisory": ADVISORY_ID, RECORD_FIELD: reads, "line": advisory_line(reads),
-                      MIGRATION_FIELD: mreads, "migration_line": migration_line(mreads)}
+                      MIGRATION_FIELD: mreads, "migration_line": migration_line(mreads),
+                      PROCESS_FIELD: preads, "process_line": process_line(preads or [])}
             print(json.dumps(record, sort_keys=True))
         else:
-            line = advisory_line(reads)
-            if line:
+            for line in _named(advisory_line, reads) + _named(process_line, preads or []):
                 print(line)
-                for e in reads:
-                    print(f"  {e['test']}: {', '.join(e['paths'])}")
             line = migration_line(mreads)
             if line:
                 print(line)

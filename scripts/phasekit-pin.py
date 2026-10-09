@@ -750,6 +750,15 @@ def migrate_preflight(root):
         warn(f"phasekit migrate: the pre-flight scan could not run ({type(exc).__name__}); "
              "the gate decides")
         return
+    try:
+        # v0.19.3: information only — the migration does not break a test that
+        # reads a process document, so this never refuses
+        preads = mod.process_reads(root)
+        say(f"phasekit migrate: pre-flight: {len(preads)} test file(s) read process documents "
+            "(the `process-reads` advisory; information only — docs/QUALITY_GATES.md \"A "
+            "project's tests test the project\")")
+    except Exception:  # noqa: BLE001 - information never stands in for the gate
+        pass
     if reads:
         raise PinError(
             f"{len(reads)} project file(s) read engine files by their in-tree path; the "
@@ -1005,6 +1014,13 @@ def cmd_check(args):
             warn("LEFTOVER: .claude/settings.json still wires vendored hook paths (the plugin "
                  "provides the hooks): " + ", ".join(stale))
             rc = EXIT_LEFTOVER
+    try:
+        # v0.19.3: the test-subject advisories (scaffold-reads, process-reads,
+        # criterion-suites) — printed, never an exit code
+        for line in surface().check_lines(root):
+            say(line)
+    except Exception:  # noqa: BLE001 - an advisory never fails the check
+        pass
     installed, detail = plugin_status()
     if installed is False:
         warn("WARNING: the phasekit plugin is not installed for interactive Claude Code "

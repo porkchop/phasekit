@@ -46,6 +46,8 @@ When that is required:
 - when delegating build tasks, explicitly require tests per the testing gate in QUALITY_GATES.md
 - when receiving builder deliverables, verify tests are listed and the test run output shows all passing before sending to code-reviewer
 - do not approve a phase if code-reviewer reports missing tests, failing tests, or skipped test execution as a blocking issue
+- tests test the product: every test exercises this project's code, scripts or shipped deliverables — never a process document (SPEC criteria or annotations, PHASES records, LEARNINGS ledgers, deferral ledgers, evidence or iteration records) and never phasekit itself (loop, hooks, firewall, verify wrapper, contract facts); make a claim checkable by asserting it against the code that makes it true (QUALITY_GATES.md "A project's tests test the project")
+- reject a builder deliverable whose new tests read `docs/SPEC.md`, `docs/PHASES.md`, `docs/LEARNINGS*`, `artifacts/` records or phasekit files as their subject
 
 ## Phase discipline
 - never skip directly to a later phase because code already exists
