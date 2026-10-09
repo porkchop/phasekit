@@ -131,7 +131,7 @@ A project enriched before v0.19.0 carries the engine in its own tree (`scripts/r
 
 ```bash
 cd my-old-project
-phasekit migrate --dry-run      # print the plan: every file it would delete, the settings change, the pin
+phasekit migrate --dry-run      # print the plan: every file it would delete, the settings change, the pin (refuses as migrate would)
 phasekit migrate                # do it: one commit, never pushed
 ```
 
@@ -139,6 +139,7 @@ What `phasekit migrate` does, exactly:
 
 1. **Preconditions.** The project has `.scaffold/manifest.json` and at least one commit, and the working tree is clean (commit or stash first). The installed phasekit must sit on a release tag, or you pass `--pin TAG` (v0.19.0 or later).
 2. **Refuses to discard local edits.** If any engine file the manifest names was edited since phasekit wrote it, or carries a standing `--keep-local`, it lists them and stops (exit 2). Move what you need into project-owned files (`docs/project/<NAME>.md` is the companion for a process doc) and re-run, or pass `--discard-local` to let the engine's copy replace them.
+   **Refuses project files that read engine paths (v0.19.2).** Before it deletes anything or runs the gate, it scans the project's own code (tests, scripts, source) for reads of an engine file by its in-tree path — `contracts/interface.json` included — and stops (exit 2) with each `file:line: path`. Read the contract through `$PHASEKIT_CONTRACT` instead (exported in both layouts; `phasekit facts --path` by hand; see `docs/QUALITY_GATES.md` "Tests read the declared surface"). `--force` skips this pre-flight and leaves the verdict to the gate. `phasekit check` shows the same list ahead of time, as the `migration-readiness` hint.
 3. **Deletes exactly** the files the manifest records as `scaffold` class, and `.scaffold/`. Project-owned files (SPEC, PHASES, CONVENTIONS, `AGENTS.md`, `.claude/CLAUDE.md`, the gate, ...) are not touched.
 4. **Strips phasekit's hook wiring** (the four engine hooks under `.claude/hooks/`) from `.claude/settings.json`; its permissions and any hooks of the project's own are unchanged. The plugin supplies the hooks from now on.
 5. **Writes** `.phasekit-version`.

@@ -3,7 +3,7 @@
 
 Two verbs, stdlib only, read-only:
 
-  facts [--json]
+  facts [--json | --path]
       The facts phasekit DECLARES for downstream tests: the `facts` section of
       this project's installed contracts/interface.json (a vendored provider
       copy under vendor/contracts/phasekit/ is the same file). A test that
@@ -11,6 +11,8 @@ Two verbs, stdlib only, read-only:
       phasekit's own suite proves every fact against the loop's behaviour
       (tests/test_declared_surface.py), so a reshape that keeps the facts true
       cannot break a consumer, and one that changes a fact changes this file.
+      `--path` (v0.19.2) prints the contract file's absolute path instead: the
+      file $PHASEKIT_CONTRACT names inside a loop or a gate, in both layouts.
 
   scaffold-reads [--json] [ROOT]
       The `scaffold-reads` advisory: project test files that READ a
@@ -18,17 +20,23 @@ Two verbs, stdlib only, read-only:
       the vendored loop and scripts, the hooks, the scaffold docs) instead of
       the declared surface. Warn-only, never a refusal: it prints, and its
       JSON form is what the loop records as boundary-state.json
-      `scaffold_reads`. Exit 0 always (2 only on a usage error).
+      `scaffold_reads`. Exit 0 always (2 only on a usage error). v0.19.2: it
+      also prints the `migration-readiness` hint — the project's own code
+      files (tests, scripts, source) that read an engine file by its in-tree
+      path, the declared contract included, with file:line — which is what
+      `phasekit migrate` refuses before its gate (JSON: `migration_reads`,
+      `migration_line`; never recorded in boundary-state.json).
 
 The rule it advises on (docs/QUALITY_GATES.md "Tests read the declared
 surface"): a test reads the project's own tree and phasekit's declared surface
-(contracts/interface.json, `phasekit facts`), never scaffold-owned files; a
+($PHASEKIT_CONTRACT, `phasekit facts`), never scaffold-owned files; a
 fact a test needs that the surface lacks is a request to phasekit, not a
 parse.
 """
 
 import bisect
 import json
+import posixpath
 import re
 import subprocess
 import sys
@@ -105,7 +113,7 @@ QUOTED_CMD = re.compile(r"^\s*" + SHELL_WORDS + r"(?:\s|$)")
 RUNNER_RE = re.compile(r"(?i)run|exec|spawn|popen|call|system|output|shell|^sh$|^bash$")
 SHELL_FILE_RE = re.compile(r"\.(sh|bash|bats)$")
 ASSIGN_RE = re.compile(
-    r"^\s*(?:export\s+|const\s+|let\s+|var\s+|readonly\s+)?"
+    r"^\s*(?:export\s+)?(?:const\s+|let\s+|var\s+|readonly\s+)?"
     r"([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=]*)?=(?!=)")
 # between two literal pieces of ONE path: `,` (join args), `/` (pathlib), `+`, or nothing
 JOIN_SEP = re.compile(r"\s*[,/+]?\s*")
@@ -506,7 +514,8 @@ def _spellings(lx, toks, last=None):
 def _sites(lx):
     """Every place in this file that reads something, independent of the
     path: (kind, spellings of literal paths it reads, (a, b, args_from) where
-    a bound name would be read, or a member's receiver name)."""
+    a bound name would be read, or a member's receiver name, the offset where
+    the read is written)."""
     t, sites = lx.text, []
     for m in READ_CALL.finditer(t):
         o = m.end() - 1
@@ -521,7 +530,7 @@ def _sites(lx):
         toks = [tk for tk in lx.literals(o + 1, c) if lx.args_only(o, lx.inner[tk])]
         # open(…, "w") writes
         if not (name == "open" and any(WRITE_MODE.fullmatch(tk[2]) for tk in toks)):
-            sites.append(("call", _spellings(lx, toks), (o, c)))
+            sites.append(("call", _spellings(lx, toks), (o, c), m.start()))
     for m in MEMBER_READ.finditer(t):
         if not lx.code_at(m.start()):
             continue
@@ -531,12 +540,12 @@ def _sites(lx):
         if k >= 0 and k + 1 in lx.ends and lx.kind[k] == STRING:
             tk = lx.ends[k + 1]
             before = lx.literals(0, k + 1)[-MAX_PIECES:]
-            sites.append(("member", _spellings(lx, before, last=tk), None))
+            sites.append(("member", _spellings(lx, before, last=tk), None, m.start()))
         elif k >= 0 and re.match(IDENT, t[k]) and lx.code_at(k):
             j = k
             while j >= 0 and re.match(IDENT, t[j]):
                 j -= 1
-            sites.append(("member", set(), t[j + 1:k + 1]))
+            sites.append(("member", set(), t[j + 1:k + 1], m.start()))
     if lx.lang == "sh":
         for m in SHELL_CMD.finditer(t):
             if not lx.code_at(m.end() - 1):
@@ -544,7 +553,7 @@ def _sites(lx):
             b = m.end()
             while b < len(t) and not (t[b] in "|;&\n" and lx.code_at(b)):
                 b += 1
-            sites.append(("shell", set(), (m.end(), b)))
+            sites.append(("shell", set(), (m.end(), b), m.start()))
         return sites
     for tk in lx.strings:
         if not QUOTED_CMD.match(tk[2]):
@@ -555,17 +564,17 @@ def _sites(lx):
         if e == -1 or not RUNNER_RE.search(lx.callee(e)):
             continue
         if not re.fullmatch(r"\s*" + SHELL_WORDS + r"\s*", tk[2]):
-            sites.append(("command-line", set(), tk[2]))
+            sites.append(("command-line", set(), tk[2], tk[0]))
         else:
             # argv: the rest of the bracket the command word sits in
             end = lx.close.get(lx.inner[tk], len(t))
-            sites.append(("argv", _spellings(lx, lx.literals(tk[1], end)), (tk[1], end)))
+            sites.append(("argv", _spellings(lx, lx.literals(tk[1], end)), (tk[1], end), tk[0]))
     return sites
 
 
 def _site_reads(lx, site, path=None, name=None):
     """Whether one read site reads `path` (a literal spelling) or `name` (a bound name)."""
-    kind, spelled, where = site
+    kind, spelled, where = site[:3]
     if path is not None and any(_names_path(s, path) for s in spelled):
         return True
     t = lx.text
@@ -624,16 +633,34 @@ def _lang(rel):
     return "py" if rel.endswith(".py") else "js"
 
 
-def _reads_in(text, paths, lang="js"):
-    """Which of `paths` this test text reads — directly, or through a name
-    bound to the path (`LOOP = ROOT / "scripts" / "x.sh"` … `LOOP.read_text()`)."""
+def _reads_at(text, paths, lang="js", names=None):
+    """{path: [line, …]} for each of `paths` this code reads — directly, or
+    through a name bound to the path (`LOOP = ROOT / "scripts" / "x.sh"` …
+    `LOOP.read_text()`); `names` adds bindings made elsewhere ({name: path},
+    a name this file imports from another). Lines are where the read is
+    written (1-based), sorted."""
     lx = _Lexed(text, lang)
     sites = _sites(lx)
-    found = {p for p in paths if any(_site_reads(lx, s, path=p) for s in sites)}
-    for name, p in _bindings(lx, [p for p in paths if p not in found]).items():
-        if p not in found and any(_site_reads(lx, s, name=name) for s in sites):
-            found.add(p)
-    return sorted(found)
+    found = {}
+
+    def hit(p, site):
+        found.setdefault(p, set()).add(text.count("\n", 0, site[3]) + 1)
+
+    for p in paths:
+        for site in sites:
+            if _site_reads(lx, site, path=p):
+                hit(p, site)
+    bound = _bindings(lx, list(paths))
+    for name, p in {**(names or {}), **bound}.items():
+        for site in sites:
+            if _site_reads(lx, site, name=name):
+                hit(p, site)
+    return {p: sorted(lines) for p, lines in found.items()}
+
+
+def _reads_in(text, paths, lang="js"):
+    """Which of `paths` this test text reads (see _reads_at)."""
+    return sorted(_reads_at(text, paths, lang))
 
 
 def scaffold_reads(root):
@@ -660,6 +687,176 @@ def scaffold_reads(root):
     return sorted(out, key=lambda e: e["test"])
 
 
+# --- migration readiness (v0.19.2) ---------------------------------------------
+# The same reads, asked the other way round: which of the PROJECT's own code
+# files (tests, scripts, source) read an engine file by its in-tree path, the
+# declared contract included. In the vendored layout that works; in the pinned
+# layout those paths are not in the project, so `phasekit migrate` refuses
+# them before its gate (the pre-flight) and the scaffold-reads advisory names
+# them as a hint. The remedy for the contract is the exported path,
+# $PHASEKIT_CONTRACT (`phasekit facts --path` by hand); for any other engine
+# file, the fact it carries (docs/QUALITY_GATES.md "Tests read the declared
+# surface"). The lexer above decides read vs literal, so a path in prose, a
+# comment, a planted sample or a fixture is never named.
+MIGRATION_ID = "migration-readiness"
+MIGRATION_FIELD = "migration_reads"
+MANIFEST_PATH = ".scaffold/manifest.json"  # read for the engine paths; never itself one
+# A binding another file can import: `export const NAME =` (JS/TS), a
+# module-level `NAME =` (Python).
+EXPORT_JS = re.compile(r"^[ \t]*export\s+(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)", re.M)
+EXPORT_PY = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=\n]*)?=(?!=)", re.M)
+IMPORT_JS = re.compile(r"""\bimport\s+(?:type\s+)?\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]""")
+IMPORT_PY = re.compile(r"^[ \t]*from\s+([\w.]+)\s+import\s+(\([^)]*\)|[^\n]+)", re.M)
+JS_EXT = re.compile(r"\.(?:[cm]?[jt]sx?)$")
+
+
+def _module_of(rel):
+    """A code file as a module key: its path without the extension."""
+    return rel[:-3] if rel.endswith(".py") else JS_EXT.sub("", rel)
+
+
+def _names_module(rel, lang, spec, exporter):
+    """Whether an import of `spec` written in file `rel` names the module of
+    file `exporter`: a relative JS specifier resolved against the importing
+    file (or its /index); a Python module, relative (leading dots) or absolute
+    (a file whose path ends with it). A bare JS package name never does."""
+    key = _module_of(exporter)
+    here = posixpath.dirname(rel)
+    if lang == "py":
+        tail = spec.lstrip(".").replace(".", "/")
+        dots = len(spec) - len(spec.lstrip("."))
+        if dots:
+            base = here
+            for _ in range(dots - 1):
+                base = posixpath.dirname(base)
+            want = posixpath.normpath(posixpath.join(base, tail)) if tail else base
+            return key in (want, want + "/__init__")
+        return any(key == t or key.endswith("/" + t) for t in (tail, tail + "/__init__"))
+    if not spec.startswith("."):
+        return False
+    want = _module_of(posixpath.normpath(posixpath.join(here, spec)))
+    return key in (want, want + "/index")
+
+
+def engine_owned(root):
+    """Every engine path a vendored project carries (manifest `scaffold`
+    class, the declared contract included); [] for a project with no manifest.
+    The manifest itself is left out on purpose: a supervisor's tests read
+    OTHER projects' manifests in fixture repos under the same name (the
+    foundry-orchestrator scan, 2026-10-08: 31 such reads, none of its own),
+    and a project reading its own is caught by the migration's gate."""
+    try:
+        manifest = json.loads((Path(root) / MANIFEST_PATH).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    out = set()
+    for f in files if isinstance(files, list) else []:
+        if (isinstance(f, dict) and f.get("ownership") == "scaffold"
+                and isinstance(f.get("path"), str)):
+            out.add(f["path"])
+    return sorted(out)
+
+
+def _exported(text, lang, paths):
+    """{name: path} for each binding of an engine path another file can import."""
+    lx = _Lexed(text, lang)
+    bound = _bindings(lx, paths)
+    if not bound:
+        return {}
+    rx = EXPORT_PY if lang == "py" else EXPORT_JS if lang == "js" else None
+    if rx is None:
+        return {}
+    names = {m.group(1) for m in rx.finditer(text) if lx.code_at(m.start(1))}
+    return {n: p for n, p in bound.items() if n in names}
+
+
+def _imported(text, lang, rel, exported):
+    """{local name: path} for each engine-path binding this file imports by
+    name FROM the module that exports it (`exported`: {(file, name): path})."""
+    rx = IMPORT_PY if lang == "py" else IMPORT_JS if lang == "js" else None
+    if rx is None:
+        return {}
+    matches = list(rx.finditer(text))
+    if not matches:
+        return {}
+    lx = _Lexed(text, lang)
+    out = {}
+    for m in matches:
+        if not lx.code_at(m.start()):
+            continue
+        spec, names = (m.group(1), m.group(2)) if lang == "py" else (m.group(2), m.group(1))
+        for piece in names.strip("()").split(","):
+            words = piece.split()
+            if words[:1] == ["type"]:
+                words = words[1:]
+            if not words:
+                continue
+            orig, local = words[0], (words[2] if len(words) >= 3 and words[1] == "as" else words[0])
+            for (exporter, name), p in exported.items():
+                if name == orig and _names_module(rel, lang, spec, exporter):
+                    out[local] = p
+    return out
+
+
+def migration_reads(root, paths=None):
+    """[{"file": <tracked code file>, "reads": [{"path": <engine path>, "line": n}]}],
+    sorted: the project's own code that reads an engine file by its in-tree path."""
+    root = Path(root)
+    paths = engine_owned(root) if paths is None else sorted(set(paths))
+    if not paths:
+        return []
+    owned = set(paths)
+    files = []
+    for rel in _tracked(root):
+        if (rel in owned or rel.startswith(".scaffold/") or SKIP_RE.search(rel)
+                or not CODE_RE.search(rel)):
+            continue
+        try:
+            text = (root / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        files.append((rel, text, _lang(rel), [p for p in paths if p.rsplit("/", 1)[-1] in text]))
+    exported = {}  # {(exporting file, name): path}
+    for rel, text, lang, cand in files:
+        if cand:
+            for name, p in _exported(text, lang, cand).items():
+                exported[(rel, name)] = p
+    out = []
+    for rel, text, lang, cand in files:
+        names = _imported(text, lang, rel, exported) if exported else {}
+        if not cand and not names:
+            continue
+        at = _reads_at(text, cand, lang, names)
+        if at:
+            reads = [{"path": p, "line": n} for p, lines in at.items() for n in lines]
+            out.append({"file": rel, "reads": sorted(reads, key=lambda r: (r["line"], r["path"]))})
+    return sorted(out, key=lambda e: e["file"])
+
+
+def migration_lines(reads):
+    """`file:line: path`, one per read."""
+    return [f"{e['file']}:{r['line']}: {r['path']}" for e in reads for r in e["reads"]]
+
+
+REMEDY = ("read the declared contract through $PHASEKIT_CONTRACT (its absolute path, exported "
+          "by the loop, its gate, `phasekit verify` and the upgrade gate in both layouts; "
+          "`phasekit facts --path` when a test is run by hand) and any other engine fact "
+          "through that contract, never an engine file — docs/QUALITY_GATES.md \"Tests read "
+          "the declared surface\"")
+
+
+def migration_line(reads):
+    """The migration-readiness hint (empty when there is nothing to say)."""
+    if not reads:
+        return ""
+    names = [e["file"] for e in reads]
+    shown = ", ".join(names[:5]) + (", …" if len(names) > 5 else "")
+    return (f"ADVISORY {MIGRATION_ID}: {len(names)} file(s) read engine files by their in-tree "
+            f"path ({shown}) — a pinned project carries no engine file, so `phasekit migrate` "
+            f"refuses them: {REMEDY}. Advisory only: the gate is unchanged.")
+
+
 def advisory_line(reads):
     """The one-line named advisory (empty when there is nothing to say)."""
     if not reads:
@@ -675,6 +872,7 @@ def advisory_line(reads):
 
 
 def _contract(root):
+    """(path, contract) of THIS project's phasekit contract, or (None, None)."""
     candidates = [Path(root) / rel for rel in
                   ("contracts/interface.json", "vendor/contracts/phasekit/interface.json")]
     if (Path(root) / ".phasekit-version").is_file():
@@ -689,8 +887,8 @@ def _contract(root):
         if not isinstance(data, dict) or data.get("interface") != "phasekit":
             continue
         if isinstance(data.get("facts"), dict):
-            return data
-    return None
+            return p.resolve(), data
+    return None, None
 
 
 def _top(root):
@@ -711,19 +909,24 @@ def main(argv):
         return 0 if argv else 2
     verb, rest = argv[0], argv[1:]
     as_json = "--json" in rest
-    rest = [a for a in rest if a != "--json"]
+    as_path = "--path" in rest
+    rest = [a for a in rest if a not in ("--json", "--path")]
     root = Path(rest[0]) if rest else Path.cwd()
     if verb == "facts":
         # the facts of THIS project's phasekit (its installed contract, found
         # from any subdirectory) — never a newer install's, which may not
         # describe the loop this project vendors
-        data = _contract(_top(root))
+        path, data = _contract(_top(root))
         if data is None:
             print("phasekit facts: no contracts/interface.json with a `facts` section here "
                   "(phasekit v0.18.3 or later installs it)", file=sys.stderr)
             return 1
         facts = data["facts"]
-        if as_json:
+        if as_path:
+            # v0.19.2: the file itself — what $PHASEKIT_CONTRACT names inside a
+            # loop or a gate — for a test run by hand
+            print(path)
+        elif as_json:
             print(json.dumps(facts, indent=2, sort_keys=True))
         else:
             for name in sorted(k for k in facts if not k.startswith("_")):
@@ -732,9 +935,16 @@ def main(argv):
         return 0
     if verb == "scaffold-reads":
         # the project's top level, from any subdirectory (never a silent all-clear)
-        reads = scaffold_reads(_top(root))
+        top = _top(root)
+        reads = scaffold_reads(top)
+        try:
+            # the hint is isolated: it never costs the scaffold_reads record
+            mreads = migration_reads(top)
+        except Exception:  # noqa: BLE001 - an advisory never fails
+            mreads = []
         if as_json:
-            record = {"advisory": ADVISORY_ID, RECORD_FIELD: reads, "line": advisory_line(reads)}
+            record = {"advisory": ADVISORY_ID, RECORD_FIELD: reads, "line": advisory_line(reads),
+                      MIGRATION_FIELD: mreads, "migration_line": migration_line(mreads)}
             print(json.dumps(record, sort_keys=True))
         else:
             line = advisory_line(reads)
@@ -742,6 +952,11 @@ def main(argv):
                 print(line)
                 for e in reads:
                     print(f"  {e['test']}: {', '.join(e['paths'])}")
+            line = migration_line(mreads)
+            if line:
+                print(line)
+                for entry in migration_lines(mreads):
+                    print(f"  {entry}")
         return 0
     print(f"phasekit-surface: unknown verb {verb!r} (facts | scaffold-reads)", file=sys.stderr)
     return 2

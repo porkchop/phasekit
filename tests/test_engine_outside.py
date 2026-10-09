@@ -606,6 +606,40 @@ class Upgrade(EngineFixture):
         self.assertEqual((proj / ".phasekit-version").read_text().strip(), "v0.19.0")
         self.assertEqual(_git(proj, "status", "--porcelain"), "")
 
+    def test_the_gate_sees_the_new_engines_contract_as_PHASEKIT_CONTRACT(self):
+        """v0.19.2: the pin bump's gate reads the declared surface by the
+        exported path — the NEW engine's — on the host and in the runner."""
+        proj = self.new_project()
+        seen = self.tmp / "gate-contract"
+        r = self.cli(proj, "upgrade", "--to", "v0.19.1",
+                     PHASEKIT_CONTRACT="/nowhere/interface.json",
+                     PHASEKIT_VERIFY_CMD=f'printf "%s" "$PHASEKIT_CONTRACT" > "{seen}"; '
+                                         'jq -e ".interface == \\"phasekit\\"" "$PHASEKIT_CONTRACT" >/dev/null')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(Path(seen.read_text()).resolve(),
+                         (self.engine("v0.19.1") / "contracts" / "interface.json").resolve())
+
+    def test_the_runner_gate_is_given_the_mounted_engines_contract(self):
+        proj = self.new_project()
+        log = self.tmp / "docker.log"
+        (self.bin / "docker").write_text(
+            '#!/usr/bin/env bash\necho "$*" >> "' + str(log) + '"\n'
+            'case "$1" in info) echo 27.0 ;; esac\nexit 0\n')
+        os.chmod(self.bin / "docker", 0o755)
+        r = self.cli(proj, "upgrade", "--to", "v0.19.1", PHASEKIT_UPGRADE_VERIFY="container",
+                     PHASEKIT_ROOTLESS_DOCKER="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        run = next(c for c in log.read_text().splitlines() if c.startswith("run "))
+        self.assertIn("-e PHASEKIT_CONTRACT=/opt/phasekit/contracts/interface.json", run)
+
+
+READS_THE_CONTRACT = ("import { readFileSync } from 'node:fs';\n"
+                      "const c = JSON.parse(readFileSync(new URL('../contracts/interface.json', "
+                      "import.meta.url), 'utf8'));\n")
+NAMES_IT_AS_DATA = ("// contracts/interface.json is read through PHASEKIT_CONTRACT\n"
+                    "const SAMPLE = \"readFileSync('docs/QUALITY_GATES.md')\";\n"
+                    "const FORBIDDEN = ['contracts/interface.json', 'scripts/run-until-done.sh'];\n")
+
 
 class Migrate(EngineFixture):
     """§9 AC5, on a fixture enriched by the PREVIOUS release (v0.18.8)."""
@@ -717,6 +751,51 @@ class Migrate(EngineFixture):
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertTrue((proj / ".scaffold" / "manifest.json").exists())
 
+    # -- v0.19.2: the pre-flight --------------------------------------------
+    def with_tests(self, proj, files):
+        for rel, text in files.items():
+            (proj / rel).parent.mkdir(parents=True, exist_ok=True)
+            (proj / rel).write_text(text)
+        _git(proj, "add", "-A")
+        _git(proj, "commit", "-qm", "tests")
+
+    def test_a_file_reading_an_engine_path_is_refused_before_the_gate_with_its_line(self):
+        proj = self.vendored()
+        self.with_tests(proj, {"test/facts.test.js": READS_THE_CONTRACT,
+                               "test/prose.test.js": NAMES_IT_AS_DATA})
+        before, head = self.snapshot(proj), _git(proj, "rev-parse", "HEAD")
+        for args in (("migrate",), ("migrate", "--dry-run")):
+            with self.subTest(args=args):
+                r = self.cli(proj, *args, PHASEKIT_VERIFY_CMD="echo GATE-RAN")
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertIn("test/facts.test.js:2: contracts/interface.json", r.stderr)
+                self.assertNotIn("prose.test.js", r.stderr + r.stdout, "data and prose are never reads")
+                self.assertIn("PHASEKIT_CONTRACT", r.stderr)
+                self.assertIn("--force", r.stderr)
+                self.assertNotIn("GATE-RAN", r.stdout + r.stderr, "refused BEFORE the gate")
+                self.assertEqual(self.snapshot(proj), before)
+                self.assertEqual(_git(proj, "rev-parse", "HEAD"), head)
+                self.assertEqual(_git(proj, "status", "--porcelain"), "")
+
+    def test_force_skips_the_pre_flight_and_the_gate_decides(self):
+        proj = self.vendored()
+        self.with_tests(proj, {"test/facts.test.js": READS_THE_CONTRACT})
+        r = self.cli(proj, "migrate", "--force")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((proj / ".phasekit-version").exists())
+
+    def test_a_project_reading_PHASEKIT_CONTRACT_migrates_and_its_gate_sees_the_engines(self):
+        proj = self.vendored()
+        self.with_tests(proj, {"test/facts.test.js": (
+            "import { readFileSync } from 'node:fs';\n"
+            "const c = JSON.parse(readFileSync(process.env.PHASEKIT_CONTRACT, 'utf8'));\n")})
+        seen = self.tmp / "gate-contract"
+        r = self.cli(proj, "migrate", PHASEKIT_VERIFY_CMD=f'printf "%s" "$PHASEKIT_CONTRACT" > "{seen}"')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        own = _git(self.clone, "describe", "--tags")
+        self.assertEqual(Path(seen.read_text()).resolve(),
+                         (self.engine(own) / "contracts" / "interface.json").resolve())
+
 
 class Plugin(EngineFixture):
     def test_install_is_idempotent(self):
@@ -807,7 +886,7 @@ class StaticPins(unittest.TestCase):
     def test_the_contract_declares_the_engine_variables(self):
         env = {e["name"] for e in json.loads((REPO_ROOT / "contracts" / "interface.json").read_text())["env"]}
         for name in ("PHASEKIT_PROJECT_DIR", "PHASEKIT_ENGINE_DOCS", "PHASEKIT_ENGINE_DIR",
-                     "PHASEKIT_ENGINE_STORE", "PHASEKIT_NO_AUTO_FETCH"):
+                     "PHASEKIT_ENGINE_STORE", "PHASEKIT_NO_AUTO_FETCH", "PHASEKIT_CONTRACT"):
             self.assertIn(name, env)
 
     def test_the_engine_reads_only_the_projects_gate_from_its_tree(self):

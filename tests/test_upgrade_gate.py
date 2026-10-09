@@ -685,7 +685,10 @@ class TheGateRunsInASessionsEnvironment(Fixture):
     def test_no_provider_means_no_mount(self):
         r = self.upgrade_clean(mode="container", docker="ready")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertNotIn("/contracts", self.run_call())
+        # v0.19.2: PHASEKIT_CONTRACT=/workspace/contracts/interface.json names the
+        # project's own file; what must be absent is the provider MOUNT
+        self.assertNotIn("dst=/contracts", self.run_call())
+        self.assertNotIn("PHASEKIT_CONTRACTS_DIR", self.run_call())
 
     def test_an_unusable_provider_refuses_before_any_run(self):
         empty = self.tmp / "empty-provider"

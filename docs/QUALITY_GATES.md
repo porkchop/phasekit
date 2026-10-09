@@ -556,7 +556,36 @@ The rule is adopted, not enforced (Bazel enforces it by hiding `.git`; enforceme
 
 ### Tests read the declared surface (v0.18.3)
 
-**A test reads this project's own tree and phasekit's DECLARED surface, never scaffold-owned files.** Scaffold-owned = `"ownership": "scaffold"` in `.scaffold/manifest.json`: the vendored loop and scripts (`scripts/run-until-done.sh`, `scripts/container-setup.sh`, …), the hooks, the scaffold docs (this file included). The declared surface is `contracts/interface.json` — its `facts` section, printed by `bash scripts/phasekit.sh facts --json` — plus its env, artifact, convention and exit-code entries. **A fact a test needs that the surface lacks is a request to phasekit, not a parse.**
+**A test reads this project's own tree and phasekit's DECLARED surface, never scaffold-owned files.** Scaffold-owned = `"ownership": "scaffold"` in `.scaffold/manifest.json`: the vendored loop and scripts (`scripts/run-until-done.sh`, `scripts/container-setup.sh`, …), the hooks, the scaffold docs (this file included). The declared surface is phasekit's contract, `contracts/interface.json` — its `facts` section, printed by `phasekit facts --json` — plus its env, artifact, convention and exit-code entries. **A fact a test needs that the surface lacks is a request to phasekit, not a parse.**
+
+**Read the contract through `$PHASEKIT_CONTRACT`, never by a project-relative path (v0.19.2).** The contract is an engine file: a pinned project (`.phasekit-version`) carries none in its tree, so `contracts/interface.json` relative to the project is ENOENT there. `PHASEKIT_CONTRACT` is its absolute path — the engine that runs: the project's own copy when vendored, the engine's when pinned — and it is exported, in both layouts, to the loop's sessions and its gate, to `phasekit verify` (host and container), and to the upgrade and migrate gate (host and runner). A test run by hand (`npm test` in a terminal) has no variable; `phasekit facts --path` prints the same path. These two snippets work in both layouts, inside the gate container, in a session and on the host:
+
+```js
+// phasekit's declared surface, in both layouts (v0.19.2)
+import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+
+const contractPath = process.env.PHASEKIT_CONTRACT
+  || execFileSync('phasekit', ['facts', '--path'], { encoding: 'utf8' }).trim();
+const contract = JSON.parse(readFileSync(contractPath, 'utf8'));
+const { facts } = contract;
+```
+
+```python
+# phasekit's declared surface, in both layouts (v0.19.2)
+import json
+import os
+import subprocess
+
+contract_path = os.environ.get("PHASEKIT_CONTRACT") or subprocess.run(
+    ["phasekit", "facts", "--path"], capture_output=True, text=True, check=True
+).stdout.strip()
+with open(contract_path, encoding="utf-8") as f:
+    contract = json.load(f)
+facts = contract["facts"]
+```
+
+The variable is the primitive (a file path: any language, no subprocess, set wherever phasekit runs a gate); the CLI is the fallback for a hand run, where it is on PATH once phasekit is installed — `--path` needs phasekit v0.19.2 or later (installed CLI for a vendored project, the pin for a pinned one; an older one prints the facts instead). A run with neither (a bare `docker run … npm test`, CI without phasekit) sets `PHASEKIT_CONTRACT` itself. A vendored project's `contracts/interface.json` still works where it is, but `phasekit migrate` refuses it (below), so switch before migrating. A supervisor's vendored provider copy (`vendor/contracts/phasekit/interface.json`, `contracts.yaml`) is the project's own file and stays.
 
 Why (queue row 1194): downstream tests that parsed the vendored loop's bash bodies, its rm lists and its quoted grep literals broke on every loop reshape that kept the behaviour — four fix rows in two weeks, each blocking a phasekit upgrade at its gate. phasekit's own suite proves every declared fact against the loop's BEHAVIOUR (`tests/test_declared_surface.py`), so a reshape that keeps the facts true cannot break a consumer that reads them, and a change to a fact is a visible, versioned contract change.
 
@@ -565,6 +594,8 @@ Why (queue row 1194): downstream tests that parsed the vendored loop's bash bodi
 - A test that RUNS a scaffold script (the project's gate, `phasekit verify`) is not reading it; this rule is about parsing its text.
 
 The rule is adopted, not enforced (enforcement would refuse, and a refusal is a stall). The `scaffold-reads` advisory names offenders: after the gate the loop prints, once per session, `ADVISORY scaffold-reads: N test file(s) read scaffold-owned files (…first 5…)` and records every offender in `artifacts/boundary-state.json` `scaffold_reads` (`[{"test": <file>, "paths": [<scaffold-owned paths it reads>]}]`); `phasekit check` prints the same advisory (its exit code is unchanged) and `phasekit scaffold-reads --json` prints the record. Never a red gate. A read is decided on the test's code (v0.18.5): a scaffold path inside a string (a planted code sample), a comment, a list of forbidden paths or an expected value is data, so a guard test that refuses scaffold reads is not itself named.
+
+**Migration readiness (v0.19.2).** In a vendored project the same advisory also prints a hint, `ADVISORY migration-readiness: N file(s) read engine files by their in-tree path (…)`, then one `file:line: path` per read: every project code file — tests, scripts and source, not only tests — that reads an engine path (the manifest's `scaffold` class, the contract included) by its in-tree path, decided by the same lexer (prose, comments, planted samples, forbidden-path lists and `fixtures/` are never named; a name a file exports bound to an engine path is followed into the files that import it). Printed by the loop, `phasekit check` and `phasekit scaffold-reads` (JSON: `migration_reads`, `migration_line`), never recorded and never a red gate. `phasekit migrate` runs the same scan as a **pre-flight** and refuses (exit 2) before it deletes anything or runs the gate, with the list and the remedy; `--force` skips it and leaves the verdict to the gate. Not seen, by design: a path built at run time, and RUNNING an engine script by its in-tree path (`bash scripts/phasekit.sh …`) — the migration's gate catches what the suite exercises.
 
 ### Stack profiles seed a real gate (v0.5.0)
 

@@ -220,7 +220,10 @@ of the vendored scripts — the commit surfaces and the gates each runs, the
 LEARNINGS credential scan (its patterns and staged-file selector), the
 completion-record lifecycle, the container's secret forwarding, the boundary
 steps, the manifest schema, the advisory identifiers. `phasekit facts --json`
-(`bash scripts/phasekit.sh facts --json` inside a project) prints it. phasekit's
+(`bash scripts/phasekit.sh facts --json` inside a project) prints it. A test reads
+the file by its absolute path, `$PHASEKIT_CONTRACT` (v0.19.2: exported by the
+loop, its gate, `phasekit verify` and the upgrade gate in both layouts; a pinned
+project has no contract in its tree), or `phasekit facts --path` by hand. phasekit's
 suite proves every fact against the loop's behaviour
 (`tests/test_declared_surface.py`), so a consumer reading the facts survives any
 reshape that keeps them true. Read the facts; never parse a scaffold-owned file

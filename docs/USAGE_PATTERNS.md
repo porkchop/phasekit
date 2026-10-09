@@ -188,9 +188,9 @@ Use for a project enriched before v0.19.0 (it has `scripts/run-until-done.sh` an
 
 Workflow:
 1. commit or stash so the tree is clean
-2. move any edits to engine files into project-owned files (`docs/project/<NAME>.md` for a process doc)
+2. move any edits to engine files into project-owned files (`docs/project/<NAME>.md` for a process doc), and switch any project file that reads an engine path by its in-tree path — `phasekit check` lists them (`ADVISORY migration-readiness`, `file:line: path`); the contract is read through `$PHASEKIT_CONTRACT` (v0.19.2)
 3. `phasekit migrate --dry-run` — the exact files it would delete, the settings change, the pin
-4. `phasekit migrate` — deletes the manifest's scaffold-class files and `.scaffold/`, strips the hook wiring from `.claude/settings.json`, writes the pin, runs the gate under the engine, one commit; never pushes. Edited engine files make it refuse unless `--discard-local`; a red gate leaves the tree exactly as it was (exit 4)
+4. `phasekit migrate` — deletes the manifest's scaffold-class files and `.scaffold/`, strips the hook wiring from `.claude/settings.json`, writes the pin, runs the gate under the engine, one commit; never pushes. Edited engine files make it refuse unless `--discard-local`; project files that read engine paths make it refuse before the gate unless `--force`; a red gate leaves the tree exactly as it was (exit 4)
 5. `phasekit check` should print `clean`; push
 
 If a supervisor dispatches the project by running its vendored `scripts/container-setup.sh`, migrate only once that supervisor resolves pins. See `docs/INSTALL_LIFECYCLE.md` § "`phasekit migrate`".

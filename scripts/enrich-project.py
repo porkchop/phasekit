@@ -1602,6 +1602,10 @@ UNVERIFIED_SUFFIX = " (unverified: --no-verify)"
 # DEFAULT_MOUNT_DIR; RUNNER_HOME is where container-setup.sh pins HOME for a
 # --user override.
 ENGINE_CONTAINER_DIR = "/opt/phasekit"
+# v0.19.2: the declared contract's absolute path, exported to every gate (the
+# loop's run-until-done.sh exports the same name to its sessions and gate)
+CONTRACT_ENV = "PHASEKIT_CONTRACT"
+CONTRACT_REL = "contracts/interface.json"
 CONTRACTS_CONTAINER_DIR = "/contracts"
 RUNNER_HOME = "/home/node"
 RUNNER_HOME_USERS = ("0", "root", "1000", "node")  # root, and the image's `node` user, own it
@@ -1729,7 +1733,8 @@ def _forward_env_args():
     for name in (n.strip() for n in raw.split(",")):
         if (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name or "")
                 and name not in ("HOME", "PATH", "CLAUDE_CONFIG_DIR", "IS_SANDBOX",
-                                 "PHASEKIT_CONTRACTS_DIR", "GIT_USER_NAME", "GIT_USER_EMAIL")
+                                 "PHASEKIT_CONTRACTS_DIR", "PHASEKIT_CONTRACT",
+                                 "GIT_USER_NAME", "GIT_USER_EMAIL")
                 and os.environ.get(name)):
             args += ["-e", name]
     return args
@@ -1935,6 +1940,10 @@ def _run_upgrade_gate(target, mode, killers, scratch, engine=None):
             session += ["--mount", _mount_arg(Path(engine).resolve(), ENGINE_CONTAINER_DIR,
                                               readonly=True)]
             preamble += f'\nexport PATH="{ENGINE_CONTAINER_DIR}/bin:$PATH"'
+        # v0.19.2: the declared contract by its absolute path, in both layouts
+        # (the engine's mount when pinned, the project's own copy when vendored)
+        session += ["-e", f"{CONTRACT_ENV}="
+                          f"{ENGINE_CONTAINER_DIR if engine is not None else '/workspace'}/{CONTRACT_REL}"]
         # Forwarded project keys first: docker's last -e wins, and the names
         # above belong to this script (the forward list also refuses them).
         argv = ["docker", "run", "--rm", "--name", name, "--entrypoint", "bash",
@@ -1955,6 +1964,8 @@ def _run_upgrade_gate(target, mode, killers, scratch, engine=None):
         env = _host_gate_env(target, scratch)
         if engine is not None:
             env["PATH"] = str(Path(engine) / "bin") + os.pathsep + env.get("PATH", "")
+        contract_root = Path(engine if engine is not None else target).resolve()
+        env[CONTRACT_ENV] = str(contract_root / CONTRACT_REL)
     try:
         proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True,
@@ -3558,10 +3569,21 @@ def _scaffold_reads_advisory(target):
         line = mod.advisory_line(reads)
     except Exception:  # noqa: BLE001 — an advisory never fails the check
         return
+    try:
+        # v0.19.2: the migration-readiness hint (what `phasekit migrate` would
+        # refuse); isolated, so it never costs the advisory above
+        mreads = mod.migration_reads(target)
+        mline = mod.migration_line(mreads)
+    except Exception:  # noqa: BLE001 — an advisory never fails the check
+        mreads, mline = [], ""
     if line:
         print(f"  {line}")
         for entry in reads:
             print(f"    {entry['test']}: {', '.join(entry['paths'])}")
+    if mline:
+        print(f"  {mline}")
+        for entry in mod.migration_lines(mreads):
+            print(f"    {entry}")
 
 
 def cmd_check_version(target_dir):

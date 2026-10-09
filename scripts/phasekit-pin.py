@@ -113,6 +113,15 @@ def enrich():
 
 # --- versions, the store, the canonical clone --------------------------------
 
+def surface():
+    """scripts/phasekit-surface.py as a module (the read-vs-literal lexer)."""
+    spec = importlib.util.spec_from_file_location(
+        "phasekit_surface_pin", ENGINE / "scripts" / "phasekit-surface.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def parse_tag(tag):
     m = TAG_RE.match(tag or "")
     return tuple(int(x) for x in m.groups()) if m else None
@@ -724,6 +733,32 @@ def migrate_plan(root):
     return sorted(set(delete)), changed, before, after
 
 
+def migrate_preflight(root):
+    """v0.19.2: before anything is deleted or the gate runs, refuse a project
+    whose OWN code files (tests, scripts, source; never the engine files the
+    migration deletes) read an engine file by its in-tree path — the
+    declared contract included. After the migration those paths are gone, so
+    each such read fails at the gate (ENOENT) or later. Decided by the
+    scaffold-reads lexer, so a path in prose, a comment, a planted sample or
+    fixture data is never named. A scan that cannot run is said and skipped:
+    the gate still decides."""
+    try:
+        mod = surface()
+        reads = mod.migration_reads(root)
+        lines, remedy = mod.migration_lines(reads), mod.REMEDY
+    except Exception as exc:  # noqa: BLE001 - the pre-flight never stands in for the gate
+        warn(f"phasekit migrate: the pre-flight scan could not run ({type(exc).__name__}); "
+             "the gate decides")
+        return
+    if reads:
+        raise PinError(
+            f"{len(reads)} project file(s) read engine files by their in-tree path; the "
+            "migration deletes those files, so these reads would fail:\n"
+            + "\n".join(f"  {line}" for line in lines)
+            + f"\nRemedy: {remedy}. Switch them, then re-run — or pass --force to migrate "
+            "anyway (the gate then decides).", EXIT_USAGE)
+
+
 def cmd_migrate(args):
     refuse_under_loop("migrate")
     root = require_project(None)
@@ -749,6 +784,8 @@ def cmd_migrate(args):
                        "(the engine's copy replaces them):\n" + lines
                        + "\nMove what you need into project-owned files (docs/project/<NAME>.md), "
                        "then re-run, or pass --discard-local.", EXIT_USAGE)
+    if not args.force:
+        migrate_preflight(root)
     tracked = set(_git(root, "ls-files").stdout.splitlines())
     to_remove = [p for p in delete if p in tracked or (root / p).exists()]
     say(f"phasekit migrate: {root.name} -> pinned {tag}")
@@ -1077,6 +1114,8 @@ def main(argv=None):
     pm.add_argument("--pin")
     pm.add_argument("--dry-run", action="store_true")
     pm.add_argument("--discard-local", action="store_true")
+    pm.add_argument("--force", action="store_true",
+                    help="skip the pre-flight that refuses project files reading engine paths")
     sub.add_parser("check")
     pu = sub.add_parser("upgrade")
     pu.add_argument("--to")

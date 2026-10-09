@@ -160,17 +160,18 @@ A pin bump can land at any time, including during an open iteration. The running
 ## `phasekit migrate`
 
 ```bash
-phasekit migrate [--dry-run] [--discard-local] [--pin TAG]
+phasekit migrate [--dry-run] [--discard-local] [--force] [--pin TAG]
 ```
 
 Converts a vendored project (one with `.scaffold/manifest.json`) to a pinned one:
 
 1. **Preconditions.** At least one commit; a clean working tree (it refuses with the dirty paths, exit 2). The pin is this phasekit's own release, or `--pin TAG`.
 2. **Local edits.** If an engine file the manifest records as `scaffold` class was edited since phasekit wrote it, or carries a standing keep-local, it lists them and refuses (exit 2): the engine's copy would replace them. Move what you need into project-owned files (`docs/project/<NAME>.md` is the companion of a process doc) and re-run, or pass `--discard-local`.
-3. **`--dry-run`** prints the plan — every file it would delete, whether `.claude/settings.json` changes, the pin — and changes nothing.
-4. **The change.** Deletes exactly the manifest's `scaffold` entries (tracked or on disk) and `.scaffold/`, prunes directories left empty, strips the entries that wire phasekit's four engine hooks (`.claude/hooks/{deny-dangerous-commands,require-verdict,wrapup-nudge,compact-reanchor}.sh`) from `.claude/settings.json` (permissions, and the project's own hooks, unchanged), and writes `.phasekit-version`. Project-owned files are not touched.
-5. **The gate.** Runs the project's gate under the engine, as `upgrade` does. Red: every byte is restored, nothing is committed, the tree is exactly as before, exit 4.
-6. **One commit** (`chore(phasekit): migrate to the engine outside the repo (vX.Y.Z)`). It never pushes.
+3. **The pre-flight (v0.19.2).** It scans the project's own tracked code files — tests, scripts and source, never the engine files it deletes — for reads of an engine path (the manifest's `scaffold` class, `contracts/interface.json` included; not `.scaffold/manifest.json`, whose name a supervisor's fixtures share — the gate catches a read of the project's own) by its in-tree path, with the scaffold-reads lexer (a path in prose, a comment, a planted sample, a forbidden-path list or `fixtures/` is data, not a read). Any found: it refuses (exit 2), changing nothing and running no gate, and prints each `file:line: path` and the remedy: read the contract through `$PHASEKIT_CONTRACT` (or `phasekit facts --path` by hand) — `docs/QUALITY_GATES.md` "Tests read the declared surface". `--force` skips the pre-flight; the gate then decides. `phasekit check` prints the same list in a vendored project as the `migration-readiness` hint, and `--dry-run` refuses exactly as the real run would.
+4. **`--dry-run`** prints the plan — every file it would delete, whether `.claude/settings.json` changes, the pin — and changes nothing.
+5. **The change.** Deletes exactly the manifest's `scaffold` entries (tracked or on disk) and `.scaffold/`, prunes directories left empty, strips the entries that wire phasekit's four engine hooks (`.claude/hooks/{deny-dangerous-commands,require-verdict,wrapup-nudge,compact-reanchor}.sh`) from `.claude/settings.json` (permissions, and the project's own hooks, unchanged), and writes `.phasekit-version`. Project-owned files are not touched.
+6. **The gate.** Runs the project's gate under the engine, as `upgrade` does (with `PHASEKIT_CONTRACT` naming the engine's contract). Red: every byte is restored, nothing is committed, the tree is exactly as before, exit 4.
+7. **One commit** (`chore(phasekit): migrate to the engine outside the repo (vX.Y.Z)`). It never pushes.
 
 Idempotent: on a pinned project it says so and does nothing. Afterwards `phasekit check` should be clean.
 

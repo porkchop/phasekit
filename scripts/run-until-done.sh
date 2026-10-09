@@ -23,6 +23,13 @@ else
 fi
 ARTIFACTS_DIR="$ROOT_DIR/artifacts"
 RUN_PHASE_SCRIPT="$ENGINE_DIR/scripts/run-phase.sh"
+# v0.19.2: phasekit's declared surface by its absolute path, the ONE way a
+# project's tests read it in both layouts (docs/QUALITY_GATES.md "Tests read
+# the declared surface"): the contract of the engine that runs — the
+# project's own copy when vendored, the engine's when pinned (outside the
+# tree). Exported to the session, the loop's gate and `phasekit verify`;
+# always this engine's, whatever the caller's environment said.
+export PHASEKIT_CONTRACT="$ENGINE_DIR/contracts/interface.json"
 # The prompt file can be overridden via the first argument.
 # Default is CONTINUE_PROMPT.txt which instructs Claude to find the
 # earliest unapproved phase automatically. KICKOFF_PROMPT.txt and
@@ -4439,6 +4446,9 @@ scaffold_reads_advisory() {
   fi
   _boundary_write '.scaffold_reads = $r | .scaffold_reads_at = $now' --argjson r "$(jq -c '.scaffold_reads' <<<"$j")"
   line="$(jq -r '.line // ""' <<<"$j" 2>/dev/null)" || line=""
+  if [[ -n "$line" ]]; then echo "$line"; fi
+  # v0.19.2: the migration-readiness hint (printed, never recorded)
+  line="$(jq -r '.migration_line // ""' <<<"$j" 2>/dev/null)" || line=""
   if [[ -n "$line" ]]; then echo "$line"; fi
   return 0
 }

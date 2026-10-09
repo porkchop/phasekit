@@ -40,7 +40,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LAYOUT_MODULES = (
     "test_boundary_state", "test_branch_squash", "test_compact_reanchor",
     "test_completion_commit_order", "test_completion_key_order",
-    "test_contracts_awareness_v070", "test_contracts_gate_v070",
+    "test_contracts_awareness_v070", "test_contracts_gate_v070", "test_declared_contract",
     "test_deadline_watchdog", "test_deadman_handoff", "test_declared_surface",
     "test_engine_outside", "test_guard_scope", "test_iteration_facts",
     "test_loop_owns_commits", "test_meta_retired", "test_multiphase_invariance", "test_no_verdict_retry",
