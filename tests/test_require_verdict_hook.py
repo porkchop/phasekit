@@ -144,6 +144,8 @@ class InertOutsideTheLoop(HookFixture):
 
     def test_an_unwritable_artifacts_dir_cannot_wedge_the_session(self):
         """Cannot count => cannot bound => must not block."""
+        if os.geteuid() == 0:
+            self.skipTest("root writes through mode bits (verify-in-container runs 0:0 rootless)")
         self.artifacts.chmod(0o500)
         self.addCleanup(self.artifacts.chmod, 0o700)
         r = self.run_hook()

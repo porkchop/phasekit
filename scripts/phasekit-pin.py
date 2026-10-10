@@ -502,13 +502,18 @@ def _has_head(root):
     return _git(root, "rev-parse", "--verify", "--quiet", "HEAD").returncode == 0
 
 
-def commit_exactly(root, paths, subject, body=None):
-    """Stage exactly PATHS (deletions included) and commit only them. The
-    index must hold nothing else (callers require a clean tree first)."""
+def stage_exactly(root, paths):
+    """Stage exactly PATHS, deletions included (idempotent)."""
     for p in paths:
         r = _git(root, "add", "--all", "--", p)
         if r.returncode != 0 and _git(root, "ls-files", "--", p).stdout.strip():
             raise PinError(f"could not stage {p}: {(r.stderr or '').strip()}")
+
+
+def commit_exactly(root, paths, subject, body=None):
+    """Stage exactly PATHS (deletions included) and commit only them. The
+    index must hold nothing else (callers require a clean tree first)."""
+    stage_exactly(root, paths)
     if _has_head(root):
         changed = _changed_paths(root)
         if changed is None:
@@ -822,8 +827,24 @@ def cmd_migrate(args):
             if p.is_file():
                 scaffold_snap[str(p.relative_to(root))] = (p.read_bytes(), stat.S_IMODE(p.stat().st_mode))
 
+    # v0.19.4: the index as it was (HEAD-identical: the tree was clean). The
+    # paths are staged before the gate, so a red path must put the index back
+    # even when `git reset` cannot run (a stale index.lock left by a killed gate).
+    index_path = Path(_git(root, "rev-parse", "--git-path", "index").stdout.strip())
+    if not index_path.is_absolute():
+        index_path = root / index_path
+    index_bytes = index_path.read_bytes() if index_path.is_file() else None
+
     def restore():
-        _git(root, "reset", "-q", "--", ".")
+        reset = _git(root, "reset", "-q", "--", ".")
+        if index_bytes is not None:
+            try:
+                index_path.write_bytes(index_bytes)
+            except OSError as exc:
+                warn(f"phasekit migrate: could not restore the git index ({exc}); "
+                     "run `git reset` before committing anything")
+        elif reset.returncode != 0:
+            warn("phasekit migrate: `git reset` failed; run it before committing anything")
         for rel, (data, mode) in {**snap, **scaffold_snap}.items():
             p = root / rel
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -845,15 +866,20 @@ def cmd_migrate(args):
         if settings_changed:
             (root / ".claude" / "settings.json").write_text(dump_settings(after), encoding="utf-8")
         (root / PIN_FILE).write_text(tag + "\n", encoding="utf-8")
+        paths = sorted(set(to_remove) | {".scaffold", PIN_FILE}
+                       | ({".claude/settings.json"} if settings_changed else set()))
+        # .scaffold/ may hold tracked files the manifest does not list (the
+        # manifest itself, a once-tracked lock): stage the directory whole.
+        # v0.19.4: staged BEFORE the gate, so the gate judges the tree the
+        # commit will hold — a project test that walks `git ls-files` and opens
+        # each path otherwise hits ENOENT on every deleted engine file (xmeo-v3,
+        # 2026-10-10). A red gate's restore() resets the index to HEAD.
+        stage_exactly(root, paths)
         result = run_gate(root, engine)
         if not report_gate(result, "migrate"):
             restore()
             warn("phasekit migrate: nothing changed (the tree is as it was).")
             return EXIT_GATE_RED
-        paths = sorted(set(to_remove) | {".scaffold", PIN_FILE}
-                       | ({".claude/settings.json"} if settings_changed else set()))
-        # .scaffold/ may hold tracked files the manifest does not list (the
-        # manifest itself, a once-tracked lock): stage the directory whole.
         sha = commit_exactly(root, paths, f"{MIGRATE_SUBJECT} ({tag})",
                              body=f"Removed {len(to_remove)} vendored engine file(s) and .scaffold/; "
                                   f"phasekit {tag} runs this project from outside the tree "

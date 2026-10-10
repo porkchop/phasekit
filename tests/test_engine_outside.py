@@ -242,8 +242,13 @@ class Init(EngineFixture):
         self.assertEqual((eng / ".engine-version").read_text().strip(), "v0.19.0")
         self.assertEqual((eng / ".engine-commit").read_text().strip(),
                          _git(self.clone, "rev-parse", "v0.19.0^{commit}"))
-        self.assertFalse(os.access(eng / "scripts" / "run-until-done.sh", os.W_OK))
-        self.assertFalse(os.access(eng, os.W_OK))
+        # Read-only means no write bit in the mode: os.access(W_OK) is True for
+        # uid 0 whatever the bits (verify-in-container runs --user 0:0 under a
+        # rootless daemon), so it cannot be the assertion.
+        write_bits = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+        for p in (eng / "scripts" / "run-until-done.sh", eng / "scripts", eng):
+            self.assertFalse(os.stat(p).st_mode & write_bits,
+                             f"{p} is writable: {stat.filemode(os.stat(p).st_mode)}")
 
     def test_the_templates_name_engine_docs_not_vendored_paths(self):
         proj = self.new_project()
@@ -726,12 +731,44 @@ class Migrate(EngineFixture):
         _git(proj, "commit", "-qam", "broken link")
         before = self.snapshot(proj)
         head = _git(proj, "rev-parse", "HEAD")
+        index = _git(proj, "ls-files", "-s")
         r = self.cli(proj, "migrate")
         self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
         self.assertEqual(_git(proj, "rev-parse", "HEAD"), head)
         self.assertEqual(self.snapshot(proj), before)
         self.assertEqual(_git(proj, "status", "--porcelain"), "")
+        self.assertEqual(_git(proj, "ls-files", "-s"), index, "the index is as it was")
         self.assertTrue((proj / ".scaffold" / "manifest.json").exists())
+
+    def test_a_red_gate_holding_index_lock_still_restores_the_index(self):
+        """Review r2 (v0.19.4): the deletions are staged before the gate, so a
+        `git reset` that cannot run must not leave them staged."""
+        proj = self.vendored()
+        head, index = _git(proj, "rev-parse", "HEAD"), _git(proj, "ls-files", "-s")
+        before = self.snapshot(proj)
+        r = self.cli(proj, "migrate", PHASEKIT_VERIFY_CMD="touch .git/index.lock; exit 1")
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        (proj / ".git" / "index.lock").unlink(missing_ok=True)
+        self.assertEqual(_git(proj, "rev-parse", "HEAD"), head)
+        self.assertEqual(_git(proj, "ls-files", "-s"), index, "the index is as it was")
+        self.assertEqual(self.snapshot(proj), before)
+        self.assertEqual(_git(proj, "status", "--porcelain"), "")
+
+    def test_the_gate_sees_the_index_the_commit_will_hold(self):
+        """v0.19.4 (xmeo-v3, 2026-10-10): a project test that walks `git
+        ls-files` and opens every path hit ENOENT on each deleted engine file,
+        because the deletions were staged only after the gate."""
+        proj = self.vendored()
+        seen = self.tmp / "gate-ls-files"
+        gate = (f'git ls-files > "{seen}"; '
+                'git ls-files -z | xargs -0 -n1 sh -c \'test -e "$0" || { echo "ENOENT $0"; exit 255; }\'')
+        r = self.cli(proj, "migrate", PHASEKIT_VERIFY_CMD=gate)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        listed = set(seen.read_text().splitlines())
+        self.assertEqual(listed, set(_git(proj, "ls-files").splitlines()),
+                         "the gate's index is the committed tree")
+        self.assertIn(".phasekit-version", listed)
+        self.assertFalse(any(p.startswith(".scaffold/") for p in listed))
 
     def test_local_changes_to_engine_files_are_refused_not_discarded(self):
         proj = self.vendored()
