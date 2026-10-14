@@ -756,6 +756,22 @@ without them, which let a credential-shaped LEARNINGS line land (and
 auto-push) via wrap-up when an identical iteration commit would have been
 refused. Any future commit path must call the same helper.
 
+**The learnings budget (v0.19.5).** Every session reads `docs/LEARNINGS.md`,
+so the loop caps it: at each approval-class landing (and in `phasekit
+verify`, which stages exactly as that landing will), a file over 12 KiB
+(12288 bytes) has whole entries moved, oldest first, to the bottom of
+`docs/LEARNINGS-ARCHIVE.md` (created if absent; an existing archive under
+another case is used) until it is within budget. An entry is a top-level
+`- ` bullet with its continuation lines, or a `## ` section when the entries
+use headings; the title and preamble (everything up to the
+`<!-- entries below` marker, else the first `---`) never move, nor does the
+newest entry. Archiving, never deleting: the two files together hold every
+original byte. The rotation runs before the verify gate, so the gate judges
+and the commit carries the rotated pair, and the credential scan above covers
+the archive like every staged `docs/LEARNINGS*.md`. Sessions are not asked to
+read the archive. A checkpoint (`phase-update`) and the watchdog's wip never
+rotate.
+
 `phase-blocked.json` supports two optional operator-courtesy fields (v0.4.7):
 `unblock_command` — the exact ready-to-run one-liner that resolves the
 blocker, transcribed from something verified this session (never composed

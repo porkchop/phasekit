@@ -10,9 +10,10 @@ Rules (also in CONTINUE_PROMPT.txt):
   code, tool quirks, decisions with non-obvious rationale.
 - **NOT for progress notes** — "implemented X", "phase N done" dies with the
   session; the phase artifacts carry that.
-- **Soft cap ~150 lines.** Over the cap, CURATE: merge related entries,
-  tighten wording, drop what later work made obvious. Never blind
-  oldest-first pruning — old environment facts are often the most durable.
+- **Newest last.** Append at the end of the file. The phasekit loop keeps
+  this file within its budget (12 KiB) by moving the OLDEST entries, whole,
+  to `docs/LEARNINGS-ARCHIVE.md` at each phase landing — archived, never
+  deleted. Merging or tightening related entries is welcome, not required.
 - **No secrets, tokens, keys, or credentials — ever.** The final-commit gate
   scans this file and will refuse the commit.
 

@@ -1793,12 +1793,205 @@ stage_all() {
   fi
 }
 
+# --- The learnings budget (v0.19.5, Aaron 2026-10-14) -----------------------
+# docs/LEARNINGS.md is read by every session, and the "curate past ~150
+# lines" instruction did not hold it: xmeo-v3's reached ~60 KB (~15k tokens a
+# session) after three curation iterations in one week changed nothing that
+# lasted. So the LOOP caps it. At every approval-class landing (and in
+# `phasekit verify`, which stages exactly as that landing will), a file over
+# LEARNINGS_BUDGET_BYTES has WHOLE entries moved, oldest first, to the bottom
+# of docs/LEARNINGS-ARCHIVE.md until it is within budget. Archiving, never
+# deleting: active + archive hold every original byte. The archive is cold
+# history — no prompt tells a session to read it.
+#
+# Bytes, not lines: what a session pays for is bytes (tokens), and xmeo's
+# file was 108 lines at 60 KB, so a line cap would never have fired on the
+# file that motivated it. 12 KiB ~ 3k tokens ~ the old ~150-line soft cap at
+# 80 columns. Entry boundaries: the entries begin after the
+# `<!-- entries below` marker (the template's), else after the first `---`
+# thematic break, else after the title; the title/preamble never moves. If
+# that region has `## ` headings, each `## ` section is an entry; otherwise
+# each top-level `- ` bullet is, continuation lines and blank lines riding
+# with the entry above them; nothing inside a code fence starts an entry.
+# "Oldest" is file order (the template's "newest last"); the newest entry
+# never moves. Bottom of the archive because the moved entries are its newest
+# (it stays newest-last, the change is a pure append, earlier bytes are never
+# rewritten). An existing archive under another case (xmeo's
+# docs/LEARNINGS-archive.md) is the archive. The commit gate's credential scan
+# already covers every staged docs/LEARNINGS*.md, the archive included.
+# Fail-open: a rotation that cannot run leaves both files as they were.
+LEARNINGS_BUDGET_BYTES=12288
+rotate_learnings() {
+  local active="$ROOT_DIR/docs/LEARNINGS.md" sz out outf rc=0
+  [[ -f "$active" && ! -L "$active" ]] || return 0
+  sz="$(wc -c < "$active" 2>/dev/null)" || return 0
+  sz="${sz//[[:space:]]/}"
+  [[ "$sz" =~ ^[0-9]+$ ]] && (( sz > LEARNINGS_BUDGET_BYTES )) || return 0
+  outf="$(mktemp)" || return 0
+  (cd "$ROOT_DIR" && python3 - "$LEARNINGS_BUDGET_BYTES" "$ARTIFACTS_DIR/scratch") >"$outf" 2>&1 <<'ROTATE_PY' || rc=$?
+import os, re, shutil, subprocess, sys, tempfile
+
+budget, scratch = int(sys.argv[1]), sys.argv[2]
+ACTIVE, ARCHIVE = "docs/LEARNINGS.md", "docs/LEARNINGS-ARCHIVE.md"
+BATCH = "## Moved from docs/LEARNINGS.md by the phasekit loop (oldest first)\n\n"
+SEED = ("# Learnings archive\n\nEntries the phasekit loop moved out of `docs/LEARNINGS.md`, whole and\n"
+        "oldest first, to keep that file within its budget. Cold history: no session\n"
+        "is asked to read this file.\n")
+
+
+def dec(b):
+    return b.decode("utf-8", "surrogateescape")
+
+
+def enc(s):
+    return s.encode("utf-8", "surrogateescape")
+
+
+def lines_of(text):
+    return re.findall(r"[^\n]*\n|[^\n]+$", text)
+
+
+def region_start(lines):
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith("<!-- entries below"):
+            return i + 1
+    fence, front = False, 0
+    if lines and lines[0].rstrip("\r\n") == "---":   # YAML front matter is preamble
+        for i in range(1, len(lines)):
+            if lines[i].rstrip("\r\n") in ("---", "..."):
+                front = i + 1
+                break
+    for i, ln in enumerate(lines):
+        if i < front:
+            continue
+        s = ln.rstrip("\r\n")
+        if s.lstrip().startswith(("```", "~~~")):
+            fence = not fence
+        elif not fence and s == "---" and (i == 0 or not lines[i - 1].strip()):
+            return i + 1
+    for i in range(front, len(lines)):
+        if lines[i].strip():
+            return i + 1 if lines[i].startswith("# ") else front
+    return front
+
+
+def entry_starts(region, test):
+    fence, out = False, []
+    for j, ln in enumerate(region):
+        s = ln.rstrip("\r\n")
+        if s.lstrip().startswith(("```", "~~~")):
+            fence = not fence
+        elif not fence and test(s):
+            out.append(j)
+    return out
+
+
+def write(path, text, scratch):
+    os.makedirs(scratch, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=scratch, prefix="learnings-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(enc(text))
+        if os.path.exists(path):
+            shutil.copymode(path, tmp)
+        else:
+            um = os.umask(0)
+            os.umask(um)
+            os.chmod(tmp, 0o666 & ~um)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+data = open(ACTIVE, "rb").read()
+if len(data) <= budget:
+    sys.exit(0)
+text = dec(data)
+lines = lines_of(text)
+rs = region_start(lines)
+region = lines[rs:]
+# Sections when the first entry is a `## ` heading (its bullets ride with
+# it); otherwise every top-level bullet AND every `## ` heading starts one,
+# so a heading added below a bullet file never freezes the bullets above it.
+def is_bullet(s):
+    return s.startswith(("- ", "* ")) or s in ("-", "*")
+
+
+starts = entry_starts(region, lambda s: s.startswith("## ") or is_bullet(s))
+if starts and region[starts[0]].startswith("## "):
+    starts = entry_starts(region, lambda s: s.startswith("## "))
+if len(starts) < 2:
+    print(f"docs/LEARNINGS.md is {len(data)} bytes, over its {budget}-byte budget, "
+          f"but has {len(starts)} movable entr{'y' if len(starts) == 1 else 'ies'}; nothing moved")
+    sys.exit(0)
+pre = "".join(lines[:rs] + region[:starts[0]])
+bounds = starts + [len(region)]
+entries = ["".join(region[bounds[k]:bounds[k + 1]]) for k in range(len(starts))]
+total, k = len(data), 0
+while total > budget and k < len(entries) - 1:
+    total -= len(enc(entries[k]))
+    k += 1
+moved, kept = "".join(entries[:k]), "".join(entries[k:])
+assert pre + moved + kept == text, "rotation would not conserve the file"
+new_active = pre + kept
+
+archive = ARCHIVE
+if not os.path.exists(archive):
+    variants = sorted(n for n in os.listdir("docs")
+                      if n.lower() == "learnings-archive.md" and n != "LEARNINGS-ARCHIVE.md")
+    if len(variants) == 1:
+        archive = "docs/" + variants[0]
+if os.path.islink(archive):
+    print(f"{archive} is a symlink; nothing moved")
+    sys.exit(0)
+if subprocess.run(["git", "check-ignore", "-q", "--", archive],
+                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+    print(f"{archive} is ignored by git, so moved entries would never be committed; nothing moved")
+    sys.exit(0)
+old = dec(open(archive, "rb").read()) if os.path.exists(archive) else SEED
+if old and not old.endswith("\n"):
+    old += "\n"
+# The archive is written first: a kill between the two writes leaves the
+# entries in BOTH files (never in neither). The rerun recognises its own
+# block at the archive's end — whole, or a prefix of it when the session
+# appended since and more entries move now — and appends only the rest.
+add = "\n" + BATCH + moved
+for j in range(k, 0, -1):
+    if old.endswith("\n" + BATCH + "".join(entries[:j])):
+        add = "".join(entries[j:k])
+        break
+if add:
+    write(archive, old + add, scratch)
+write(ACTIVE, new_active, scratch)
+print(f"docs/LEARNINGS.md was {len(data)} bytes (budget {budget}): moved its {k} oldest "
+      f"entr{'y' if k == 1 else 'ies'} to {archive}; it is now {len(enc(new_active))} bytes")
+ROTATE_PY
+  out="$(cat "$outf" 2>/dev/null)" || out=""
+  rm -f "$outf"
+  if [[ "$rc" -eq 0 ]]; then
+    [[ -z "$out" ]] || echo "run-until-done: learnings budget — $out" >&2
+  else
+    echo "run-until-done: learnings budget — docs/LEARNINGS.md is over its budget but was not rotated (nothing moved): $(printf '%s' "$out" | tail -n 1)" >&2
+  fi
+  return 0
+}
+
 stage_landing_tree() {
   # $1 = an artifact to force-add first (it may be partially gitignored), or
   # empty; $2 = "landing" (default) when the commit lands an approval-class
   # record, anything else for a checkpoint (its derived state is reset). The loop's one staging step, shared by every commit site and by
   # `phasekit verify` (v0.18.0), so the tree a model verified IS the tree the
   # commit gate judges.
+  # v0.19.5: an approval-class landing first keeps docs/LEARNINGS.md within
+  # its budget — after the session's own learnings write (the close-out
+  # order), before the verify gate, so the gate judges and the commit carries
+  # the rotated pair. Idempotent: `phasekit verify` rotates, the commit's
+  # second call finds the file within budget and the tree unchanged, so the
+  # verify memo still covers it. A checkpoint (phase-update) and the
+  # watchdog's wip never rotate.
+  if [[ "${2:-landing}" == landing ]]; then rotate_learnings; fi
   if [[ -n "${1:-}" ]]; then git add -f "$1" 2>/dev/null || true; fi
   # v0.18.2 (review round 3, MAJOR 3): `git add -A` stages NOTHING when one
   # path fails (an empty or nested repository, an unreadable file) — and the
@@ -5812,6 +6005,12 @@ wrapup_commit() {
   # ended the iteration before the boundary saw it — round-2 F5) leaves
   # with keyed deferrals like every other commit path.
   prepare_verdicts_for_landing || true
+  # v0.19.5 (review #3): a wrap-up that sweeps an unlanded approval-class
+  # record IS its landing, so it keeps the learnings budget like one.
+  if artifact_never_landed "$ARTIFACTS_DIR/phase-approval.json" \
+     || artifact_never_landed "$ARTIFACTS_DIR/project-complete.json"; then
+    rotate_learnings
+  fi
   # The loop's one staging retry rule (git_add_all): a lock left by a dead
   # writer — an ended turn's, after a take-control — is released once it is
   # old enough to be nobody's (review round 2; one rule since v0.18.2).
@@ -6361,17 +6560,17 @@ fi
 iteration=1
 
 # --- Learnings size advisory (doc-rotation descope rider, 2026-08-20) --------
-# One log line, once per session, when docs/LEARNINGS.md is over budget.
-# Advisory ONLY — never blocks, never rotates, never injects prompt text: the
-# safe maintenance is curation per the file's own header rule (merge/tighten,
-# judgment), and mechanising that was explicitly descoped
-# (foundry-meta kickoffs/KICKOFF-phasekit-doc-rotation.md). A supervisor that
-# wants scheduling watches the same file size itself.
+# One log line, once per session, when docs/LEARNINGS.md is over the advisory
+# threshold. The note itself never blocks, rotates or injects prompt text.
+# v0.19.5 reversed the 2026-08-20 descope (foundry-meta
+# kickoffs/KICKOFF-phasekit-doc-rotation.md) for one file: curation by
+# judgment did not hold LEARNINGS.md, so the landing rotates it
+# (rotate_learnings) and this note now says so.
 LEARNINGS_WARN_KB="${PHASEKIT_LEARNINGS_WARN_KB:-48}"
 if [[ -f "$ROOT_DIR/docs/LEARNINGS.md" ]] && [[ "$LEARNINGS_WARN_KB" =~ ^[0-9]+$ ]]; then
   learnings_kb=$(( $(wc -c < "$ROOT_DIR/docs/LEARNINGS.md") / 1024 ))
   if (( learnings_kb >= LEARNINGS_WARN_KB )); then
-    echo "run-until-done: note — docs/LEARNINGS.md is ${learnings_kb} KB (advisory threshold ${LEARNINGS_WARN_KB} KB). Consider a curation pass per the file's header rule (merge/tighten; never blind oldest-first pruning)." >&2
+    echo "run-until-done: note — docs/LEARNINGS.md is ${learnings_kb} KB (advisory threshold ${LEARNINGS_WARN_KB} KB). The loop moves its oldest entries, whole, to docs/LEARNINGS-ARCHIVE.md at the next phase landing (budget ${LEARNINGS_BUDGET_BYTES} bytes); a curation pass (merge/tighten) is welcome, not required." >&2
   fi
 fi
 

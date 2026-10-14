@@ -41,10 +41,11 @@ TARGETS=("$@")
 # v0.19.1: multi-phase landings (the plan parser, the evidence base).
 # v0.19.3: the process-reads record, and the adopted gate checks on the image's
 # own node (20: its piped reporter is TAP).
+# v0.19.5: the learnings rotation, on the image's python3.
 [[ ${#TARGETS[@]} -gt 0 ]] || TARGETS=("tests.test_boundary_state" "tests.test_loop_owns_commits"
   "tests.test_guard_scope" "tests.test_scaffold_reads" "tests.test_declared_surface"
   "tests.test_engine_outside" "tests.test_multiphase_invariance" "tests.test_project_tests"
-  "tests.test_adopted_checks")
+  "tests.test_adopted_checks" "tests.test_learnings_budget")
 
 command -v docker >/dev/null 2>&1 || { echo "verify-in-container: docker not found" >&2; exit 2; }
 docker image inspect "$IMAGE_NAME" >/dev/null 2>&1 || {

@@ -55,8 +55,8 @@ Operating rules:
 
 Cross-session learnings (docs/LEARNINGS.md, if present):
 - Read it EARLY — it holds what previous sessions learned the hard way (env gotchas, build flakes, design context not obvious from code).
-- Before you finish, append any durable, non-obvious discovery from THIS session as a dated bullet: what + why it matters. Do NOT record progress notes ("implemented X") — phase artifacts carry those and they die with the session.
-- If the file exceeds ~150 lines, curate: merge related entries, tighten, drop what later work made obvious. Never blind oldest-first pruning.
+- Before you finish, append any durable, non-obvious discovery from THIS session as a dated bullet at the END of the file (newest last): what + why it matters. Do NOT record progress notes ("implemented X") — phase artifacts carry those and they die with the session.
+- The loop keeps the file within its budget (12 KiB): at each phase landing it moves the OLDEST entries, whole, to docs/LEARNINGS-ARCHIVE.md — archived, not deleted, so the old "never blind oldest-first pruning" rule no longer applies. Write only durable, non-obvious lessons; merging or tightening related entries is welcome but not required.
 - Never write secrets, tokens, keys, or credentials into it — the commit gate scans it and will refuse.
 
 How to determine what is already approved:
