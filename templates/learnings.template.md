@@ -1,7 +1,9 @@
 # Learnings — {{PROJECT_NAME}}
 
+<!-- phasekit: learnings priority-ordered -->
+
 Durable, non-obvious discoveries that future sessions need. Each session
-reads this file early and appends what it learned the hard way.
+reads this file early and records what it learned the hard way.
 
 Rules (also in CONTINUE_PROMPT.txt):
 
@@ -10,13 +12,15 @@ Rules (also in CONTINUE_PROMPT.txt):
   code, tool quirks, decisions with non-obvious rationale.
 - **NOT for progress notes** — "implemented X", "phase N done" dies with the
   session; the phase artifacts carry that.
-- **Newest last.** Append at the end of the file. The phasekit loop keeps
-  this file within its budget (12 KiB) by moving the OLDEST entries, whole,
-  to `docs/LEARNINGS-ARCHIVE.md` at each phase landing — archived, never
-  deleted. Merging or tightening related entries is welcome, not required.
+- **Priority order, most important first.** This file is kept in priority
+  order (the `phasekit: learnings priority-ordered` line above says so): place
+  each new entry where it ranks. The phasekit loop keeps the file within its
+  budget (12 KiB) by moving the LOWEST-RANKED entries (the bottom), whole, to
+  `docs/LEARNINGS-ARCHIVE.md` at each phase landing — archived, never
+  deleted. Merging or tightening related entries is welcome.
 - **No secrets, tokens, keys, or credentials — ever.** The final-commit gate
   scans this file and will refuse the commit.
 
 ---
 
-<!-- entries below, newest last -->
+<!-- entries below, most important first -->

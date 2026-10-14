@@ -772,6 +772,17 @@ the archive like every staged `docs/LEARNINGS*.md`. Sessions are not asked to
 read the archive. A checkpoint (`phase-update`) and the watchdog's wip never
 rotate.
 
+**Priority order (v0.19.6).** A file whose preamble carries the line
+`<!-- phasekit: learnings priority-ordered -->` is kept most important first:
+a session places each new entry where it ranks, and the rotation moves the
+LOWEST-RANKED entries (from the bottom) instead of the oldest; its top entry
+never moves. The marker counts only in the preamble, outside a code fence.
+A file without it is chronological (newest last) and rotates oldest-first as
+above — bottom-trimming it would archive the newest lessons. A project opts
+in by reordering its file by importance and adding the line; new projects
+start with it (the template). Everything else above holds in both orders.
+Trimming stays mechanical and is never a refusal.
+
 `phase-blocked.json` supports two optional operator-courtesy fields (v0.4.7):
 `unblock_command` — the exact ready-to-run one-liner that resolves the
 blocker, transcribed from something verified this session (never composed

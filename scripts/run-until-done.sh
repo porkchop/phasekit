@@ -1820,6 +1820,19 @@ stage_all() {
 # docs/LEARNINGS-archive.md) is the archive. The commit gate's credential scan
 # already covers every staged docs/LEARNINGS*.md, the archive included.
 # Fail-open: a rotation that cannot run leaves both files as they were.
+#
+# Priority order (v0.19.6, Aaron 2026-10-14): a file whose preamble carries
+# the line `<!-- phasekit: learnings priority-ordered -->` is kept MOST
+# IMPORTANT FIRST — a session places each new entry where it ranks — and the
+# rotation moves its LOWEST-RANKED entries, i.e. from the BOTTOM, instead;
+# its top entry never moves. Judgment where it is cheap (placing one entry),
+# trimming still mechanical and never a refusal. The marker counts only in
+# the preamble (before the first entry) and never inside a code fence. A file
+# without it is chronological (newest last) and rotates oldest-first exactly
+# as in v0.19.5: bottom-trimming an unconverted file would archive the NEWEST
+# lessons, so a project opts in by reordering its file and adding the line.
+# Archive placement, conservation, idempotence and the rerun rule are the
+# same in both orders.
 LEARNINGS_BUDGET_BYTES=12288
 rotate_learnings() {
   local active="$ROOT_DIR/docs/LEARNINGS.md" sz out outf rc=0
@@ -1837,6 +1850,13 @@ BATCH = "## Moved from docs/LEARNINGS.md by the phasekit loop (oldest first)\n\n
 SEED = ("# Learnings archive\n\nEntries the phasekit loop moved out of `docs/LEARNINGS.md`, whole and\n"
         "oldest first, to keep that file within its budget. Cold history: no session\n"
         "is asked to read this file.\n")
+# v0.19.6: a priority-ordered file (the marker in its preamble) loses its
+# lowest-ranked entries, from the bottom.
+MARKER = re.compile(r"<!--\s*phasekit:\s*learnings\s+priority-ordered\s*-->")
+BATCH_P = "## Moved from docs/LEARNINGS.md by the phasekit loop (lowest-ranked)\n\n"
+SEED_P = ("# Learnings archive\n\nEntries the phasekit loop moved out of `docs/LEARNINGS.md`, whole, to\n"
+          "keep that file within its budget (the lowest-ranked entries of a file kept\n"
+          "in priority order). Cold history: no session is asked to read this file.\n")
 
 
 def dec(b):
@@ -1919,22 +1939,51 @@ def is_bullet(s):
     return s.startswith(("- ", "* ")) or s in ("-", "*")
 
 
-starts = entry_starts(region, lambda s: s.startswith("## ") or is_bullet(s))
+def starts_entry(s):
+    return s.startswith("## ") or is_bullet(s)
+
+
+starts = entry_starts(region, starts_entry)
 if starts and region[starts[0]].startswith("## "):
-    starts = entry_starts(region, lambda s: s.startswith("## "))
+    def starts_entry(s):
+        return s.startswith("## ")
+    starts = entry_starts(region, starts_entry)
 if len(starts) < 2:
     print(f"docs/LEARNINGS.md is {len(data)} bytes, over its {budget}-byte budget, "
           f"but has {len(starts)} movable entr{'y' if len(starts) == 1 else 'ies'}; nothing moved")
     sys.exit(0)
-pre = "".join(lines[:rs] + region[:starts[0]])
+pre_lines = lines[:rs] + region[:starts[0]]
+pre = "".join(pre_lines)
 bounds = starts + [len(region)]
 entries = ["".join(region[bounds[k]:bounds[k + 1]]) for k in range(len(starts))]
+n = len(entries)
+
+
+def priority_ordered(pre_lines):
+    fence = False
+    for ln in pre_lines:
+        s = ln.strip()
+        if s.startswith(("```", "~~~")):
+            fence = not fence
+        elif not fence and MARKER.fullmatch(s):
+            return True
+    return False
+
+
+priority = priority_ordered(pre_lines)
 total, k = len(data), 0
-while total > budget and k < len(entries) - 1:
-    total -= len(enc(entries[k]))
+while total > budget and k < n - 1:
+    total -= len(enc(entries[n - 1 - k] if priority else entries[k]))
     k += 1
-moved, kept = "".join(entries[:k]), "".join(entries[k:])
-assert pre + moved + kept == text, "rotation would not conserve the file"
+if priority:
+    # moved = the k lowest-ranked (bottom) entries; the top one never moves
+    batch, seed, cut = BATCH_P, SEED_P, n - k
+    kept, moved = "".join(entries[:cut]), "".join(entries[cut:])
+    assert pre + kept + moved == text, "rotation would not conserve the file"
+else:
+    batch, seed = BATCH, SEED
+    moved, kept = "".join(entries[:k]), "".join(entries[k:])
+    assert pre + moved + kept == text, "rotation would not conserve the file"
 new_active = pre + kept
 
 archive = ARCHIVE
@@ -1950,22 +1999,36 @@ if subprocess.run(["git", "check-ignore", "-q", "--", archive],
                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
     print(f"{archive} is ignored by git, so moved entries would never be committed; nothing moved")
     sys.exit(0)
-old = dec(open(archive, "rb").read()) if os.path.exists(archive) else SEED
-if old and not old.endswith("\n"):
-    old += "\n"
+old = dec(open(archive, "rb").read()) if os.path.exists(archive) else seed
 # The archive is written first: a kill between the two writes leaves the
 # entries in BOTH files (never in neither). The rerun recognises its own
-# block at the archive's end — whole, or a prefix of it when the session
-# appended since and more entries move now — and appends only the rest.
-add = "\n" + BATCH + moved
-for j in range(k, 0, -1):
-    if old.endswith("\n" + BATCH + "".join(entries[:j])):
-        add = "".join(entries[j:k])
-        break
+# block — the entries after the archive's LAST loop batch heading (either
+# order's) — and appends only the moved entries that block does not already
+# hold. v0.19.6 (review): matched by whole entry, not by a prefix/suffix
+# run, so a session's write between the kill and the rerun (a new entry at
+# the end, a lower-ranked insert, a tightened entry) never duplicates the
+# block; matched on the archive as read, so an unterminated last entry
+# still matches.
+moved_entries = entries[cut:] if priority else entries[:k]
+held = set()
+tail_at = max(old.rfind("\n" + BATCH), old.rfind("\n" + BATCH_P))
+if tail_at >= 0:
+    hdr = BATCH if old.startswith(BATCH, tail_at + 1) else BATCH_P
+    tl = lines_of(old[tail_at + 1 + len(hdr):])
+    ts = entry_starts(tl, starts_entry) + [len(tl)]
+    held = {"".join(tl[ts[i]:ts[i + 1]]) for i in range(len(ts) - 1)}
+pending = [e for e in moved_entries if e not in held]
+if len(pending) == len(moved_entries):
+    add = "\n" + batch + "".join(pending)
+else:
+    add = "".join(pending)
 if add:
+    if old and not old.endswith("\n"):
+        old += "\n"
     write(archive, old + add, scratch)
 write(ACTIVE, new_active, scratch)
-print(f"docs/LEARNINGS.md was {len(data)} bytes (budget {budget}): moved its {k} oldest "
+which = "lowest-ranked" if priority else "oldest"
+print(f"docs/LEARNINGS.md was {len(data)} bytes (budget {budget}): moved its {k} {which} "
       f"entr{'y' if k == 1 else 'ies'} to {archive}; it is now {len(enc(new_active))} bytes")
 ROTATE_PY
   out="$(cat "$outf" 2>/dev/null)" || out=""
@@ -6570,7 +6633,13 @@ LEARNINGS_WARN_KB="${PHASEKIT_LEARNINGS_WARN_KB:-48}"
 if [[ -f "$ROOT_DIR/docs/LEARNINGS.md" ]] && [[ "$LEARNINGS_WARN_KB" =~ ^[0-9]+$ ]]; then
   learnings_kb=$(( $(wc -c < "$ROOT_DIR/docs/LEARNINGS.md") / 1024 ))
   if (( learnings_kb >= LEARNINGS_WARN_KB )); then
-    echo "run-until-done: note — docs/LEARNINGS.md is ${learnings_kb} KB (advisory threshold ${LEARNINGS_WARN_KB} KB). The loop moves its oldest entries, whole, to docs/LEARNINGS-ARCHIVE.md at the next phase landing (budget ${LEARNINGS_BUDGET_BYTES} bytes); a curation pass (merge/tighten) is welcome, not required." >&2
+    # v0.19.6: the order the rotation will use (a plain line match — the
+    # rotation itself also requires the marker in the preamble, outside a fence).
+    if grep -Eq '^[[:space:]]*<!--[[:space:]]*phasekit:[[:space:]]*learnings[[:space:]]+priority-ordered[[:space:]]*-->[[:space:]]*$' "$ROOT_DIR/docs/LEARNINGS.md" 2>/dev/null; then
+      echo "run-until-done: note — docs/LEARNINGS.md is ${learnings_kb} KB (advisory threshold ${LEARNINGS_WARN_KB} KB). It is priority-ordered: the loop moves its lowest-ranked (bottom) entries, whole, to docs/LEARNINGS-ARCHIVE.md at the next phase landing (budget ${LEARNINGS_BUDGET_BYTES} bytes); merging or tightening is welcome, not required." >&2
+    else
+      echo "run-until-done: note — docs/LEARNINGS.md is ${learnings_kb} KB (advisory threshold ${LEARNINGS_WARN_KB} KB). It is chronological: the loop moves its oldest entries, whole, to docs/LEARNINGS-ARCHIVE.md at the next phase landing (budget ${LEARNINGS_BUDGET_BYTES} bytes). To keep the most important lessons instead, reorder it most important first and add the line <!-- phasekit: learnings priority-ordered --> to its preamble." >&2
+    fi
   fi
 fi
 
