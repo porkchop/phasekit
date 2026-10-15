@@ -28,12 +28,14 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1842,21 +1844,118 @@ def _tail(text, lines=UPGRADE_GATE_TAIL_LINES):
     return "\n".join((text or "").rstrip().splitlines()[-lines:])
 
 
+# === THE gate harness (v0.20.0) ===========================================
+#
+# ONE place composes "run this project's gate" — in the runner image or on the
+# host. Its callers: the vendored upgrade gate (above), the pinned upgrade and
+# migrate gates (scripts/phasekit-pin.py), and `phasekit verify --in-runner`,
+# a MEASUREMENT of the gate in the runner image at an explicit tier.
+#
+# WHY ONE. foundry-orchestrator's verify-budget witness timed a project's
+# fast tier with its own hand-built `docker run`, and that copy drifted from
+# the real gate three times in a week: the host's Python 3.14 (2026-10-11), no
+# uv on the host (10-13), and on 10-15 37 tests red in the runner because its
+# argv neither mounted the pinned engine at /opt/phasekit nor exported
+# PHASEKIT_CONTRACT. A supervisor that needs the gate's verdict or its time
+# calls the declared CLI; the environment is composed here and nowhere else.
+#
+# A MEASUREMENT IS NOT A VERDICT. `phasekit verify` (the loop's, model-facing)
+# refuses `--tier fast` once artifacts/project-complete.json exists, because
+# the loop must never approve on the fast tier. `phasekit verify --in-runner`
+# stages nothing, records no memo, spends no breaker attempt and writes no
+# artifact, so the loop can never reuse it — and it may therefore time the
+# fast tier of a committed, completed tree, which is exactly what a weekly
+# budget witness measures. It is read-only over the tree like every gate
+# (v0.14.10): a footprint is restored and makes the result red.
+
+GATE_TIERS = ("fast", "full")
+# A line the timing wrapper prints after the gate: the mark, a per-run nonce
+# (so no gate output can pass for it) and the gate's own milliseconds.
+GATE_TIME_MARK = "phasekit-gate-time"
+# Container names. Never `phasekit-<project id>-<digits>`: a supervisor reads
+# that shape as a live session (foundry-orchestrator's reconcile).
+UPGRADE_GATE_NAME = "phasekit-upgrade-gate"
+VERIFY_GATE_NAME = "phasekit-verify-gate"
+
+
+def upgrade_gate_timeout():
+    """PHASEKIT_UPGRADE_VERIFY_TIMEOUT, or the default for a non-integer."""
+    try:
+        return int(os.environ.get(UPGRADE_VERIFY_TIMEOUT_ENV)
+                   or UPGRADE_VERIFY_TIMEOUT_DEFAULT)
+    except ValueError:
+        return UPGRADE_VERIFY_TIMEOUT_DEFAULT
+
+
 def run_upgrade_gate(target, mode, killers=None, engine=None):
-    """Run the project's gate on the upgraded tree; never raises except
+    """The upgrade and migrate gate: the project's gate at its own tier (the
+    tree decides), through THE harness. Never raises except
     UpgradeInterrupted. Returns {status: passed|failed|infra, where, label,
-    detail, tail}. The gate's footprint (anything it changed outside ignored
-    paths) is restored and turns the verdict red."""
+    detail, tail, …} (see run_project_gate)."""
+    return run_project_gate(target, mode, killers=killers, engine=engine,
+                            timeout=upgrade_gate_timeout(), name_prefix=UPGRADE_GATE_NAME)
+
+
+def run_project_gate(target, mode, *, killers=None, engine=None, tier=None,
+                     timeout=UPGRADE_VERIFY_TIMEOUT_DEFAULT, name_prefix=VERIFY_GATE_NAME):
+    """THE harness: run the project's gate (scripts/phasekit-verify.sh, or
+    PHASEKIT_VERIFY_CMD) where MODE says — auto | container | host — with
+    ENGINE (a pinned project's engine directory; None = vendored, the
+    project's own copy) and TIER (None = the gate decides from the tree;
+    fast | full = passed to the gate as --fast / --full).
+
+    Never raises except UpgradeInterrupted (and ValueError for a TIER the gate
+    cannot take — see gate_command). The gate's footprint (anything it changed
+    outside ignored paths) is restored and turns the verdict red. Returns
+    {status: passed|failed|infra, where, label, detail, tail, output,
+    exit_code, timed_out, elapsed_seconds, gate_seconds, footprint, tier,
+    failing_tests, failing_tests_format}."""
+    gate_command(target, tier)  # a tier the gate cannot take is the caller's error
     try:
         scratch = _gate_scratch(target)
     except OSError as exc:
-        return {"status": "infra", "where": mode, "label": None,
-                "detail": f"no usable temporary directory for the gate ({type(exc).__name__})",
-                "tail": ""}
+        return _gate_result("infra", mode, None, tier,
+                            f"no usable temporary directory for the gate ({type(exc).__name__})")
     try:
-        return _run_upgrade_gate(target, mode, killers, scratch, engine)
+        return _run_project_gate(target, mode, killers, scratch, engine, tier, timeout,
+                                 name_prefix)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def gate_command(target, tier=None):
+    """(label, shell command) for this project's gate at TIER, or (None,
+    reason) when there is none. A tier is passed to the project's own script
+    as --fast / --full — only to a script that parses the flag (the python-uv
+    profile's gate since v0.19.3; a project's own gate may); a script that
+    does not, a PHASEKIT_VERIFY_CMD override, or a tier that is not fast or
+    full is a ValueError."""
+    label, command = resolve_upgrade_gate(target)
+    if tier is None or label is None:
+        return label, command
+    if tier not in GATE_TIERS:
+        raise ValueError(f"the tier is fast or full, not {tier!r}")
+    if label != VERIFY_DEST_PATH:
+        raise ValueError(f"a tier cannot be selected for {label} (a one-shot command takes "
+                         "no --fast/--full); unset it, or run without a tier")
+    if not gate_takes_tier(target, tier):
+        raise ValueError(f"{VERIFY_DEST_PATH} does not parse --{tier} (it would ignore it and "
+                         "run its own tier, so the measurement would be mislabelled); teach "
+                         "the gate --fast/--full (the python-uv profile's gate shows how), "
+                         "or run with --tier auto")
+    return label, f"{command} --{tier}"
+
+
+def gate_takes_tier(target, tier):
+    """Does the project's own gate parse --fast / --full? Read from its text:
+    a script that never names the flag ignores it (four of the five profile
+    gates take no arguments), and a tier it ignores would mislabel a
+    measurement — so it is refused, never passed blind (review v0.20.0 M1)."""
+    try:
+        text = (Path(target) / VERIFY_DEST_PATH).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return re.search(r"(?<![\w-])--" + re.escape(tier) + r"(?![\w-])", text) is not None
 
 
 def _gate_scratch(target):
@@ -1872,10 +1971,161 @@ def _gate_scratch(target):
     return tempfile.mkdtemp(prefix="phasekit-upgrade-gate-")
 
 
-def _run_upgrade_gate(target, mode, killers, scratch, engine=None):
+def _gate_result(status, where, label, tier, detail, tail="", **extra):
+    """One result shape for every outcome (an early refusal included)."""
+    out = {"status": status, "where": where, "label": label, "detail": detail,
+           "tail": tail, "output": "", "exit_code": None, "timed_out": False,
+           "elapsed_seconds": None, "gate_seconds": None, "footprint": [],
+           "tier": tier or "auto", "failing_tests": [], "failing_tests_format": None}
+    out.update(extra)
+    return out
+
+
+def timed_gate_script(command, nonce):
+    """The gate command wrapped so the shell that runs it reports the gate's
+    own wall time (milliseconds) on a GATE_TIME_MARK line, then exits with the
+    gate's status. The command is parsed as one string, as `bash -c` parsed
+    it before v0.20.0 (`eval` of its single-quoted text, so a compound
+    PHASEKIT_VERIFY_CMD, a heredoc or a stray `)` means what it always
+    meant), under `set -e` with pipefail inherited, in a subshell of the
+    shell docker or Popen started (so `$PPID` is still the caller)."""
+    # bash's own clock (EPOCHREALTIME, bash 5): no external `date`, which a
+    # bare host PATH may lack; a shell without it reports no time.
+    return ("set +e\n"
+            "__pk_t0=${EPOCHREALTIME:-}\n"
+            f"__pk_cmd={shlex.quote(command)}\n"
+            '( set -e; eval "$__pk_cmd" )\n'
+            "__pk_rc=$?\n"
+            "__pk_t1=${EPOCHREALTIME:-}\n"
+            "__pk_t0=${__pk_t0/[.,]/}\n"
+            "__pk_t1=${__pk_t1/[.,]/}\n"
+            'if [[ "$__pk_t0" =~ ^[0-9]+$ && "$__pk_t1" =~ ^[0-9]+$ ]]; then\n'
+            f"  printf '\\n{GATE_TIME_MARK} {nonce} %s\\n' "
+            '"$(( (10#$__pk_t1 - 10#$__pk_t0) / 1000 ))"\n'
+            "fi\n"
+            'exit "$__pk_rc"\n')
+
+
+def _split_gate_time(out, nonce):
+    """(output without the timing line, the gate's seconds or None)."""
+    pat = re.compile(r"\n?^" + re.escape(f"{GATE_TIME_MARK} {nonce} ") + r"(\d+)\n?",
+                     re.MULTILINE)
+    found = list(pat.finditer(out or ""))
+    if not found:
+        return out or "", None
+    m = found[-1]
+    return out[:m.start()] + out[m.end():], int(m.group(1)) / 1000.0
+
+
+def runner_argv(target, image, name, script, engine=None):
+    """THE runner invocation: `docker run` of the project's gate SCRIPT in
+    IMAGE with a session's environment — the project read-write at
+    /workspace (git safe.directory), the runner user (uid 0 under rootless
+    docker, IS_SANDBOX=1), HOME and CLAUDE_CONFIG_DIR as container-setup.sh
+    pins them, a global git identity written as the entrypoint writes it, the
+    contracts provider read-only at /contracts, the PHASEKIT_FORWARD_ENV keys
+    by name, a pinned project's engine read-only at /opt/phasekit (on PATH),
+    and PHASEKIT_CONTRACT naming the engine's contract (/workspace's own copy
+    when vendored). No docker socket, no credentials, no ssh agent."""
+    user = _runner_user()
+    git_name, git_email = _gate_git_identity(target)
+    session = ["-e", f"HOME={_runner_home(user)}",
+               "-e", f"CLAUDE_CONFIG_DIR={RUNNER_HOME}/.claude",
+               "-e", f"GIT_USER_NAME={git_name}",
+               "-e", f"GIT_USER_EMAIL={git_email}"]
+    if user == "0:0":
+        session += ["-e", "IS_SANDBOX=1"]
+    contracts_var, contracts_path = _contracts_source()
+    if contracts_var:
+        session += ["--mount", _mount_arg(Path(contracts_path).resolve(),
+                                          CONTRACTS_CONTAINER_DIR, readonly=True),
+                    "-e", f"PHASEKIT_CONTRACTS_DIR={CONTRACTS_CONTAINER_DIR}"]
+    preamble = GATE_IDENTITY_PREAMBLE
+    if engine is not None:
+        # v0.19.0: a pinned project's gate reaches phasekit as `phasekit`
+        # (e.g. `phasekit contracts check`): the engine read-only, on PATH.
+        session += ["--mount", _mount_arg(Path(engine).resolve(), ENGINE_CONTAINER_DIR,
+                                          readonly=True)]
+        preamble += f'\nexport PATH="{ENGINE_CONTAINER_DIR}/bin:$PATH"'
+    # v0.19.2: the declared contract by its absolute path, in both layouts
+    # (the engine's mount when pinned, the project's own copy when vendored)
+    session += ["-e", f"{CONTRACT_ENV}="
+                      f"{ENGINE_CONTAINER_DIR if engine is not None else '/workspace'}/{CONTRACT_REL}"]
+    # Forwarded project keys first: docker's last -e wins, and the names
+    # above belong to this script (the forward list also refuses them).
+    return ["docker", "run", "--rm", "--name", name, "--entrypoint", "bash",
+            "--mount", _mount_arg(Path(target).resolve()), "-w", "/workspace",
+            "--user", user,
+            *_forward_env_args(),
+            "-e", "GIT_CONFIG_COUNT=1",
+            "-e", "GIT_CONFIG_KEY_0=safe.directory",
+            "-e", "GIT_CONFIG_VALUE_0=*",
+            *session,
+            image, "-eo", "pipefail", "-c",
+            preamble + "\n" + script]
+
+
+# Failing test ids in a gate's output. pytest's short summary (on by default:
+# -r fE) prints `FAILED <nodeid> - <message>` and `ERROR <nodeid or path> -
+# <message>`; unittest prints `FAIL: <name> (<dotted where>)`.
+# unittest prints `FAIL: <name> (<where>)` (3.11+: where ends with .name), a
+# subTest adds ` (<params>)` or ` [<msg>]`, and a module that fails to import
+# is `ERROR: <dotted.module> (unittest.loader._FailedTest.<dotted.module>)`.
+# Its final `FAILED (failures=N, errors=M)` is a summary, never an id.
+_PYTEST_FAIL_RE = re.compile(r"^(?:FAILED|ERROR) (?!\()(\S.*)$")
+_UNITTEST_FAIL_RE = re.compile(
+    r"^(?:FAIL|ERROR): ([A-Za-z_][\w.]*) \(([\w.]+)\)(?: \(.*\)| \[.*\])?\s*$")
+_UNITTEST_IMPORT_FAILURE = "unittest.loader._FailedTest"
+
+
+def _pytest_id(rest):
+    """The node id at the head of a pytest summary line's remainder. The
+    message follows ` - `; a parametrize id may itself contain ` - `, so an
+    id with an unclosed `[` runs to the `]` that ends it."""
+    head = rest.split(" - ", 1)[0].strip()
+    if "[" in head and not head.endswith("]"):
+        end = rest.find("] - ")
+        if end >= 0:
+            return rest[:end + 1].strip()
+        if rest.rstrip().endswith("]"):
+            return rest.rstrip()
+        return None
+    return head or None
+
+
+def failing_test_ids(output):
+    """(every failing test id in OUTPUT, in order and once each; the format
+    they were read in — pytest | unittest | pytest+unittest — or None)."""
+    ids, kinds = [], []
+    for line in (output or "").splitlines():
+        line = line.rstrip()
+        m = _UNITTEST_FAIL_RE.match(line)
+        if m:
+            name, where = m.groups()
+            if where.startswith(_UNITTEST_IMPORT_FAILURE):
+                tid = name  # the module that failed to load
+            else:
+                tid = where if where.endswith("." + name) else f"{where}.{name}"
+            kind = "unittest"
+        else:
+            m = _PYTEST_FAIL_RE.match(line)
+            if not m:
+                continue
+            tid, kind = _pytest_id(m.group(1)), "pytest"
+        if tid and tid not in ids:
+            ids.append(tid)
+            if kind not in kinds:
+                kinds.append(kind)
+    fmt = "+".join(k for k in ("pytest", "unittest") if k in kinds) or None
+    return ids, fmt
+
+
+def _run_project_gate(target, mode, killers, scratch, engine, tier, timeout, name_prefix):
     target = Path(target).resolve()
     killers = killers if killers is not None else []
-    label, command = resolve_upgrade_gate(target)
+    label, command = gate_command(target, tier)
+    if label is None:
+        return _gate_result("infra", mode, None, tier, f"no gate to run: {command}")
     image = (os.environ.get(RUNNER_IMAGE_ENV) or RUNNER_IMAGE_DEFAULT).strip()
     where = mode
     if mode in ("auto", "container"):
@@ -1888,101 +2138,80 @@ def _run_upgrade_gate(target, mode, killers, scratch, engine=None):
             why = {"absent": "docker is not installed",
                    "unreachable": "the docker daemon did not answer"}.get(
                        state, f"the runner image '{image}' is not present")
-            return {"status": "infra", "where": "container", "label": label,
-                    "detail": f"{why}; refusing to run the gate on the host. Build the "
-                              "image (bash scripts/container-setup.sh build), or set "
-                              f"{UPGRADE_VERIFY_ENV}=host where running it bare is safe",
-                    "tail": ""}
+            return _gate_result(
+                "infra", "container", label, tier,
+                f"{why}; refusing to run the gate on the host. Build the "
+                "image (bash scripts/container-setup.sh build), or set "
+                f"{UPGRADE_VERIFY_ENV}=host where running it bare is safe")
     contracts_var, contracts_path = _contracts_source()
     if contracts_var:  # host or container: a session would refuse it either way
         unusable = _contracts_unusable(contracts_var, contracts_path)
         if unusable:
-            return {"status": "infra", "where": where, "label": label,
-                    "detail": f"{unusable}; a session would refuse the same mount "
-                              "(scripts/container-setup.sh). Pass a readable contracts tree, "
-                              "or leave it unset",
-                    "tail": ""}
-    try:
-        timeout = int(os.environ.get(UPGRADE_VERIFY_TIMEOUT_ENV)
-                      or UPGRADE_VERIFY_TIMEOUT_DEFAULT)
-    except ValueError:
-        timeout = UPGRADE_VERIFY_TIMEOUT_DEFAULT
+            return _gate_result(
+                "infra", where, label, tier,
+                f"{unusable}; a session would refuse the same mount "
+                "(scripts/container-setup.sh). Pass a readable contracts tree, "
+                "or leave it unset")
 
     try:
         before = _dirty_state(target)
     except RuntimeError as exc:
-        return {"status": "infra", "where": where, "label": label,
-                "detail": f"cannot observe the tree, so a footprint would go unseen ({exc})",
-                "tail": ""}
+        return _gate_result("infra", where, label, tier,
+                            f"cannot observe the tree, so a footprint would go unseen ({exc})")
     before_snap = _snapshot(target, sorted(before)) if before else {}
     index_before = _index_state(target)
 
+    nonce = hashlib.sha256(os.urandom(16)).hexdigest()[:16]
+    script = timed_gate_script(command, nonce)
     name = None
     if where == "container":
-        name = (f"phasekit-upgrade-gate-{os.getpid()}-"
+        name = (f"{name_prefix}-{os.getpid()}-"
                 f"{int(datetime.now(timezone.utc).timestamp() * 1000)}")
-        user = _runner_user()
-        git_name, git_email = _gate_git_identity(target)
-        session = ["-e", f"HOME={_runner_home(user)}",
-                   "-e", f"CLAUDE_CONFIG_DIR={RUNNER_HOME}/.claude",
-                   "-e", f"GIT_USER_NAME={git_name}",
-                   "-e", f"GIT_USER_EMAIL={git_email}"]
-        if user == "0:0":
-            session += ["-e", "IS_SANDBOX=1"]
-        if contracts_var:
-            session += ["--mount", _mount_arg(Path(contracts_path).resolve(),
-                                              CONTRACTS_CONTAINER_DIR, readonly=True),
-                        "-e", f"PHASEKIT_CONTRACTS_DIR={CONTRACTS_CONTAINER_DIR}"]
-        preamble = GATE_IDENTITY_PREAMBLE
-        if engine is not None:
-            # v0.19.0: a pinned project's gate reaches phasekit as `phasekit`
-            # (e.g. `phasekit contracts check`): the engine read-only, on PATH.
-            session += ["--mount", _mount_arg(Path(engine).resolve(), ENGINE_CONTAINER_DIR,
-                                              readonly=True)]
-            preamble += f'\nexport PATH="{ENGINE_CONTAINER_DIR}/bin:$PATH"'
-        # v0.19.2: the declared contract by its absolute path, in both layouts
-        # (the engine's mount when pinned, the project's own copy when vendored)
-        session += ["-e", f"{CONTRACT_ENV}="
-                          f"{ENGINE_CONTAINER_DIR if engine is not None else '/workspace'}/{CONTRACT_REL}"]
-        # Forwarded project keys first: docker's last -e wins, and the names
-        # above belong to this script (the forward list also refuses them).
-        argv = ["docker", "run", "--rm", "--name", name, "--entrypoint", "bash",
-                "--mount", _mount_arg(target), "-w", "/workspace",
-                "--user", user,
-                *_forward_env_args(),
-                "-e", "GIT_CONFIG_COUNT=1",
-                "-e", "GIT_CONFIG_KEY_0=safe.directory",
-                "-e", "GIT_CONFIG_VALUE_0=*",
-                *session,
-                image, "-eo", "pipefail", "-c",
-                preamble + "\n" + command]
+        argv = runner_argv(target, image, name, script, engine)
         cwd = None
         env = None
     else:
-        argv = ["bash", "-eo", "pipefail", "-c", command]
+        argv = ["bash", "-eo", "pipefail", "-c", script]
         cwd = str(target)
         env = _host_gate_env(target, scratch)
         if engine is not None:
             env["PATH"] = str(Path(engine) / "bin") + os.pathsep + env.get("PATH", "")
         contract_root = Path(engine if engine is not None else target).resolve()
         env[CONTRACT_ENV] = str(contract_root / CONTRACT_REL)
+    started = time.monotonic()
     try:
         proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True,
+                                stderr=subprocess.STDOUT, text=True, errors="replace",
                                 start_new_session=True)
     except OSError as exc:
-        return {"status": "infra", "where": where, "label": label,
-                "detail": f"could not start the gate ({type(exc).__name__})", "tail": ""}
+        return _gate_result("infra", where, label, tier,
+                            f"could not start the gate ({type(exc).__name__})")
 
     def kill():
         # The whole process group on the host; the named container under docker
         # (killing the docker CLIENT does not stop the container).
         if name:
-            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=120)
+            # a wedged daemon must not turn the harness into a traceback
+            # (review v0.20.0 m5): the client is killed below either way
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=120)
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
+
+    def settle():
+        """Restore the gate's footprint; return its paths. The index first:
+        the worktree restore checks tracked paths out FROM the index, so a
+        gate that edited-and-staged a file would otherwise have its own
+        content checked back out (review r3)."""
+        index_touched = []
+        index_after = _index_state(target)
+        if index_before is not None and (index_after is None
+                                         or index_after[0] != index_before[0]):
+            Path(index_before[1]).write_bytes(index_before[2])
+            index_touched = ["(the git index)"]
+        return _restore_footprint(target, before, before_snap) + index_touched
 
     killers.append(kill)
     try:
@@ -1996,6 +2225,7 @@ def _run_upgrade_gate(target, mode, killers, scratch, engine=None):
                 out, _ = proc.communicate(timeout=30)
             except subprocess.TimeoutExpired:  # something escaped the group holds the pipe
                 out = ""
+        elapsed = round(time.monotonic() - started, 3)
         # A green gate may still have left background children in its group:
         # they must not write after the footprint check (review r2). A child
         # that setsid()s out of the group is beyond reach — declined, recorded.
@@ -2004,42 +2234,45 @@ def _run_upgrade_gate(target, mode, killers, scratch, engine=None):
                 os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
+    except UpgradeInterrupted:
+        # The handler has stopped the gate; a measurement interrupted
+        # mid-run must leave the tree as it found it, like a finished one.
+        with contextlib.suppress(Exception):
+            settle()
+        raise
     finally:
         killers.remove(kill)
-
-    # The index first: the worktree restore below checks tracked paths out
-    # FROM the index, so a gate that edited-and-staged a file would otherwise
-    # have its own content checked back out (review r3).
-    index_touched = []
-    index_after = _index_state(target)
-    if index_before is not None and (index_after is None or index_after[0] != index_before[0]):
-        Path(index_before[1]).write_bytes(index_before[2])
-        index_touched = ["(the git index)"]
+    out, gate_seconds = _split_gate_time(out, nonce)
+    failing, failing_fmt = failing_test_ids(out)
+    measured = {"output": out, "exit_code": None if timed_out else proc.returncode,
+                "timed_out": timed_out, "elapsed_seconds": elapsed,
+                "gate_seconds": gate_seconds, "failing_tests": failing,
+                "failing_tests_format": failing_fmt}
     try:
-        footprint = _restore_footprint(target, before, before_snap) + index_touched
+        footprint = settle()
     except RuntimeError as exc:
-        return {"status": "infra", "where": where, "label": label,
-                "detail": f"cannot observe the tree after the gate ({exc})", "tail": _tail(out)}
+        return _gate_result("infra", where, label, tier,
+                            f"cannot observe the tree after the gate ({exc})", _tail(out),
+                            **measured)
     if timed_out:
-        verdict = {"status": "failed", "detail": f"timed out after {timeout}s"}
+        verdict = ("failed", f"timed out after {timeout}s")
     elif name and proc.returncode == RUNNER_START_FAILED_RC and GATE_SETUP_FAILED_MARK in (out or ""):
-        verdict = {"status": "infra",
-                   "detail": "the gate's session setup failed in the runner (its git identity "
-                             "could not be written; see the tail)"}
+        verdict = ("infra", "the gate's session setup failed in the runner (its git identity "
+                            "could not be written; see the tail)")
     elif name and proc.returncode == RUNNER_START_FAILED_RC:
-        verdict = {"status": "infra",
-                   "detail": f"the runner could not start (docker exit {RUNNER_START_FAILED_RC})"}
+        verdict = ("infra", f"the runner could not start (docker exit {RUNNER_START_FAILED_RC})")
     elif proc.returncode != 0:
-        verdict = {"status": "failed", "detail": f"exit {proc.returncode}"}
+        verdict = ("failed", f"exit {proc.returncode}")
     elif footprint:
-        verdict = {"status": "failed",
-                   "detail": "the gate wrote into the tree (restored): " + ", ".join(footprint[:8])
+        verdict = ("failed",
+                   "the gate wrote into the tree (restored): " + ", ".join(footprint[:8])
                    + (" …" if len(footprint) > 8 else "")
                    + ". A verify gate is read-only over the tree; its output belongs "
-                   "under an ignored path"}
+                   "under an ignored path")
     else:
-        verdict = {"status": "passed", "detail": "exit 0"}
-    return {**verdict, "where": where, "label": label, "tail": _tail(out)}
+        verdict = ("passed", "exit 0")
+    return _gate_result(verdict[0], where, label, tier, verdict[1], _tail(out),
+                        footprint=footprint, **measured)
 
 
 def _dirty_state(target):

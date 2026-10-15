@@ -231,7 +231,8 @@ class GreenGateCommits(Fixture):
         run = next(c for c in self.docker_calls() if c.startswith("run "))
         self.assertIn(f"--user {os.getuid()}:{os.getgid()}", run)
         self.assertIn("-eo pipefail -c mkdir -p", run)  # the identity preamble, then the gate
-        self.assertTrue(run.endswith("\\nbash scripts/phasekit-verify.sh"), run)
+        # v0.20.0: through the shared harness's timing wrapper, under set -e
+        self.assertIn("\\n__pk_cmd='bash scripts/phasekit-verify.sh'\\n( set -e; eval \"$__pk_cmd\" )", run)
 
     def test_a_manifest_only_re_run_runs_no_gate(self):
         self.assertEqual(self.upgrade().returncode, 0)

@@ -231,7 +231,7 @@
       "read_by": ["scripts/enrich-project.py"],
       "default": "scaffold-runner",
       "container_forwarded": false,
-      "semantics": "v0.16.0. The runner image the upgrade gate uses in auto and container modes; the project is mounted read-write at /workspace with git safe.directory set. v0.16.2: a session's environment — HOME=/home/node for uid 0 or 1000 (a throwaway HOME otherwise), CLAUDE_CONFIG_DIR, IS_SANDBOX=1 as root, a global git identity (GIT_USER_NAME/GIT_USER_EMAIL, else the repo's, else 'phasekit upgrade'), and the contracts provider read-only at /contracts."
+      "semantics": "v0.16.0. The runner image the upgrade gate uses in auto and container modes (v0.20.0: and `phasekit verify --in-runner`, the same harness); the project is mounted read-write at /workspace with git safe.directory set. v0.16.2: a session's environment — HOME=/home/node for uid 0 or 1000 (a throwaway HOME otherwise), CLAUDE_CONFIG_DIR, IS_SANDBOX=1 as root, a global git identity (GIT_USER_NAME/GIT_USER_EMAIL, else the repo's, else 'phasekit upgrade'), and the contracts provider read-only at /contracts."
     },
     {
       "name": "CLAUDE_MODE",
@@ -1286,7 +1286,7 @@
       "summary": "v0.19.2. How a project's tests find this file in both layouts: the exported absolute path (env entry PHASEKIT_CONTRACT), or the CLI (`phasekit facts --path`) when run by hand; and the migration-readiness hint and pre-flight that name project code still reading an engine path by its in-tree path.",
       "env": "PHASEKIT_CONTRACT",
       "cli": "phasekit facts --path",
-      "exported_by": ["the loop (its sessions and gate)", "phasekit verify", "the upgrade and migrate gate (host and runner)"],
+      "exported_by": ["the loop (its sessions and gate)", "phasekit verify", "the upgrade and migrate gate (host and runner)", "phasekit verify --in-runner (v0.20.0, the same harness)"],
       "hint_advisory": "migration-readiness",
       "hint_line_prefix": "ADVISORY migration-readiness: ",
       "hint_json_fields": ["migration_reads", "migration_line"],
@@ -1336,6 +1336,45 @@
       },
       "proven_by": [
         "tests/test_declared_surface.py::LoopLines"
+      ]
+    },
+    "verify_in_runner": {
+      "summary": "v0.20.0. `phasekit verify --in-runner`: THE declared way to run a project's gate in the runner image from outside a session — a supervisor's witness or an operator. It is the same harness the upgrade and migrate gates use (scripts/enrich-project.py run_project_gate; one composer, runner_argv): the project read-write at /workspace, a pinned project's engine read-only at /opt/phasekit and on PATH (vendored: the project's own copy, nothing mounted), PHASEKIT_CONTRACT set to that engine's contract, the contracts provider (PHASEKIT_CONTRACTS_MOUNT, else PHASEKIT_CONTRACTS_DIR) read-only at /contracts, the PHASEKIT_FORWARD_ENV keys by name, a global git identity, and the runner user (uid 0 under rootless docker, HOME=/home/node, IS_SANDBOX=1). Never the host: no docker, a stopped daemon or no image is exit 5. A MEASUREMENT, not a verdict: it stages nothing, records no memo or artifact and spends no breaker attempt, so the loop never reuses it — and therefore `--tier fast` is honoured on a tree carrying artifacts/project-complete.json, which the loop's `phasekit verify --tier fast` refuses (exit 2) so the loop never approves on fast. Read-only over the tree (verify-gate-read-only): a footprint is restored and the result is red. Served by the installed phasekit CLI (scripts/phasekit-pin.py verify-runner) against the project's pinned engine, in either layout.",
+      "cli": "phasekit verify --in-runner",
+      "flags": {
+        "--tier": "auto (default: no flag, the gate decides from the tree) | fast | full (passed to scripts/phasekit-verify.sh as --fast / --full, only when that script names the flag — the python-uv profile's gate does, the other profiles' gates take no arguments; otherwise, and for a PHASEKIT_VERIFY_CMD gate, exit 2)",
+        "--json": "one JSON object on stdout (json_keys); the gate's own output on stderr. Without it: the output, then a summary line starting `phasekit verify --in-runner: GREEN|RED|NOT RUN`, then every failing id",
+        "--timeout": "seconds before the gate is stopped and read as red (timed_out true); default 1800"
+      },
+      "tiers": ["auto", "fast", "full"],
+      "schema": "phasekit-verify-in-runner/1",
+      "json_keys": ["schema", "status", "exit_code", "timed_out", "tier", "elapsed_seconds", "gate_seconds", "failing_tests", "failing_tests_format", "footprint", "label", "where", "layout", "engine", "image", "detail", "tail"],
+      "status": ["passed", "failed", "infra"],
+      "fields": {
+        "exit_code": "the gate's own exit status; null when it did not run or timed out",
+        "elapsed_seconds": "wall time of the whole runner call on the host (docker start included)",
+        "gate_seconds": "the gate command's own wall time measured inside the runner (bash EPOCHREALTIME around it), null when unavailable — the figure to compare with a tier's budget",
+        "failing_tests": "EVERY failing test id the gate printed, in order, once each: pytest short-summary `FAILED <id>` / `ERROR <id>` lines (a parametrize id may contain ` - `; `FAILED (…)` is a summary, not an id) and unittest `FAIL: name (where)` / `ERROR: name (where)` lines (a subTest's suffix dropped; a module that failed to import is its dotted name); [] when green or when the gate prints none — `tail` (its last 40 lines) is then the evidence",
+        "failing_tests_format": "pytest | unittest | pytest+unittest | null",
+        "footprint": "paths the gate changed in the tree (restored); non-empty makes status failed",
+        "engine": "the pinned release tag, null in a vendored project"
+      },
+      "exit_codes": {
+        "0": "the gate was green (exit 0 and no footprint)",
+        "2": "usage: a bad flag or tier, a tier for a PHASEKIT_VERIFY_CMD gate or for a scripts/phasekit-verify.sh that never names --fast/--full (it would ignore the flag and mislabel the measurement), a tree that is not clean (uncommitted, staged or untracked changes: measure a clone or a project at rest — the footprint restore would otherwise revert a writer's work), run inside a loop session, not inside a phasekit project, a malformed pin",
+        "4": "the gate was not green: red, a footprint, or timed out",
+        "5": "not run: no docker CLI, the daemon did not answer, the runner image is absent, the runner could not start (docker 125) or its session setup failed, an unusable contracts provider, no gate configured, or interrupted (SIGINT/SIGTERM: the runner is removed and the footprint restored; a SIGKILL of the CLI cannot remove its container — stop it with SIGTERM)",
+        "6": "the pinned engine is not installed and was not fetched"
+      },
+      "container_name_prefix": "phasekit-verify-gate-",
+      "proven_by": [
+        "tests/test_verify_in_runner.py::TheRunnerHasASessionsEnvironment",
+        "tests/test_verify_in_runner.py::OneComposer",
+        "tests/test_verify_in_runner.py::TheFastTierIsMeasuredOnACompletedTree",
+        "tests/test_verify_in_runner.py::RedGivesEveryFailingId",
+        "tests/test_verify_in_runner.py::ReadOnlyOverTheTree",
+        "tests/test_verify_in_runner.py::NeverBare",
+        "tests/test_verify_in_runner.py::TheSurfaceIsDeclared"
       ]
     },
     "verify_breaker": {
@@ -1452,7 +1491,7 @@
         "2": "lock contention — another enrich-project.py holds the target's lock; v0.18.0 `verify`/`scope`: usage error, not run inside a phasekit project, or `verify --tier` naming the tier that does not run now; v0.18.1 `verify`: not run — git's index is locked (the message names the index.lock path, its age and what to do; nothing was staged or run, the lock is never removed by it)",
         "3": "drift detected by the check verb (DRIFT / MISSING / TEMPLATE DRIFT); v0.18.0 `verify`: skipped — the tier's measured P90 is longer than a tool call may run (the commit gate runs it)"
       },
-      "passthrough": "The CLI execs scripts/enrich-project.py, so these are the engine's codes; a missing PHASEKIT_PYTHON interpreter surfaces as the shell's 126/127. v0.19.0: in a PINNED project (.phasekit-version, no vendored loop) `check`, `upgrade`, `init`, `migrate`, `engines`, `plugin`, `docs` exec scripts/phasekit-pin.py (its codes below), and `verify`/`scope`/`loop`/`run`/`container`/`contracts` exec the pinned engine's own scripts after resolving it (6 when the pin is not installed and was not fetched)."
+      "passthrough": "The CLI execs scripts/enrich-project.py, so these are the engine's codes; a missing PHASEKIT_PYTHON interpreter surfaces as the shell's 126/127. v0.19.0: in a PINNED project (.phasekit-version, no vendored loop) `check`, `upgrade`, `init`, `migrate`, `engines`, `plugin`, `docs` exec scripts/phasekit-pin.py (its codes below), and `verify`/`scope`/`loop`/`run`/`container`/`contracts` exec the pinned engine's own scripts after resolving it (6 when the pin is not installed and was not fetched). v0.20.0: `verify --in-runner` (either layout) execs scripts/phasekit-pin.py verify-runner — its codes (facts.verify_in_runner.exit_codes)."
     },
     "scripts/phasekit-pin.py": {
       "codes": {
@@ -1460,7 +1499,8 @@
         "1": "error (git or I/O failure, a commit that failed)",
         "2": "usage, or not a project of the right kind: a bad or pre-v0.19.0 tag, a dirty tree or staged index for migrate/upgrade, local changes to engine files migrate would discard (without --discard-local), a vendored project given to init",
         "3": "`check` found a leftover in a pinned project: a tracked engine path (anything the engine's manifest calls scaffold, or .scaffold/), or .claude/settings.json still wiring vendored hook paths; `plugin status`: not installed",
-        "4": "the project's gate was not green under the new engine (migrate, upgrade): nothing changed — the tree, the index and the pin are as they were",
+        "4": "the project's gate was not green under the new engine (migrate, upgrade): nothing changed — the tree, the index and the pin are as they were; v0.20.0 `verify-runner` (`phasekit verify --in-runner`): the gate was not green (red, a footprint, or timed out)",
+        "5": "v0.20.0, `verify-runner` only: the gate did not run (no docker, no daemon, no runner image, the runner could not start, an unusable contracts provider, or no gate configured) — never a host run",
         "6": "the pinned engine is not installed and was not fetched (`check` never fetches; elsewhere PHASEKIT_NO_AUTO_FETCH=1, or the tag is in neither the canonical clone nor its origin): the message names `phasekit engines install <tag>`"
       },
       "passthrough": "None: every exit is one of these."

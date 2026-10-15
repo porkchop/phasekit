@@ -4440,7 +4440,8 @@ phasekit_verify() {
     case "$1" in
       --tier) req="${2:-}"; shift; [[ $# -gt 0 ]] && shift ;;
       --tier=*) req="${1#--tier=}"; shift ;;
-      -h|--help) echo "usage: phasekit verify [--tier fast|full]"; return 0 ;;
+      -h|--help) echo "usage: phasekit verify [--tier fast|full]   (a measurement in the runner image: phasekit verify --in-runner [--tier auto|fast|full] [--json])"; return 0 ;;
+      --in-runner) echo "phasekit verify: --in-runner is served by the phasekit CLI, not the loop — run \`phasekit verify --in-runner\` (v0.20.0) from the host" >&2; return 2 ;;
       *) echo "phasekit verify: unknown argument '$1' (usage: phasekit verify [--tier fast|full])" >&2; return 2 ;;
     esac
   done

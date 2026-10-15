@@ -109,6 +109,7 @@ phasekit loop                    # the phase loop on the host
 phasekit run                     # the phase loop in the container
 phasekit container build|setup|run|shell   # the container commands for this project
 phasekit verify                  # run this project's gate exactly as the loop's commit will (a green run is reused)
+phasekit verify --in-runner --tier fast --json   # MEASURE the gate in the runner image (supervisors; never reused by the loop)
 phasekit scope [--phase P]       # what this iteration (or one phase) changed, from its base and evidence
 phasekit facts [--json]          # the facts phasekit declares for downstream tests
 phasekit contracts check|refresh|status   # the cross-project contracts checker

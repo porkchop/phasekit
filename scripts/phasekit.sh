@@ -13,6 +13,13 @@
 #   phasekit roadmap next|done|init  the OPTIONAL docs/ROADMAP.md (see scripts/phasekit-roadmap.py)
 #   phasekit verify [--tier fast|full]  run THIS project's gate exactly as the loop's
 #                                 commit gate will; a green verdict is reused by it
+#   phasekit verify --in-runner [--tier auto|fast|full] [--json] [--timeout S]
+#                                 (v0.20.0) MEASURE this project's gate in the runner
+#                                 image, composed exactly as the upgrade gate composes
+#                                 it (pinned engine at /opt/phasekit, PHASEKIT_CONTRACT,
+#                                 contracts, identity, runner user); never a verdict
+#                                 the loop reuses, so any tier on any tree. Served by
+#                                 this CLI (scripts/phasekit-pin.py verify-runner)
 #   phasekit scope [--iteration N] [--phase P] [--json]
 #                                 what this iteration (or one phase) changed
 #   phasekit facts [--json]       the facts phasekit DECLARES for downstream tests
@@ -263,6 +270,17 @@ case "$verb" in
     self_update
     ;;
   verify|scope)
+    # v0.20.0: `verify --in-runner` is not the loop's verify — it is THE gate
+    # harness (scripts/enrich-project.py run_project_gate) run by this CLI in
+    # the runner image, in either layout; the loop's verify stays as below.
+    if [[ "$verb" == verify ]]; then
+      for arg in "${@:2}"; do
+        if [[ "$arg" == --in-runner ]]; then
+          require_pin_tool "verify --in-runner"
+          exec "${PIN[@]}" verify-runner "${@:2}"
+        fi
+      done
+    fi
     # Model-facing (v0.18.0): run by the PROJECT's own loop code — the copy of
     # scripts/run-until-done.sh in the repository the command is run from —
     # so the gate, the staging and the facts are that project's, exactly as

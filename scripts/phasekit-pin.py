@@ -27,6 +27,11 @@ Verbs (run by scripts/phasekit.sh; all operate on the project around the cwd):
   upgrade [--to TAG]      a pin bump through the project's gate, one commit
   plugin install|status   the Claude Code plugin for interactive sessions
   docs                    print the engine's docs directory
+  verify-runner [--tier auto|fast|full] [--json] [--timeout S]
+                          (v0.20.0; `phasekit verify --in-runner`) run the
+                          project's gate in the runner image exactly as the
+                          upgrade gate does — a MEASUREMENT, never a verdict
+                          the loop reuses; either layout
 
 Auto-fetch: a pin the store lacks is installed on first use from the canonical
 clone's own tags (git objects, so the bytes are the tag's tree); a tag the
@@ -36,7 +41,9 @@ clone lacks is fetched from the clone's `origin` first. PHASEKIT_NO_AUTO_FETCH=1
 
 Exit codes: 0 ok; 1 error; 2 usage / not a project of the right kind; 3 check
 found a leftover (a tracked engine path, stale hook wiring); 4 the gate was
-red and nothing changed; 6 the pinned engine is not installed (and was not
+red and nothing changed (verify-runner: the gate was not green); 5
+verify-runner only: the gate did not run (no runner, no gate, an unusable
+contracts provider, interrupted); 6 the pinned engine is not installed (and was not
 fetched).
 """
 
@@ -76,6 +83,7 @@ EXIT_ERROR = 1
 EXIT_USAGE = 2
 EXIT_LEFTOVER = 3
 EXIT_GATE_RED = 4
+EXIT_NOT_RUN = 5
 EXIT_NOT_INSTALLED = 6
 
 
@@ -1140,6 +1148,103 @@ def cmd_docs(_args):
     return EXIT_OK
 
 
+# --- phasekit verify --in-runner (v0.20.0) ------------------------------------
+
+VERIFY_RUNNER_SCHEMA = "phasekit-verify-in-runner/1"
+VERIFY_RUNNER_KEYS = ("schema", "status", "exit_code", "timed_out", "tier", "elapsed_seconds",
+                      "gate_seconds", "failing_tests", "failing_tests_format", "footprint",
+                      "label", "where", "layout", "engine", "image", "detail", "tail")
+
+
+def _verify_runner_report(result, lay, engine_tag):
+    e = enrich()
+    report = {k: result.get(k) for k in VERIFY_RUNNER_KEYS}
+    report.update(schema=VERIFY_RUNNER_SCHEMA, layout=lay, engine=engine_tag,
+                  image=(os.environ.get(e.RUNNER_IMAGE_ENV) or e.RUNNER_IMAGE_DEFAULT).strip())
+    return report
+
+
+def cmd_verify_runner(args):
+    """`phasekit verify --in-runner`: the project's gate in the runner image,
+    composed by THE harness the upgrade and migrate gates use (the pinned
+    engine read-only at /opt/phasekit, PHASEKIT_CONTRACT, the contracts
+    provider, a git identity, the runner user). A measurement: it stages
+    nothing, records nothing the loop reads, and is therefore allowed the
+    fast tier of a tree that carries artifacts/project-complete.json (which
+    `phasekit verify` refuses, so the loop never approves on fast). Read-only
+    over the tree: a footprint is restored and the result is red."""
+    root = project_root()
+    if root is None:
+        raise PinError("not inside a git repository", EXIT_USAGE)
+    lay = layout(root)
+    if lay == "none":
+        raise PinError(f"{root} is not a phasekit project (no .phasekit-version or "
+                       "scripts/run-until-done.sh)", EXIT_USAGE)
+    if args.timeout is not None and args.timeout <= 0:
+        raise PinError("--timeout is a positive number of seconds", EXIT_USAGE)
+    refuse_under_loop("verify --in-runner")
+    # Review v0.20.0 M3: the footprint restore treats every change made while
+    # the gate runs as the gate's. On a tree something else is writing (a
+    # live session) that would revert its work — so only a CLEAN tree is
+    # measured: a clone, or a project at rest. Dirt is refused, never restored.
+    dirty = _git(root, "status", "--porcelain", "--untracked-files=all")
+    if dirty.returncode != 0:
+        raise PinError(f"cannot read the tree's status: {(dirty.stderr or '').strip()}", EXIT_USAGE)
+    if dirty.stdout.strip():
+        raise PinError("the tree is not clean (uncommitted, staged or untracked changes) — a "
+                       "measurement runs on a clean tree only: a clone of the commit to measure, "
+                       "or a project at rest, never a tree a session is writing", EXIT_USAGE)
+    e = enrich()
+    tier = None if args.tier == "auto" else args.tier
+    try:
+        e.gate_command(root, tier)
+    except ValueError as exc:
+        raise PinError(str(exc), EXIT_USAGE) from exc
+    engine, engine_tag = None, None
+    if lay == "pinned":
+        engine = resolve_engine(root)
+        engine_tag = engine_version(engine) or read_pin(root)
+    timeout = args.timeout or e.UPGRADE_VERIFY_TIMEOUT_DEFAULT
+    try:
+        with e._interruptible() as killers:
+            result = e.run_project_gate(root, "container", killers=killers, engine=engine,
+                                        tier=tier, timeout=timeout,
+                                        name_prefix=e.VERIFY_GATE_NAME)
+    except e.UpgradeInterrupted:
+        warn("phasekit verify --in-runner: interrupted — the runner was stopped and the "
+             "gate's footprint restored; nothing was measured")
+        return EXIT_NOT_RUN
+    report = _verify_runner_report(result, lay, engine_tag)
+    status = result["status"]
+    if args.json:
+        if result.get("output"):
+            sys.stderr.write(result["output"] if result["output"].endswith("\n")
+                             else result["output"] + "\n")
+            sys.stderr.flush()
+        say(json.dumps(report, sort_keys=False))
+    else:
+        if result.get("output"):
+            sys.stdout.write(result["output"] if result["output"].endswith("\n")
+                             else result["output"] + "\n")
+        word = {"passed": "GREEN", "failed": "RED"}.get(status, "NOT RUN")
+        timing = ""
+        if report["elapsed_seconds"] is not None:
+            timing = f" in {report['elapsed_seconds']:.1f}s"
+            if report["gate_seconds"] is not None:
+                timing += f" (the gate itself {report['gate_seconds']:.1f}s)"
+        say(f"phasekit verify --in-runner: {word} — {report['tier']} tier, "
+            f"{report['label'] or 'no gate'} in {report['image']} "
+            f"({lay}{', engine ' + engine_tag if engine_tag else ''}): "
+            f"{report['detail']}{timing}")
+        if report["failing_tests"]:
+            say(f"  failing ({len(report['failing_tests'])}):")
+            for tid in report["failing_tests"]:
+                say(f"    {tid}")
+        say("  (a measurement: nothing was staged or recorded; the loop's commit gate "
+            "never reuses it)")
+    return {"passed": EXIT_OK, "failed": EXIT_GATE_RED}.get(status, EXIT_NOT_RUN)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="phasekit", description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="verb", required=True)
@@ -1166,10 +1271,20 @@ def main(argv=None):
     pp = sub.add_parser("plugin")
     pp.add_argument("action", nargs="?", default="status", choices=["install", "status"])
     sub.add_parser("docs")
+    pv = sub.add_parser("verify-runner")
+    pv.add_argument("--in-runner", action="store_true",
+                    help="accepted: the spelling `phasekit verify --in-runner` passes it")
+    pv.add_argument("--tier", default="auto", choices=["auto", "fast", "full"],
+                    help="auto: the gate decides from the tree; fast/full: passed to "
+                         "scripts/phasekit-verify.sh as --fast/--full")
+    pv.add_argument("--json", action="store_true",
+                    help="one JSON object on stdout; the gate's output goes to stderr")
+    pv.add_argument("--timeout", type=int, default=None,
+                    help="seconds before the gate is stopped and read as red (default 1800)")
     args = p.parse_args(argv)
     handlers = {"resolve": cmd_resolve, "engines": cmd_engines, "init": cmd_init,
                 "migrate": cmd_migrate, "check": cmd_check, "upgrade": cmd_upgrade,
-                "plugin": cmd_plugin, "docs": cmd_docs}
+                "plugin": cmd_plugin, "docs": cmd_docs, "verify-runner": cmd_verify_runner}
     try:
         return handlers[args.verb](args)
     except PinError as exc:

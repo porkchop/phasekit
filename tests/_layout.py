@@ -47,7 +47,7 @@ LAYOUT_MODULES = (
     "test_output_discipline", "test_post_completion", "test_project_tests", "test_require_verdict_hook",
     "test_run_until_done_v060", "test_run_until_done_v066", "test_scaffold_lock",
     "test_scaffold_reads", "test_session_resume", "test_suite_tmpdir",
-    "test_wrapup_nudge_hook",
+    "test_verify_in_runner", "test_wrapup_nudge_hook",
 )
 
 # The stub run-phase scripts tests write find the project the way the real one
