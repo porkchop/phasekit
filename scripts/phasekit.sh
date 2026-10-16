@@ -20,6 +20,12 @@
 #                                 contracts, identity, runner user); never a verdict
 #                                 the loop reuses, so any tier on any tree. Served by
 #                                 this CLI (scripts/phasekit-pin.py verify-runner)
+#   phasekit land --in-runner [--json] [--timeout S] [--push] [--squash-target B] [--work-branch B]
+#                                 (v0.21.0) LAND a stranded verdict artifact: the loop's
+#                                 recovery-only pass (MAX_ITERATIONS=0) in the runner image,
+#                                 composed by the same harness as verify --in-runner; it
+#                                 commits, so it refuses while a container works on the
+#                                 tree. Served by this CLI (scripts/phasekit-pin.py land-runner)
 #   phasekit scope [--iteration N] [--phase P] [--json]
 #                                 what this iteration (or one phase) changed
 #   phasekit facts [--json]       the facts phasekit DECLARES for downstream tests
@@ -268,6 +274,18 @@ case "$verb" in
     ;;
   self-update)
     self_update
+    ;;
+  land)
+    # v0.21.0: the landing pass is offered only in the runner — the spelling
+    # names where it runs, as `verify --in-runner` does.
+    for arg in "${@:2}"; do
+      if [[ "$arg" == --in-runner ]]; then
+        require_pin_tool "land --in-runner"
+        exec "${PIN[@]}" land-runner "${@:2}"
+      fi
+    done
+    echo "phasekit land: only \`phasekit land --in-runner\` is offered (the loop's recovery-only pass in the runner image)" >&2
+    exit 2
     ;;
   verify|scope)
     # v0.20.0: `verify --in-runner` is not the loop's verify — it is THE gate

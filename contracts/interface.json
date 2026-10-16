@@ -17,6 +17,15 @@
       "semantics": "Fault injection for the generated kill-point test ONLY (tests/test_boundary_state.py, v0.14.5): '<step>:<pre|post>' SIGKILLs the loop right before (pre) or right after (post) artifacts/boundary-state.json advances to <step> inside land_boundary — a real kill of the shipped code at every seam of the landing sequence. 'gate:footprint' (v0.14.10) SIGKILLs right after the verify gate's command returned and its footprint was measured, before the restore. Never set in production; a supervisor never forwards it."
     },
     {
+      "name": "PHASEKIT_LAND_NONCE",
+      "kind": "both",
+      "read_by": ["scripts/run-until-done.sh"],
+      "set_by": ["scripts/enrich-project.py"],
+      "default": "unset — the loop prints no landing witness",
+      "container_forwarded": false,
+      "semantics": "v0.21.0. Set by `phasekit land --in-runner` (scripts/enrich-project.py run_project_land) to a per-run nonce; the loop's loop-start recovery then prints `phasekit-land <nonce> none`, `phasekit-land <nonce> open <step>` and `phasekit-land <nonce> walked <land_boundary rc>` (and `phasekit-land <nonce> complete` when the recovered boundary was the last) on stdout, so the landing pass can report what the recovery did (the exit status cannot: 3 = the limit, landed or not). The loop copies the nonce into a shell variable and unsets it at start, so no child (the verify gate, a project test, a nested loop) can read it and print a line; lines out of that order fail the landing closed. Never forwarded by container-setup.sh: a session prints nothing."
+    },
+    {
       "name": "PHASEKIT_VERIFY_MEMO_TTL_SECONDS",
       "kind": "consumed",
       "read_by": ["scripts/run-until-done.sh"],
@@ -1377,6 +1386,56 @@
         "tests/test_verify_in_runner.py::TheSurfaceIsDeclared"
       ]
     },
+    "land_in_runner": {
+      "summary": "v0.21.0. `phasekit land --in-runner`: THE declared way to land a project's stranded verdict artifact from outside a session — the loop's recovery-only pass (facts.recovery_only_run: MAX_ITERATIONS=0, the loop-start recovery and no model turn) run inside the runner image through the same harness as verify_in_runner (scripts/enrich-project.py runner_argv + _supervise; the landing pass is run_project_land): the project read-write at /workspace, a pinned project's engine read-only at /opt/phasekit (its loop runs with PHASEKIT_PROJECT_DIR=/workspace; vendored: the project's own scripts/run-until-done.sh), PHASEKIT_CONTRACT, the contracts provider read-only at /contracts, the PHASEKIT_FORWARD_ENV keys by name, a global git identity, the runner user (uid 0 under rootless docker). No claude config volume, and `claude` on PATH is a stub that refuses (exit 97), so no model can run. The landing itself is the loop's own (land_boundary: verify-gated, the boundary record, the branch-per-iteration catch-up) — reused, not reimplemented. It WRITES: what it may change is may_change plus commits on the project's branches, which branch HEAD names (the loop's rest) and git's own files; any other path whose bytes differ after the run is listed in unexpected_changes (a supervisor should hold on a non-empty list). It refuses (exit 7) while a running container bind-mounts the tree or a path in it (a session), while git is mid-operation (index.lock, HEAD.lock, a merge, rebase, cherry-pick, revert or bisect in progress — a lock it did not take is never removed), while another landing holds the tree, and when the loop to run predates PHASEKIT_LAND_NONCE. A container counts when it bind-mounts the tree, a path in it, or a writable parent of it (tmpfs and volume mounts name no host path). The checks hold at the instant they run: a supervisor serialises a landing with its own dispatch of sessions to the same project (foundry-orchestrator recovers only a resting project). Stop it with SIGTERM/SIGINT (the runner is removed and the result still reported; a git index.lock its own killed loop left is removed); a SIGKILL of the CLI cannot remove the runner container it started. Served by the installed phasekit CLI (scripts/phasekit-pin.py land-runner) against the project's pinned engine, in either layout.",
+      "cli": "phasekit land --in-runner",
+      "flags": {
+        "--json": "one JSON object on stdout (json_keys); the loop's own output on stderr. Without it: the output, then a summary line starting `phasekit land --in-runner: LANDED|NOTHING TO LAND|FAILED|REFUSED|NOT RUN`, then each new commit",
+        "--timeout": "seconds before the runner is removed and the result is failed (timed_out true); default 1800. A landing stopped mid-way is continued by the next loop start or the next `phasekit land --in-runner` (the boundary record)",
+        "--push": "AUTO_PUSH=1 in the loop (it pushes after its commit; a push failure is the loop's WARN, the commit stays local), with the host's ssh-agent SOCKET mounted at /ssh-agent (never a key), ~/.ssh/known_hosts read-only, and GH_TOKEN / GITHUB_TOKEN crossed by name when set — as container-setup.sh gives a session. Without it AUTO_PUSH=0",
+        "--squash-target": "branch-per-iteration's integration branch, passed as PHASEKIT_SQUASH_TARGET (default: the caller's PHASEKIT_SQUASH_TARGET, as container-setup.sh forwards it; a supervisor landing several projects from one process passes the flags)",
+        "--work-branch": "branch-per-iteration's work branch, passed as PHASEKIT_WORK_BRANCH (default: the caller's PHASEKIT_WORK_BRANCH); needs --squash-target"
+      },
+      "env_set_last": {"MAX_ITERATIONS": "0", "PHASEKIT_NO_UPDATE_CHECK": "1", "PHASEKIT_LAND_NONCE": "<per run>", "PHASEKIT_PROJECT_DIR": "/workspace (pinned only)", "PHASEKIT_SQUASH_TARGET": "--squash-target", "PHASEKIT_WORK_BRANCH": "--work-branch", "AUTO_PUSH": "1 with --push, else 0"},
+      "witness_env": "PHASEKIT_LAND_NONCE",
+      "schema": "phasekit-land-in-runner/1",
+      "json_keys": ["schema", "status", "exit_code", "timed_out", "elapsed_seconds", "recovery", "commits", "head_before", "head_after", "branch_before", "branch_after", "stranded_before", "stranded_after", "blocked", "unexpected_changes", "push_requested", "running_containers", "layout", "engine", "image", "detail", "tail"],
+      "status": ["landed", "nothing", "refused", "failed", "not-run"],
+      "status_exit": {"landed": 0, "nothing": 3, "failed": 4, "not-run": 5, "refused": 7},
+      "may_change": ["artifacts/", "docs/LEARNINGS.md", "docs/LEARNINGS-ARCHIVE.md"],
+      "fields": {
+        "status": "landed: a boundary was open and the loop's walk landed new work (land_boundary 0) with no verdict artifact left stranded; nothing: no boundary was open, or the open one was proven and rested with nothing new to commit (land_boundary 2); failed: the walk stopped (a red gate, a refused commit, a branch-integrity block), the loop exited before deciding, a verdict artifact is still stranded, a model start was refused, the run timed out or was interrupted; not-run: no docker / daemon / image, the runner could not start, an unusable contracts provider, docker could not list containers; refused: see exit 7",
+        "exit_code": "the loop's own exit status inside the runner (0 = a completion landed, 3 = the iteration limit — an approval landed or nothing did, 2 = stopped; scripts/run-until-done.sh exit_codes); null when it did not run, timed out or was interrupted",
+        "recovery": "what the loop's witness said: {open: true | false | null (no line), from_step: the walk's first step, walk_rc: land_boundary's return (0 landed, 2 rested with nothing new, 1 stopped, 4 light escalation), complete: the recovered boundary was the iteration's last (finish_complete, loop exit 0), coherent: false when the lines are not exactly none | open, walked[, complete] (status failed)}",
+        "commits": "the commits the run created (reachable from a local branch now and from none before), oldest first, at most 50",
+        "stranded_before": "the verdict artifacts (artifacts/phase-approval.json, artifacts/project-complete.json) that had never landed (on disk and not clean in git status) before the run; stranded_after: the same after it — non-empty makes status failed",
+        "blocked": "artifacts/phase-blocked.json appeared or changed during the run (the loop's own record of why it stopped)",
+        "unexpected_changes": "paths outside may_change whose bytes (content + executable bit) differ after the run from before it; [] is the contract",
+        "running_containers": "on a refusal for a container working on the tree: their names",
+        "engine": "the pinned release tag, null in a vendored project"
+      },
+      "exit_codes": {
+        "0": "landed",
+        "2": "usage: a bad flag, a branch name git refuses, --work-branch without --squash-target, run inside a loop session, not inside a phasekit project, a malformed pin, or `phasekit land` without --in-runner",
+        "3": "nothing to land",
+        "4": "the landing failed (see status failed); the verdict artifact stays on disk",
+        "5": "not run: nothing ran (see status not-run) — never a host run",
+        "6": "the pinned engine is not installed and was not fetched",
+        "7": "refused: it would race a writer, or the loop predates the landing witness; nothing ran"
+      },
+      "container_name_prefix": "phasekit-land-runner-",
+      "proven_by": [
+        "tests/test_land_in_runner.py::StrandedApprovalLands",
+        "tests/test_land_in_runner.py::NothingToLand",
+        "tests/test_land_in_runner.py::RedGateFails",
+        "tests/test_land_in_runner.py::StrandedCompletionLandsOnTheTarget",
+        "tests/test_land_in_runner.py::Refusals",
+        "tests/test_land_in_runner.py::TimeoutThenFinish",
+        "tests/test_land_in_runner.py::Push",
+        "tests/test_land_in_runner.py::OneComposer",
+        "tests/test_land_in_runner.py::TheSurfaceIsDeclared"
+      ]
+    },
     "verify_breaker": {
       "summary": "The pre-commit verify breaker's phase-blocked.json `reason` when the gate failed its attempts.",
       "reason": "pre-commit verify failed repeatedly",
@@ -1500,8 +1559,9 @@
         "2": "usage, or not a project of the right kind: a bad or pre-v0.19.0 tag, a dirty tree or staged index for migrate/upgrade, local changes to engine files migrate would discard (without --discard-local), a vendored project given to init",
         "3": "`check` found a leftover in a pinned project: a tracked engine path (anything the engine's manifest calls scaffold, or .scaffold/), or .claude/settings.json still wiring vendored hook paths; `plugin status`: not installed",
         "4": "the project's gate was not green under the new engine (migrate, upgrade): nothing changed — the tree, the index and the pin are as they were; v0.20.0 `verify-runner` (`phasekit verify --in-runner`): the gate was not green (red, a footprint, or timed out)",
-        "5": "v0.20.0, `verify-runner` only: the gate did not run (no docker, no daemon, no runner image, the runner could not start, an unusable contracts provider, or no gate configured) — never a host run",
-        "6": "the pinned engine is not installed and was not fetched (`check` never fetches; elsewhere PHASEKIT_NO_AUTO_FETCH=1, or the tag is in neither the canonical clone nor its origin): the message names `phasekit engines install <tag>`"
+        "5": "v0.20.0, `verify-runner` only: the gate did not run (no docker, no daemon, no runner image, the runner could not start, an unusable contracts provider, or no gate configured) — never a host run; v0.21.0 `land-runner` (`phasekit land --in-runner`): not run (the same causes, or docker could not list running containers)",
+        "6": "the pinned engine is not installed and was not fetched (`check` never fetches; elsewhere PHASEKIT_NO_AUTO_FETCH=1, or the tag is in neither the canonical clone nor its origin): the message names `phasekit engines install <tag>`",
+        "7": "v0.21.0, `land-runner` (`phasekit land --in-runner`) only: refused — it would race a writer (a container mounting the tree, a git operation in progress, another landing) or the loop predates the landing witness; nothing ran (facts.land_in_runner; there, 3 = nothing to land and 4 = the landing failed)"
       },
       "passthrough": "None: every exit is one of these."
     },

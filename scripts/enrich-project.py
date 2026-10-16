@@ -2017,16 +2017,26 @@ def _split_gate_time(out, nonce):
     return out[:m.start()] + out[m.end():], int(m.group(1)) / 1000.0
 
 
-def runner_argv(target, image, name, script, engine=None):
-    """THE runner invocation: `docker run` of the project's gate SCRIPT in
-    IMAGE with a session's environment — the project read-write at
-    /workspace (git safe.directory), the runner user (uid 0 under rootless
-    docker, IS_SANDBOX=1), HOME and CLAUDE_CONFIG_DIR as container-setup.sh
-    pins them, a global git identity written as the entrypoint writes it, the
-    contracts provider read-only at /contracts, the PHASEKIT_FORWARD_ENV keys
-    by name, a pinned project's engine read-only at /opt/phasekit (on PATH),
-    and PHASEKIT_CONTRACT naming the engine's contract (/workspace's own copy
-    when vendored). No docker socket, no credentials, no ssh agent."""
+def runner_argv(target, image, name, script, engine=None, *, env=(), names=(),
+                forward_ssh=False):
+    """THE runner invocation: `docker run` of SCRIPT (the project's gate, or
+    v0.21.0 the loop's landing pass) in IMAGE with a session's environment —
+    the project read-write at /workspace (git safe.directory), the runner user
+    (uid 0 under rootless docker, IS_SANDBOX=1), HOME and CLAUDE_CONFIG_DIR as
+    container-setup.sh pins them (the image's own config dir: no claude config
+    volume, so no login), a global git identity written as the entrypoint
+    writes it, the contracts provider read-only at /contracts, the
+    PHASEKIT_FORWARD_ENV keys by name, a pinned project's engine read-only at
+    /opt/phasekit (on PATH), and PHASEKIT_CONTRACT naming the engine's
+    contract (/workspace's own copy when vendored). No docker socket.
+
+    v0.21.0, for the landing pass only: ENV is (name, value) pairs set LAST
+    (docker's last -e wins, so a forwarded project key can never override
+    one); NAMES are secrets crossed by name (`-e NAME`, only when set — the
+    value never reaches argv), as container-setup.sh crosses GH_TOKEN /
+    GITHUB_TOKEN; FORWARD_SSH mounts the ssh-agent SOCKET (never a key) and
+    known_hosts read-only, as container-setup.sh does for a session's push.
+    The gate passes none of them: no credentials, no ssh agent."""
     user = _runner_user()
     git_name, git_email = _gate_git_identity(target)
     session = ["-e", f"HOME={_runner_home(user)}",
@@ -2051,6 +2061,21 @@ def runner_argv(target, image, name, script, engine=None):
     # (the engine's mount when pinned, the project's own copy when vendored)
     session += ["-e", f"{CONTRACT_ENV}="
                       f"{ENGINE_CONTAINER_DIR if engine is not None else '/workspace'}/{CONTRACT_REL}"]
+    if forward_ssh:
+        sock = (os.environ.get("SSH_AUTH_SOCK") or "").strip()
+        if sock and _is_socket(sock):
+            session += ["--mount", _mount_arg(Path(sock), "/ssh-agent"),
+                        "-e", "SSH_AUTH_SOCK=/ssh-agent"]
+        known = Path(os.path.expanduser("~")) / ".ssh" / "known_hosts"
+        if known.is_file():
+            session += ["--mount", _mount_arg(known.resolve(),
+                                              f"{_runner_home(user)}/.ssh/known_hosts",
+                                              readonly=True)]
+    for secret in names:
+        if os.environ.get(secret):
+            session += ["-e", secret]
+    for key, value in env:
+        session += ["-e", f"{key}={value}"]
     # Forwarded project keys first: docker's last -e wins, and the names
     # above belong to this script (the forward list also refuses them).
     return ["docker", "run", "--rm", "--name", name, "--entrypoint", "bash",
@@ -2063,6 +2088,13 @@ def runner_argv(target, image, name, script, engine=None):
             *session,
             image, "-eo", "pipefail", "-c",
             preamble + "\n" + script]
+
+
+def _is_socket(path):
+    try:
+        return stat.S_ISSOCK(os.stat(path).st_mode)
+    except OSError:
+        return False
 
 
 # Failing test ids in a gate's output. pytest's short summary (on by default:
@@ -2118,6 +2150,63 @@ def failing_test_ids(output):
                 kinds.append(kind)
     fmt = "+".join(k for k in ("pytest", "unittest") if k in kinds) or None
     return ids, fmt
+
+
+def _supervise(argv, cwd, env, name, timeout, killers, on_interrupt=None):
+    """Run ARGV (the runner's `docker run` when NAME is its container, else a
+    host command) in its own process group, output captured, under TIMEOUT.
+    The one supervisor the gate and the landing pass share. Returns (proc,
+    output, timed_out, elapsed_seconds); raises OSError when it could not
+    start, and UpgradeInterrupted (after ON_INTERRUPT) when a signal stopped
+    it. A kill removes the named container (killing the docker CLIENT does not
+    stop it) and the whole process group."""
+    started = time.monotonic()
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, errors="replace",
+                            start_new_session=True)
+
+    def kill():
+        if name:
+            # a wedged daemon must not turn the harness into a traceback
+            # (review v0.20.0 m5): the client is killed below either way
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=120)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    killers.append(kill)
+    try:
+        try:
+            out, _ = proc.communicate(timeout=timeout)
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            kill()
+            timed_out = True
+            try:
+                out, _ = proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:  # something escaped the group holds the pipe
+                out = ""
+        elapsed = round(time.monotonic() - started, 3)
+        # A finished host command may still have left background children in
+        # its group: they must not write after the caller's checks (review
+        # r2). A child that setsid()s out of the group is beyond reach —
+        # declined, recorded.
+        if not name:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    except UpgradeInterrupted:
+        # The handler has stopped the run (it called kill).
+        if on_interrupt is not None:
+            with contextlib.suppress(Exception):
+                on_interrupt()
+        raise
+    finally:
+        killers.remove(kill)
+    return proc, out, timed_out, elapsed
 
 
 def _run_project_gate(target, mode, killers, scratch, engine, tier, timeout, name_prefix):
@@ -2178,28 +2267,6 @@ def _run_project_gate(target, mode, killers, scratch, engine, tier, timeout, nam
             env["PATH"] = str(Path(engine) / "bin") + os.pathsep + env.get("PATH", "")
         contract_root = Path(engine if engine is not None else target).resolve()
         env[CONTRACT_ENV] = str(contract_root / CONTRACT_REL)
-    started = time.monotonic()
-    try:
-        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, errors="replace",
-                                start_new_session=True)
-    except OSError as exc:
-        return _gate_result("infra", where, label, tier,
-                            f"could not start the gate ({type(exc).__name__})")
-
-    def kill():
-        # The whole process group on the host; the named container under docker
-        # (killing the docker CLIENT does not stop the container).
-        if name:
-            # a wedged daemon must not turn the harness into a traceback
-            # (review v0.20.0 m5): the client is killed below either way
-            with contextlib.suppress(OSError, subprocess.SubprocessError):
-                subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=120)
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-
     def settle():
         """Restore the gate's footprint; return its paths. The index first:
         the worktree restore checks tracked paths out FROM the index, so a
@@ -2213,35 +2280,14 @@ def _run_project_gate(target, mode, killers, scratch, engine, tier, timeout, nam
             index_touched = ["(the git index)"]
         return _restore_footprint(target, before, before_snap) + index_touched
 
-    killers.append(kill)
     try:
-        try:
-            out, _ = proc.communicate(timeout=timeout)
-            timed_out = False
-        except subprocess.TimeoutExpired:
-            kill()
-            timed_out = True
-            try:
-                out, _ = proc.communicate(timeout=30)
-            except subprocess.TimeoutExpired:  # something escaped the group holds the pipe
-                out = ""
-        elapsed = round(time.monotonic() - started, 3)
-        # A green gate may still have left background children in its group:
-        # they must not write after the footprint check (review r2). A child
-        # that setsid()s out of the group is beyond reach — declined, recorded.
-        if not name:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-    except UpgradeInterrupted:
-        # The handler has stopped the gate; a measurement interrupted
-        # mid-run must leave the tree as it found it, like a finished one.
-        with contextlib.suppress(Exception):
-            settle()
-        raise
-    finally:
-        killers.remove(kill)
+        # A measurement interrupted mid-run must leave the tree as it found
+        # it, like a finished one: the footprint is settled before re-raising.
+        proc, out, timed_out, elapsed = _supervise(argv, cwd, env, name, timeout, killers,
+                                                   on_interrupt=settle)
+    except OSError as exc:
+        return _gate_result("infra", where, label, tier,
+                            f"could not start the gate ({type(exc).__name__})")
     out, gate_seconds = _split_gate_time(out, nonce)
     failing, failing_fmt = failing_test_ids(out)
     measured = {"output": out, "exit_code": None if timed_out else proc.returncode,
@@ -2273,6 +2319,506 @@ def _run_project_gate(target, mode, killers, scratch, engine, tier, timeout, nam
         verdict = ("passed", "exit 0")
     return _gate_result(verdict[0], where, label, tier, verdict[1], _tail(out),
                         footprint=footprint, **measured)
+
+
+# === THE landing pass in the runner (v0.21.0) ==============================
+#
+# `phasekit land --in-runner`: the loop's recovery-only pass (MAX_ITERATIONS=0,
+# contract fact recovery_only_run) run inside the runner image through THE
+# harness above (runner_argv, _supervise) — the declared way for a supervisor
+# to land a stranded verdict artifact. foundry-orchestrator's auto-resolver
+# composed this `docker run` itself (run_recovery), the last private copy of a
+# runner invocation after v0.20.0 moved its verify onto `phasekit verify
+# --in-runner` (deferral resolver-recovery-runs-its-own-docker-argv).
+#
+# REUSE, NOT A SECOND LANDING. The loop's own loop-start recovery does the
+# work: land_boundary, verify-gated, with its boundary record, its kill
+# recovery and its branch-per-iteration catch-up. This code only composes the
+# runner, refuses what would race it, and reports what happened — from the
+# loop's witness lines (PHASEKIT_LAND_NONCE, run-until-done.sh land_witness)
+# and git's own before/after.
+#
+# IT WRITES, and what it may change is declared (LAND_MAY_CHANGE): commits on
+# the project's branches (the work branch and its target, the loop's own
+# landing), which branch HEAD names (the loop's rest), the loop's records
+# under artifacts/, docs/LEARNINGS.md + docs/LEARNINGS-ARCHIVE.md (the
+# rotation at a landing, v0.19.5) and git's own files. Any other path whose
+# bytes differ after the run from before it is named in `unexpected_changes`.
+# It never runs a model: MAX_ITERATIONS=0 shuts the loop, no claude config
+# volume is mounted (no login), and `claude` on PATH is a stub that refuses.
+
+LAND_RUNNER_NAME = "phasekit-land-runner"
+LAND_TIMEOUT_DEFAULT = 1800
+LAND_NONCE_ENV = "PHASEKIT_LAND_NONCE"
+LAND_MAY_CHANGE = ("artifacts/", "docs/LEARNINGS.md", "docs/LEARNINGS-ARCHIVE.md")
+LAND_STRANDED = ("artifacts/phase-approval.json", "artifacts/project-complete.json")
+LAND_BLOCKED = "artifacts/phase-blocked.json"
+LAND_NO_MODEL_MARK = "phasekit land: refused a model call"
+LAND_NO_MODEL_RC = 97
+LAND_LOCK_NAME = "phasekit-land.lock"
+LAND_PUSH_SECRETS = ("GH_TOKEN", "GITHUB_TOKEN")
+LAND_COMMITS_MAX = 50
+LAND_STATUSES = ("landed", "nothing", "refused", "failed", "not-run")
+# git's in-progress markers: a landing never runs over a half-done operation
+LAND_GIT_BUSY = ("index.lock", "HEAD.lock", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
+                 "rebase-merge", "rebase-apply", "BISECT_LOG")
+
+
+def _land_result(status, detail, **extra):
+    out = {"status": status, "detail": detail, "exit_code": None, "timed_out": False,
+           "elapsed_seconds": None, "recovery": {"open": None, "from_step": None,
+                                                  "walk_rc": None},
+           "commits": [], "head_before": None, "head_after": None,
+           "branch_before": None, "branch_after": None, "stranded_before": [],
+           "stranded_after": [], "blocked": False, "unexpected_changes": [],
+           "push_requested": False, "running_containers": [], "tail": "", "output": ""}
+    out.update(extra)
+    return out
+
+
+def _git_text(target, *args, timeout=120):
+    """stdout of `git -C TARGET ARGS` (stripped), or None on any failure."""
+    try:
+        r = subprocess.run(["git", "-C", str(target), *args], capture_output=True, text=True,
+                           timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def _land_refs(target):
+    """{refname: sha} of every local branch, HEAD's sha, HEAD's branch."""
+    refs = {}
+    for line in (_git_text(target, "for-each-ref", "--format=%(objectname) %(refname)",
+                           "refs/heads") or "").splitlines():
+        sha, _, ref = line.partition(" ")
+        if ref:
+            refs[ref] = sha
+    head = _git_text(target, "rev-parse", "-q", "--verify", "HEAD^{commit}")
+    branch = _git_text(target, "symbolic-ref", "-q", "--short", "HEAD")
+    return refs, head or None, branch or None
+
+
+def _land_stranded(target):
+    """The verdict artifacts that never landed — the loop's own signature
+    (artifact_never_landed): on disk, and not clean in git status."""
+    out = []
+    for rel in LAND_STRANDED:
+        if not (Path(target) / rel).is_file():
+            continue
+        state = _git_text(target, "status", "--porcelain", "--ignored=matching", "--", rel)
+        if state is None:  # git could not answer: never read as landed (review m9)
+            out.append(f"{rel} (git status failed)")
+        elif state:
+            out.append(rel)
+    return out
+
+
+def _land_digest(f):
+    """Content + executable bit (a file), the target (a link), or absent —
+    comparable with _land_blob_digest (git keeps no other mode bits)."""
+    f = Path(f)
+    if f.is_symlink():
+        return "link:" + os.readlink(f)
+    if f.is_file():
+        return (hashlib.sha256(f.read_bytes()).hexdigest()
+                + (":x" if os.access(f, os.X_OK) else ":-"))
+    return "absent"
+
+
+def _land_blob_digest(target, commit, rel):
+    if not commit:
+        return "absent"
+    tree = _git_text(target, "ls-tree", "-z", commit, "--", rel)
+    if not tree:
+        return "absent"
+    mode = tree.split(" ", 1)[0]
+    try:
+        blob = subprocess.run(["git", "-C", str(target), "cat-file", "blob",
+                               f"{commit}:{rel}"], capture_output=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unreadable"
+    if blob.returncode != 0:
+        return "unreadable"
+    if mode == "120000":
+        return "link:" + os.fsdecode(blob.stdout)
+    return hashlib.sha256(blob.stdout).hexdigest() + (":x" if mode == "100755" else ":-")
+
+
+def _land_dirty_paths(target):
+    """Every path not clean in git status (untracked one by one, ignored
+    excluded) with renames split into their two paths, so a staged rename's
+    source is snapshotted as absent (review m4). Raises RuntimeError."""
+    try:
+        r = subprocess.run(["git", "-C", str(target), "status", "--porcelain=v1", "-z",
+                            "--untracked-files=all", "--no-renames"],
+                           capture_output=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"git status: {type(exc).__name__}") from exc
+    if r.returncode != 0:
+        raise RuntimeError(f"git status: exit {r.returncode}")
+    return [os.fsdecode(e[3:]) for e in r.stdout.split(b"\0") if len(e) >= 4]
+
+
+def _land_snapshot(target):
+    return {rel: _land_digest(Path(target) / rel) for rel in _land_dirty_paths(target)}
+
+
+def _land_may_change(rel):
+    return any(rel == p or (p.endswith("/") and rel.startswith(p)) for p in LAND_MAY_CHANGE)
+
+
+def _land_unexpected(target, before, head_before, head_after):
+    """Paths outside LAND_MAY_CHANGE whose bytes differ after the run from
+    before it. BEFORE = {path: _land_digest} of every path dirty at the start
+    (a clean path's start bytes are HEAD_BEFORE's blob)."""
+    try:
+        after = _land_dirty_paths(target)
+    except RuntimeError:
+        return ["(the tree's status could not be read after the run)"]
+    candidates = set(before) | set(after)
+    if head_before and head_after and head_before != head_after:
+        diff = _git_text(target, "diff", "--name-only", "-z", "--no-renames", head_before,
+                         head_after)
+        candidates |= {p for p in (diff or "").split("\0") if p}
+    out = []
+    for rel in sorted(candidates):
+        if _land_may_change(rel):
+            continue
+        start = before[rel] if rel in before else _land_blob_digest(target, head_before, rel)
+        if start != _land_digest(Path(target) / rel):
+            out.append(rel)
+    return out
+
+
+def _land_new_commits(target, refs_before, refs_after):
+    """Commits the run created: reachable from a branch now, from none before."""
+    after = sorted(set(refs_after.values()) - set(refs_before.values()))
+    if not after:
+        return []
+    listed = _git_text(target, "rev-list", "--reverse", *after, "--not",
+                       *sorted(set(refs_before.values())), "--")
+    return [c for c in (listed or "").split() if c]
+
+
+def _containers_mounting(target):
+    """Names of the running containers that bind-mount TARGET or a path in
+    it — a session (or any runner) working on this tree — or None when
+    docker cannot say."""
+    target = Path(target).resolve()
+    try:
+        ps = subprocess.run(["docker", "ps", "-q", "--no-trunc"], capture_output=True,
+                            text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if ps.returncode != 0:
+        return None
+    ids = ps.stdout.split()
+    if not ids:
+        return []
+    try:
+        insp = subprocess.run(["docker", "inspect", "--format",
+                               "{{.Name}}{{range .Mounts}}\t{{.Type}}|{{.RW}}|{{.Source}}{{end}}",
+                               *ids],
+                              capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    # one container may exit between ps and inspect (rc 1, the rest printed)
+    if insp.returncode != 0 and not insp.stdout.strip():
+        return None
+    names = []
+    for line in insp.stdout.splitlines():
+        name, *mounts = line.split("\t")
+        for mount in mounts:
+            kind, _, rest = mount.partition("|")
+            rw, _, src = rest.partition("|")
+            # Only a bind mount names a host path; a tmpfs or volume has none
+            # (an empty Source would resolve to the CLI's cwd — review m2).
+            if kind != "bind" or not src.strip():
+                continue
+            try:
+                path = Path(src).resolve()
+            except (OSError, RuntimeError):
+                continue
+            # the tree, a path in it, or a WRITABLE parent of it (review m3)
+            if path == target or target in path.parents or (
+                    rw == "true" and path in target.parents):
+                names.append(name.lstrip("/"))
+                break
+    return names
+
+
+def _land_git_busy(target):
+    """git's own files saying a writer is (or was) mid-operation, or []."""
+    gitdir = _git_text(target, "rev-parse", "--absolute-git-dir")
+    if not gitdir:
+        return ["(not a git work tree)"]
+    return [name for name in LAND_GIT_BUSY if os.path.lexists(os.path.join(gitdir, name))]
+
+
+@contextlib.contextmanager
+def _land_lock(target):
+    """One landing per tree: a non-blocking flock in the git dir. Yields
+    False when another `phasekit land` holds it."""
+    import fcntl
+    common = _git_text(target, "rev-parse", "--git-common-dir")
+    path = Path(target) / common / LAND_LOCK_NAME if common else None
+    if path is None:
+        yield False
+        return
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        yield True
+    finally:
+        os.close(fd)
+
+
+def land_witness_supported(loop_path):
+    """Does this copy of the loop print the landing witness (v0.21.0+)?"""
+    try:
+        return LAND_NONCE_ENV in Path(loop_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def land_script(loop_in_container):
+    """The runner's command: `claude` on PATH refuses (the landing pass never
+    runs a model), then the loop's recovery-only pass."""
+    stub = f'#!/bin/sh\\necho "{LAND_NO_MODEL_MARK} (claude $*)" >&2\\nexit {LAND_NO_MODEL_RC}\\n'
+    return ('__pk_nomodel="$(mktemp -d)" '
+            f"&& printf '%b' {shlex.quote(stub)} > \"$__pk_nomodel/claude\" "
+            '&& chmod +x "$__pk_nomodel/claude" '
+            f'|| {{ echo "{GATE_SETUP_FAILED_MARK} (could not place the no-model stub)" >&2; '
+            f"exit {RUNNER_START_FAILED_RC}; }}\n"
+            'export PATH="$__pk_nomodel:$PATH"\n'
+            f"exec bash {loop_in_container}")
+
+
+_LAND_WITNESS_RE = (r"^phasekit-land {nonce} (none|complete|open (-?\d+)|walked (-?\d+))"
+                    r"[ \t]*$\n?")
+
+
+def _split_land_witness(out, nonce):
+    """(output without the witness lines, {open, from_step, walk_rc})."""
+    pat = re.compile(_LAND_WITNESS_RE.format(nonce=re.escape(nonce)), re.MULTILINE)
+    rec = {"open": None, "from_step": None, "walk_rc": None, "complete": False,
+           "coherent": True}
+    seq = []
+    for m in pat.finditer(out or ""):
+        word = m.group(1).split()[0]
+        seq.append(word)
+        if word == "none":
+            rec["open"] = False
+        elif word == "complete":
+            rec["complete"] = True
+        elif word == "open":
+            rec["open"], rec["from_step"] = True, int(m.group(2))
+        else:
+            rec["walk_rc"] = int(m.group(3))
+    # The loop prints exactly: none | open, walked[, complete]. Anything else
+    # did not come from one loop run, and fails closed (review MAJOR 1).
+    rec["coherent"] = seq in ([], ["none"], ["open"], ["open", "walked"],
+                              ["open", "walked", "complete"])
+    return pat.sub("", out or ""), rec
+
+
+def land_verdict(rc, timed_out, interrupted, out, rec, stranded_after, timeout):
+    """(status, detail) for one landing pass."""
+    mid = ("the runner was removed mid-run; the loop's boundary record lets the next "
+           "loop start, or another `phasekit land --in-runner`, continue the landing")
+    if interrupted:
+        return "failed", f"interrupted (SIGINT/SIGTERM): {mid}"
+    if timed_out:
+        return "failed", f"timed out after {timeout}s: {mid}"
+    if rc == RUNNER_START_FAILED_RC and GATE_SETUP_FAILED_MARK in (out or ""):
+        return "not-run", "the runner's session setup failed (see the tail)"
+    if rc == RUNNER_START_FAILED_RC:
+        return "not-run", f"the runner could not start (docker exit {RUNNER_START_FAILED_RC})"
+    if LAND_NO_MODEL_MARK in (out or ""):
+        return "failed", ("the loop tried to start a model, which the landing pass refuses "
+                          "(see the tail); nothing a model would have done happened")
+    still = ", ".join(stranded_after)
+    if not rec.get("coherent", True):
+        return "failed", ("the loop's witness lines are not one run's (repeated or out of "
+                          "order) — refusing to read them; see the tail")
+    if rec["open"] is None:
+        return "failed", (f"the loop exited {rc} before its recovery decided anything (a "
+                          "branch-per-iteration refusal, a missing tool — see the tail)")
+    if rec["open"] is False:
+        if rc == 3 and not stranded_after:
+            return "nothing", "no boundary was open: nothing to land"
+        return "failed", (f"no boundary was open, yet the loop exited {rc}"
+                          + (f" and {still} never landed" if still else ""))
+    if rec["walk_rc"] is None:
+        return "failed", f"the landing stopped mid-walk (loop exit {rc}); {mid}"
+    if rec.get("complete") and rc == 0 and not stranded_after:
+        # finish_complete exits 0 whatever the walk's rc (v0.14.9): the
+        # completion is committed and the iteration is terminal (review m8)
+        if rec["walk_rc"] == 2:
+            return "nothing", "the completion had already landed; the iteration is complete"
+        return "landed", "the completion landed (verify-gated); the iteration is complete"
+    if rec["walk_rc"] in (0, 2) and rc in (0, 3) and not stranded_after:
+        if rec["walk_rc"] == 0:
+            return "landed", "the open boundary landed (verify-gated) and the tree rested"
+        return "nothing", "the open boundary was proven and rested; nothing new to commit"
+    return "failed", (f"the landing did not finish (walk rc {rec['walk_rc']}, loop exit {rc})"
+                      + (f"; {still} never landed" if still else "")
+                      + " — the refusing gate wrote its own record (see the tail)")
+
+
+def run_project_land(target, *, engine=None, timeout=LAND_TIMEOUT_DEFAULT, killers=None,
+                     push=False, squash_target=None, work_branch=None):
+    """The loop's recovery-only pass for TARGET in the runner image. ENGINE is
+    a pinned project's engine directory (None = vendored: the project's own
+    loop). Never raises. Returns _land_result's shape; status is one of
+    LAND_STATUSES."""
+    try:
+        return _project_land(target, engine, timeout, killers, push, squash_target,
+                             work_branch)
+    except UpgradeInterrupted:
+        # only before the runner started: _run_land answers for itself after
+        return _land_result("not-run", "interrupted (SIGINT/SIGTERM) before the runner started; "
+                                       "nothing ran", push_requested=push)
+    except (OSError, RuntimeError) as exc:
+        return _land_result("not-run", f"the landing pass could not be set up "
+                                       f"({type(exc).__name__}: {exc}); nothing ran",
+                            push_requested=push)
+
+
+def _project_land(target, engine, timeout, killers, push, squash_target, work_branch):
+    target = Path(target).resolve()
+    killers = killers if killers is not None else []
+    loop_host = (Path(engine) if engine is not None else target) / "scripts" / "run-until-done.sh"
+    if not loop_host.is_file():
+        return _land_result("refused", f"no loop at {loop_host}")
+    if not land_witness_supported(loop_host):
+        return _land_result("refused", (
+            f"this loop ({loop_host}) predates the landing witness (phasekit v0.21.0), so what "
+            "it landed could not be reported; bump the pin (phasekit upgrade)"))
+    image = (os.environ.get(RUNNER_IMAGE_ENV) or RUNNER_IMAGE_DEFAULT).strip()
+    state = _docker_state(image)
+    if state != "ready":
+        why = {"absent": "docker is not installed",
+               "unreachable": "the docker daemon did not answer"}.get(
+                   state, f"the runner image '{image}' is not present")
+        return _land_result("not-run", f"{why}; the landing pass never runs on the host")
+    contracts_var, contracts_path = _contracts_source()
+    if contracts_var:
+        unusable = _contracts_unusable(contracts_var, contracts_path)
+        if unusable:
+            return _land_result("not-run", f"{unusable}; a session would refuse the same mount")
+    busy = _land_git_busy(target)
+    if busy:
+        return _land_result("refused", (
+            "git says a writer is (or was) mid-operation in this tree: " + ", ".join(busy)
+            + " in the git dir. The landing never removes a lock it did not take — finish or "
+            "remove it, then run again"))
+    with _land_lock(target) as held:
+        if not held:
+            return _land_result("refused", "another `phasekit land` is running on this tree")
+        running = _containers_mounting(target)
+        if running is None:
+            return _land_result("not-run", ("docker could not list the running containers, so "
+                                            "a session on this tree could not be ruled out"))
+        if running:
+            return _land_result("refused", (
+                "a container is working on this tree (" + ", ".join(running) + "): a session's "
+                "own loop lands its verdicts — run again once it has ended"),
+                running_containers=running)
+        return _run_land(target, engine, image, timeout, killers, push, squash_target,
+                         work_branch)
+
+
+def _run_land(target, engine, image, timeout, killers, push, squash_target, work_branch):
+    refs_before, head_before, branch_before = _land_refs(target)
+    stranded_before = _land_stranded(target)
+    try:
+        before = _land_snapshot(target)
+    except (RuntimeError, OSError) as exc:
+        return _land_result("not-run", f"cannot observe the tree, so a change would go unseen "
+                                       f"({exc})")
+    blocked_before = _land_digest(target / LAND_BLOCKED)
+    nonce = hashlib.sha256(os.urandom(16)).hexdigest()[:16]
+    env = [("MAX_ITERATIONS", "0"), ("PHASEKIT_NO_UPDATE_CHECK", "1"), (LAND_NONCE_ENV, nonce)]
+    if engine is not None:
+        env.append(("PHASEKIT_PROJECT_DIR", "/workspace"))
+    if squash_target:
+        env.append(("PHASEKIT_SQUASH_TARGET", squash_target))
+    if work_branch:
+        env.append(("PHASEKIT_WORK_BRANCH", work_branch))
+    env.append(("AUTO_PUSH", "1" if push else "0"))
+    loop = (f"{ENGINE_CONTAINER_DIR}/scripts/run-until-done.sh" if engine is not None
+            else "scripts/run-until-done.sh")
+    name = f"{LAND_RUNNER_NAME}-{os.getpid()}-{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+    argv = runner_argv(target, image, name, land_script(loop), engine, env=env,
+                       names=LAND_PUSH_SECRETS if push else (), forward_ssh=push)
+    interrupted = False
+    proc, out, timed_out, elapsed = None, "", False, None
+    try:
+        proc, out, timed_out, elapsed = _supervise(argv, None, None, name, timeout, killers)
+    except OSError as exc:
+        return _land_result("not-run", f"could not start the runner ({type(exc).__name__})",
+                            push_requested=push)
+    except UpgradeInterrupted:
+        interrupted = True
+    rc = None if (timed_out or interrupted or proc is None) else proc.returncode
+    out, rec = _split_land_witness(out, nonce)
+    released = []
+    if timed_out or interrupted:
+        released = _land_release_own_lock(target)
+
+    def observe():
+        refs_after, head_after, branch_after = _land_refs(target)
+        try:
+            stranded_after = _land_stranded(target)
+            blocked_after = _land_digest(target / LAND_BLOCKED)
+        except OSError as exc:
+            stranded_after, blocked_after = [f"(unreadable: {type(exc).__name__})"], "absent"
+        return dict(
+            commits=_land_new_commits(target, refs_before, refs_after)[:LAND_COMMITS_MAX],
+            head_after=head_after, branch_after=branch_after, stranded_after=stranded_after,
+            blocked=blocked_after != "absent" and blocked_after != blocked_before,
+            unexpected_changes=_land_unexpected(target, before, head_before, head_after))
+    # A signal after the runner ended must not lose the report of a landing
+    # that happened: the handler raises once, then ignores (review m5).
+    try:
+        seen = observe()
+    except UpgradeInterrupted:
+        interrupted = True
+        seen = observe()
+    status, detail = land_verdict(rc, timed_out, interrupted, out, rec, seen["stranded_after"],
+                                  timeout)
+    if released:
+        detail += ("; removed " + ", ".join(released) + " that this run's own killed loop left "
+                   "(it was absent at the start and no container works on the tree)")
+    return _land_result(
+        status, detail, exit_code=rc, timed_out=timed_out, elapsed_seconds=elapsed,
+        recovery=rec, head_before=head_before, branch_before=branch_before,
+        stranded_before=stranded_before, push_requested=push, tail=_tail(out), output=out,
+        interrupted=interrupted, **seen)
+
+
+def _land_release_own_lock(target):
+    """After this run's runner was killed: git's index.lock, absent at the start
+    (a busy tree is refused), can only be its own loop's — unless another
+    container now works on the tree. Removed so the next landing can continue
+    (review m6); otherwise left and named by the next refusal."""
+    gitdir = _git_text(target, "rev-parse", "--absolute-git-dir")
+    if not gitdir:
+        return []
+    lock = Path(gitdir) / "index.lock"
+    if not lock.exists() or _containers_mounting(target) != []:
+        return []
+    try:
+        lock.unlink()
+    except OSError:
+        return []
+    return [".git/index.lock"]
 
 
 def _dirty_state(target):

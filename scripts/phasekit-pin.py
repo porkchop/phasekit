@@ -32,6 +32,11 @@ Verbs (run by scripts/phasekit.sh; all operate on the project around the cwd):
                           project's gate in the runner image exactly as the
                           upgrade gate does — a MEASUREMENT, never a verdict
                           the loop reuses; either layout
+  land-runner [--json] [--timeout S] [--push] [--squash-target B] [--work-branch B]
+                          (v0.21.0; `phasekit land --in-runner`) the loop's
+                          recovery-only pass (MAX_ITERATIONS=0) in the runner
+                          image through the same harness: lands a stranded
+                          verdict artifact, verify-gated; either layout
 
 Auto-fetch: a pin the store lacks is installed on first use from the canonical
 clone's own tags (git objects, so the bytes are the tag's tree); a tag the
@@ -44,7 +49,8 @@ found a leftover (a tracked engine path, stale hook wiring); 4 the gate was
 red and nothing changed (verify-runner: the gate was not green); 5
 verify-runner only: the gate did not run (no runner, no gate, an unusable
 contracts provider, interrupted); 6 the pinned engine is not installed (and was not
-fetched).
+fetched). land-runner: 0 landed, 3 nothing to land, 4 failed, 5 not run, 7 refused
+(contracts/interface.json facts.land_in_runner).
 """
 
 import argparse
@@ -85,6 +91,7 @@ EXIT_LEFTOVER = 3
 EXIT_GATE_RED = 4
 EXIT_NOT_RUN = 5
 EXIT_NOT_INSTALLED = 6
+EXIT_REFUSED = 7  # land-runner only: it would race a writer
 
 
 class PinError(Exception):
@@ -1245,6 +1252,87 @@ def cmd_verify_runner(args):
     return {"passed": EXIT_OK, "failed": EXIT_GATE_RED}.get(status, EXIT_NOT_RUN)
 
 
+# --- phasekit land --in-runner (v0.21.0) --------------------------------------
+
+LAND_RUNNER_SCHEMA = "phasekit-land-in-runner/1"
+LAND_RUNNER_KEYS = ("schema", "status", "exit_code", "timed_out", "elapsed_seconds", "recovery",
+                    "commits", "head_before", "head_after", "branch_before", "branch_after",
+                    "stranded_before", "stranded_after", "blocked", "unexpected_changes",
+                    "push_requested", "running_containers", "layout", "engine", "image",
+                    "detail", "tail")
+LAND_EXIT = {"landed": EXIT_OK, "nothing": EXIT_LEFTOVER, "failed": EXIT_GATE_RED,
+             "not-run": EXIT_NOT_RUN, "refused": EXIT_REFUSED}
+
+
+def _branch_arg(root, value, flag):
+    if value and _git(root, "check-ref-format", "--branch", value).returncode != 0:
+        raise PinError(f"{flag} {value!r} is not a branch name", EXIT_USAGE)
+    return value or None
+
+
+def cmd_land_runner(args):
+    """`phasekit land --in-runner`: the loop's recovery-only pass (contract
+    fact recovery_only_run) for this project, inside the runner image,
+    composed by THE harness (scripts/enrich-project.py runner_argv; the
+    landing pass is run_project_land). It lands a stranded verdict artifact
+    exactly as a session's loop start would — verify-gated, with the boundary
+    record — and reports what happened. It writes (commits), so it refuses
+    while anything else is writing the tree: a container mounting it, a git
+    operation in progress, another landing, a loop session."""
+    root = project_root()
+    if root is None:
+        raise PinError("not inside a git repository", EXIT_USAGE)
+    lay = layout(root)
+    if lay == "none":
+        raise PinError(f"{root} is not a phasekit project (no .phasekit-version or "
+                       "scripts/run-until-done.sh)", EXIT_USAGE)
+    if args.timeout is not None and args.timeout <= 0:
+        raise PinError("--timeout is a positive number of seconds", EXIT_USAGE)
+    refuse_under_loop("land --in-runner")
+    squash = _branch_arg(root, args.squash_target if args.squash_target is not None
+                         else os.environ.get("PHASEKIT_SQUASH_TARGET"), "--squash-target")
+    work = _branch_arg(root, args.work_branch if args.work_branch is not None
+                       else os.environ.get("PHASEKIT_WORK_BRANCH"), "--work-branch")
+    if work and not squash:
+        raise PinError("--work-branch needs --squash-target (branch-per-iteration names both)",
+                       EXIT_USAGE)
+    e = enrich()
+    engine, engine_tag = None, None
+    if lay == "pinned":
+        engine = resolve_engine(root)
+        engine_tag = engine_version(engine) or read_pin(root)
+    with e._interruptible() as killers:
+        result = e.run_project_land(root, engine=engine,
+                                    timeout=args.timeout or e.LAND_TIMEOUT_DEFAULT,
+                                    killers=killers, push=args.push, squash_target=squash,
+                                    work_branch=work)
+    report = {k: result.get(k) for k in LAND_RUNNER_KEYS}
+    report.update(schema=LAND_RUNNER_SCHEMA, layout=lay, engine=engine_tag,
+                  image=(os.environ.get(e.RUNNER_IMAGE_ENV) or e.RUNNER_IMAGE_DEFAULT).strip())
+    status = result["status"]
+    output = result.get("output") or ""
+    if args.json:
+        if output:
+            sys.stderr.write(output if output.endswith("\n") else output + "\n")
+            sys.stderr.flush()
+        say(json.dumps(report, sort_keys=False))
+    else:
+        if output:
+            sys.stdout.write(output if output.endswith("\n") else output + "\n")
+        word = {"landed": "LANDED", "nothing": "NOTHING TO LAND", "failed": "FAILED",
+                "refused": "REFUSED", "not-run": "NOT RUN"}[status]
+        say(f"phasekit land --in-runner: {word} — {report['detail']}"
+            f" ({lay}{', engine ' + engine_tag if engine_tag else ''}, {report['image']})")
+        for sha in report["commits"]:
+            say(f"  commit {sha[:12]}")
+        if report["stranded_after"]:
+            say("  still never landed: " + ", ".join(report["stranded_after"]))
+        if report["unexpected_changes"]:
+            warn("  WARNING: changed outside what a landing may change: "
+                 + ", ".join(report["unexpected_changes"]))
+    return LAND_EXIT[status]
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="phasekit", description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="verb", required=True)
@@ -1281,10 +1369,27 @@ def main(argv=None):
                     help="one JSON object on stdout; the gate's output goes to stderr")
     pv.add_argument("--timeout", type=int, default=None,
                     help="seconds before the gate is stopped and read as red (default 1800)")
+    pl = sub.add_parser("land-runner")
+    pl.add_argument("--in-runner", action="store_true",
+                    help="accepted: the spelling `phasekit land --in-runner` passes it")
+    pl.add_argument("--json", action="store_true",
+                    help="one JSON object on stdout; the loop's output goes to stderr")
+    pl.add_argument("--timeout", type=int, default=None,
+                    help="seconds before the runner is removed and the result is failed "
+                         "(default 1800)")
+    pl.add_argument("--push", action="store_true",
+                    help="AUTO_PUSH=1, with the ssh-agent socket, known_hosts and "
+                         "GH_TOKEN/GITHUB_TOKEN (by name) crossed as a session gets them")
+    pl.add_argument("--squash-target", default=None,
+                    help="branch-per-iteration's integration branch (default: "
+                         "$PHASEKIT_SQUASH_TARGET)")
+    pl.add_argument("--work-branch", default=None,
+                    help="branch-per-iteration's work branch (default: $PHASEKIT_WORK_BRANCH)")
     args = p.parse_args(argv)
     handlers = {"resolve": cmd_resolve, "engines": cmd_engines, "init": cmd_init,
                 "migrate": cmd_migrate, "check": cmd_check, "upgrade": cmd_upgrade,
-                "plugin": cmd_plugin, "docs": cmd_docs, "verify-runner": cmd_verify_runner}
+                "plugin": cmd_plugin, "docs": cmd_docs, "verify-runner": cmd_verify_runner,
+                "land-runner": cmd_land_runner}
     try:
         return handlers[args.verb](args)
     except PinError as exc:

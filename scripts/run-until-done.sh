@@ -46,6 +46,9 @@ CLAUDE_MODE="${CLAUDE_MODE:-new}"
 # (PHASEKIT_ITERATION_MODE=light) — never a committed setting. Eligibility
 # requires a configured (non-stub) verify gate; see docs/EXECUTION_MODES.md.
 ITERATION_MODE="${PHASEKIT_ITERATION_MODE:-standard}"
+# v0.21.0: the landing witness's nonce, kept by THIS shell only (land_witness).
+LAND_NONCE="${PHASEKIT_LAND_NONCE:-}"
+unset PHASEKIT_LAND_NONCE
 
 # Branch-per-iteration + squash-to-target (v0.14.0). Opt-in per session via
 # PHASEKIT_SQUASH_TARGET=<integration branch>; unset = every commit path below
@@ -396,6 +399,25 @@ clear_scratch_at_iteration_start() {
   fi
   mkdir -p "$d" "$ARTIFACTS_DIR/logs" 2>/dev/null || true
   printf '%s' "$cur" > "$mark" 2>/dev/null || true
+  return 0
+}
+
+# --- the landing pass's witness (v0.21.0) ------------------------------------
+# `phasekit land --in-runner` runs this loop with MAX_ITERATIONS=0 (the
+# recovery-only pass) and needs to know what the loop-start recovery DID, which
+# the exit status cannot say (3 = the limit, landed or not). With
+# PHASEKIT_LAND_NONCE set, the recovery prints one line per decision:
+#   phasekit-land <nonce> none            no boundary was open
+#   phasekit-land <nonce> open <step>     one was, the walk starts at <step>
+#   phasekit-land <nonce> walked <rc>     land_boundary returned <rc>
+#   phasekit-land <nonce> complete        the recovered boundary was the last
+# The nonce is per run and is taken out of the environment at loop start
+# (LAND_NONCE, never exported), so no child — the verify gate, a project test,
+# a nested loop — can read it and print a line (v0.21.0 review, MAJOR 1).
+# Unset: silent.
+land_witness() {
+  [[ -n "${LAND_NONCE:-}" ]] || return 0
+  printf 'phasekit-land %s %s\n' "$LAND_NONCE" "$*" || true
   return 0
 }
 
@@ -6876,6 +6898,7 @@ if [[ "$boundary_recorded_step" -ge 1 && "$boundary_recorded_step" -lt "$BOUNDAR
     _boundary_write '.step = 0 | .step_name = "idle" | .discarded_at = $now | .discarded_reason = "sha_at_step unreachable from HEAD, the target or the recorded work branch"'
   fi
 fi
+if [[ -n "$recover_why" ]]; then land_witness open "$recover_from"; else land_witness none; fi
 if [[ -n "$recover_why" ]]; then
   echo "$recover_why"
   if [[ -f "$ARTIFACTS_DIR/project-complete.json" ]]; then
@@ -6889,11 +6912,13 @@ if [[ -n "$recover_why" ]]; then
   # against does not apply to a tree no new iteration has touched.
   crc=0
   land_boundary "$recover_from" stranded 1 || crc=$?
+  land_witness walked "$crc"
   # v0.14.9: complete is terminal — whatever the walk's rc (a step-7 rest it
   # could not prove included), a landed completion ends the session here:
   # entering the loop would delete project-complete.json and spend a session
   # on a complete project (v0.14.0 review, MAJOR-2; run 756).
   if boundary_complete; then
+    land_witness complete
     finish_complete "boundary-state: the recovered boundary was the project's last — complete; no model turn (v0.14.9)."
   fi
   if [[ "$crc" -eq 0 || "$crc" -eq 2 ]]; then
