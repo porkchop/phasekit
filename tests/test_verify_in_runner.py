@@ -82,7 +82,7 @@ while i < len(args):
         fields = dict(f.split("=", 1) for f in next(csv.reader([args[i + 1]])) if "=" in f)
         mounts[fields["dst"]] = fields["src"]
         i += 2
-    elif a in ("--name", "--entrypoint", "--user", "-w"):
+    elif a in ("--name", "--entrypoint", "--user", "-w", "--memory", "--pids-limit"):
         if a == "-w":
             cwd = args[i + 1]
         i += 2
@@ -310,6 +310,67 @@ class OneComposer(Fixture):
         self.assertNotIn('"docker", "run"', pin)
         self.assertIn("e.run_upgrade_gate(root, mode, engine=engine)", pin)  # upgrade + migrate
         self.assertIn("e.run_project_gate(", pin)  # verify --in-runner
+
+
+class TheRunnerIsBounded(Fixture):
+    """v0.21.1: every runner container carries --memory and --pids-limit (the
+    orchestrator's private runs had 8g/4096; v0.20.0/v0.21.0 dropped them)."""
+
+    def bounds(self, extra=None):
+        r, rep = self.verify_json(env=extra)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        (argv,) = self.runs()
+        image = argv.index("scaffold-runner")
+        self.assertLess(argv.index("--memory"), image, "a docker flag, before the image")
+        self.assertLess(argv.index("--pids-limit"), image)
+        return argv[argv.index("--memory") + 1], argv[argv.index("--pids-limit") + 1], r.stderr
+
+    def test_default_bounds(self):
+        mem, pids, err = self.bounds()
+        self.assertEqual((mem, pids), ("8g", "4096"))
+        self.assertNotIn("PHASEKIT_RUNNER", err)
+
+    def test_the_environment_sets_them(self):
+        mem, pids, _ = self.bounds({"PHASEKIT_RUNNER_MEMORY": "512m",
+                                    "PHASEKIT_RUNNER_PIDS_LIMIT": "100"})
+        self.assertEqual((mem, pids), ("512m", "100"))
+
+    def test_dockers_own_size_forms_are_accepted(self):
+        for good in ("16gb", "1.5g", "512M", "1t", "8589934592"):
+            with self.subTest(mem=good):
+                self.docker_log.unlink(missing_ok=True)
+                mem, _, err = self.bounds({"PHASEKIT_RUNNER_MEMORY": good})
+                self.assertEqual(mem, good)
+                self.assertNotIn("PHASEKIT_RUNNER_MEMORY", err)
+
+    def test_a_bad_value_is_the_default_never_unbounded(self):
+        for bad_mem, bad_pids in (("0", "0"), ("-1", "-1"), ("lots", "many"),
+                                  ("0.0g", "4096.5"), ("8 g", " "), ("+8g", "-0"),
+                                  ("\u0668g", "0x10")):
+            with self.subTest(mem=bad_mem, pids=bad_pids):
+                self.docker_log.unlink(missing_ok=True)
+                mem, pids, err = self.bounds({"PHASEKIT_RUNNER_MEMORY": bad_mem,
+                                              "PHASEKIT_RUNNER_PIDS_LIMIT": bad_pids})
+                self.assertEqual((mem, pids), ("8g", "4096"))
+                self.assertIn("PHASEKIT_RUNNER_MEMORY", err)
+                if bad_pids.strip():
+                    self.assertIn("PHASEKIT_RUNNER_PIDS_LIMIT", err)
+
+    def test_a_killed_gate_names_the_bounds(self):
+        r, rep = self.verify_json(env={"FAKE_DOCKER_RUN_RC": "137"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(rep["status"], "failed")
+        self.assertIn("SIGKILL", rep["detail"])
+        self.assertIn("memory bound (8g, PHASEKIT_RUNNER_MEMORY)", rep["detail"])
+        self.assertNotIn("PIDS_LIMIT", rep["detail"], "the pid bound never SIGKILLs")
+
+    def test_the_bounds_are_declared(self):
+        e = load("pk_enrich_bounds", ENRICH)
+        env = {v["name"]: v for v in json.loads(MANIFEST.read_text())["env"]}
+        self.assertEqual(env[e.RUNNER_MEMORY_ENV]["default"], e.RUNNER_MEMORY_DEFAULT)
+        self.assertEqual(env[e.RUNNER_PIDS_LIMIT_ENV]["default"], str(e.RUNNER_PIDS_LIMIT_DEFAULT))
+        for name in (e.RUNNER_MEMORY_ENV, e.RUNNER_PIDS_LIMIT_ENV):
+            self.assertFalse(env[name]["container_forwarded"])
 
 
 class TheFastTierIsMeasuredOnACompletedTree(Fixture):

@@ -243,6 +243,22 @@
       "semantics": "v0.16.0. The runner image the upgrade gate uses in auto and container modes (v0.20.0: and `phasekit verify --in-runner`, the same harness); the project is mounted read-write at /workspace with git safe.directory set. v0.16.2: a session's environment — HOME=/home/node for uid 0 or 1000 (a throwaway HOME otherwise), CLAUDE_CONFIG_DIR, IS_SANDBOX=1 as root, a global git identity (GIT_USER_NAME/GIT_USER_EMAIL, else the repo's, else 'phasekit upgrade'), and the contracts provider read-only at /contracts."
     },
     {
+      "name": "PHASEKIT_RUNNER_MEMORY",
+      "kind": "consumed",
+      "read_by": ["scripts/enrich-project.py"],
+      "default": "8g",
+      "container_forwarded": false,
+      "semantics": "v0.21.1. The --memory bound on every runner container the harness starts (the upgrade/migrate gate, `phasekit verify --in-runner`, `phasekit land --in-runner`). A docker size (8g, 8gb, 1.5g, 512m, 1t: units b/k/m/g/t/p, optional trailing b), greater than zero; empty or malformed falls back to the default with one stderr line, never to unbounded. A runner killed with exit 137 is reported as SIGKILLed, naming this bound (the pid bound never SIGKILLs: a fork past it fails with EAGAIN)."
+    },
+    {
+      "name": "PHASEKIT_RUNNER_PIDS_LIMIT",
+      "kind": "consumed",
+      "read_by": ["scripts/enrich-project.py"],
+      "default": "4096",
+      "container_forwarded": false,
+      "semantics": "v0.21.1. The --pids-limit bound on every runner container the harness starts. An integer >= 1; 0, a negative or a non-integer falls back to the default with one stderr line (docker reads 0 as unlimited)."
+    },
+    {
       "name": "CLAUDE_MODE",
       "kind": "both",
       "read_by": ["scripts/run-until-done.sh", "scripts/run-phase.sh", "scripts/container-setup.sh"],

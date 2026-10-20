@@ -1595,6 +1595,20 @@ UPGRADE_VERIFY_TIMEOUT_ENV = "PHASEKIT_UPGRADE_VERIFY_TIMEOUT"
 UPGRADE_VERIFY_TIMEOUT_DEFAULT = 1800
 RUNNER_IMAGE_ENV = "PHASEKIT_RUNNER_IMAGE"
 RUNNER_IMAGE_DEFAULT = "scaffold-runner"
+# v0.21.1: every runner container is bounded. The harness took over the
+# orchestrator's private docker runs in v0.20.0/v0.21.0 and dropped their
+# `--memory 8g --pids-limit 4096`; these restore them for every caller (the
+# upgrade/migrate gate, verify --in-runner, land --in-runner). A bad value falls
+# back to the default, never to unbounded: `--pids-limit 0` (or -1) means
+# UNLIMITED to docker, the worst failure because it looks contained.
+RUNNER_MEMORY_ENV = "PHASEKIT_RUNNER_MEMORY"
+RUNNER_MEMORY_DEFAULT = "8g"
+RUNNER_PIDS_LIMIT_ENV = "PHASEKIT_RUNNER_PIDS_LIMIT"
+RUNNER_PIDS_LIMIT_DEFAULT = 4096
+# docker's own size forms: 8g, 8gb, 1.5g, 512m, 1t (units b k m g t p, an
+# optional trailing b). Zero is refused here: it would not be a bound.
+_RUNNER_MEMORY_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)?[bkmgtp]?b?$", re.IGNORECASE | re.ASCII)
+RUNNER_KILLED_RC = 137  # 128 + SIGKILL: inside the runner, most often the memory bound
 UPGRADE_GATE_TAIL_LINES = 40
 EXIT_UPGRADE_GATE_RED = 4
 EXIT_UPGRADE_UNCOMMITTED = 5
@@ -2017,6 +2031,46 @@ def _split_gate_time(out, nonce):
     return out[:m.start()] + out[m.end():], int(m.group(1)) / 1000.0
 
 
+def runner_bounds(*, quiet=False):
+    """(memory, pids_limit) for a runner container: PHASEKIT_RUNNER_MEMORY (a
+    docker size, e.g. 8g or 512m) and PHASEKIT_RUNNER_PIDS_LIMIT (an integer >=
+    1). Unset, empty or malformed falls back to the default with one stderr
+    line; nothing here ever yields an unbounded container."""
+    mem = (os.environ.get(RUNNER_MEMORY_ENV) or "").strip()
+    if not mem:
+        mem = RUNNER_MEMORY_DEFAULT
+    elif not (_RUNNER_MEMORY_RE.match(mem)
+              and float(re.match(r"[0-9.]+", mem).group()) > 0):
+        if not quiet:
+            print(f"phasekit: {RUNNER_MEMORY_ENV}={mem!r} is not a docker size (e.g. 8g); "
+                  f"using {RUNNER_MEMORY_DEFAULT}", file=sys.stderr)
+        mem = RUNNER_MEMORY_DEFAULT
+    raw = (os.environ.get(RUNNER_PIDS_LIMIT_ENV) or "").strip()
+    pids = RUNNER_PIDS_LIMIT_DEFAULT
+    if raw:
+        try:
+            pids = int(raw, 10)
+        except ValueError:
+            pids = 0
+        if pids < 1:
+            if not quiet:
+                print(f"phasekit: {RUNNER_PIDS_LIMIT_ENV}={raw!r} is not an integer >= 1 (0 "
+                      f"would mean unlimited to docker); using {RUNNER_PIDS_LIMIT_DEFAULT}",
+                      file=sys.stderr)
+            pids = RUNNER_PIDS_LIMIT_DEFAULT
+    return mem, pids
+
+
+def _killed_hint():
+    # The pid bound never SIGKILLs (fork fails with EAGAIN instead), so it is
+    # not named: a 137 is the memory bound, the host OOM killer, or an outside
+    # `docker kill` / `docker rm -f`.
+    mem, _ = runner_bounds(quiet=True)
+    return (f"SIGKILLed (exit {RUNNER_KILLED_RC}); inside the runner that is most often its "
+            f"memory bound ({mem}, {RUNNER_MEMORY_ENV}), else the host's OOM killer or an "
+            "outside docker kill")
+
+
 def runner_argv(target, image, name, script, engine=None, *, env=(), names=(),
                 forward_ssh=False):
     """THE runner invocation: `docker run` of SCRIPT (the project's gate, or
@@ -2036,8 +2090,11 @@ def runner_argv(target, image, name, script, engine=None, *, env=(), names=(),
     value never reaches argv), as container-setup.sh crosses GH_TOKEN /
     GITHUB_TOKEN; FORWARD_SSH mounts the ssh-agent SOCKET (never a key) and
     known_hosts read-only, as container-setup.sh does for a session's push.
-    The gate passes none of them: no credentials, no ssh agent."""
+    The gate passes none of them: no credentials, no ssh agent.
+
+    v0.21.1: every call is bounded (runner_bounds: --memory, --pids-limit)."""
     user = _runner_user()
+    mem, pids = runner_bounds()
     git_name, git_email = _gate_git_identity(target)
     session = ["-e", f"HOME={_runner_home(user)}",
                "-e", f"CLAUDE_CONFIG_DIR={RUNNER_HOME}/.claude",
@@ -2081,6 +2138,7 @@ def runner_argv(target, image, name, script, engine=None, *, env=(), names=(),
     return ["docker", "run", "--rm", "--name", name, "--entrypoint", "bash",
             "--mount", _mount_arg(Path(target).resolve()), "-w", "/workspace",
             "--user", user,
+            "--memory", mem, "--pids-limit", str(pids),
             *_forward_env_args(),
             "-e", "GIT_CONFIG_COUNT=1",
             "-e", "GIT_CONFIG_KEY_0=safe.directory",
@@ -2307,6 +2365,8 @@ def _run_project_gate(target, mode, killers, scratch, engine, tier, timeout, nam
                             "could not be written; see the tail)")
     elif name and proc.returncode == RUNNER_START_FAILED_RC:
         verdict = ("infra", f"the runner could not start (docker exit {RUNNER_START_FAILED_RC})")
+    elif name and proc.returncode == RUNNER_KILLED_RC:
+        verdict = ("failed", "the gate was " + _killed_hint())
     elif proc.returncode != 0:
         verdict = ("failed", f"exit {proc.returncode}")
     elif footprint:
@@ -2639,6 +2699,8 @@ def land_verdict(rc, timed_out, interrupted, out, rec, stranded_after, timeout):
         return "not-run", "the runner's session setup failed (see the tail)"
     if rc == RUNNER_START_FAILED_RC:
         return "not-run", f"the runner could not start (docker exit {RUNNER_START_FAILED_RC})"
+    if rc == RUNNER_KILLED_RC:
+        return "failed", f"the runner was {_killed_hint()}: {mid}"
     if LAND_NO_MODEL_MARK in (out or ""):
         return "failed", ("the loop tried to start a model, which the landing pass refuses "
                           "(see the tail); nothing a model would have done happened")
