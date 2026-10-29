@@ -1606,8 +1606,14 @@ RUNNER_MEMORY_DEFAULT = "8g"
 RUNNER_PIDS_LIMIT_ENV = "PHASEKIT_RUNNER_PIDS_LIMIT"
 RUNNER_PIDS_LIMIT_DEFAULT = 4096
 # docker's own size forms: 8g, 8gb, 1.5g, 512m, 1t (units b k m g t p, an
-# optional trailing b). Zero is refused here: it would not be a bound.
-_RUNNER_MEMORY_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)?[bkmgtp]?b?$", re.IGNORECASE | re.ASCII)
+# optional trailing b). v0.21.2: judged in BYTES as docker computes them (number
+# x unit, truncated), within [6 MiB, 2^62): docker truncates 0.5 or 0.9b to 0
+# bytes, which it reads as NO bound, and refuses anything under its 6 MiB
+# minimum. container-setup.sh's session_bounds applies the same rule.
+_RUNNER_MEMORY_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)([bkmgtp]?)b?$", re.IGNORECASE | re.ASCII)
+_RUNNER_MEMORY_UNITS = {"": 1, "b": 1, "k": 2**10, "m": 2**20, "g": 2**30, "t": 2**40, "p": 2**50}
+_RUNNER_MEMORY_MIN_BYTES = 6 * 2**20
+_RUNNER_MEMORY_MAX_BYTES = 2**62
 RUNNER_KILLED_RC = 137  # 128 + SIGKILL: inside the runner, most often the memory bound
 UPGRADE_GATE_TAIL_LINES = 40
 EXIT_UPGRADE_GATE_RED = 4
@@ -2031,6 +2037,19 @@ def _split_gate_time(out, nonce):
     return out[:m.start()] + out[m.end():], int(m.group(1)) / 1000.0
 
 
+def _runner_memory_ok(mem):
+    """Whether MEM is a docker size whose byte count, truncated as docker
+    truncates it, is a real bound docker accepts."""
+    m = _RUNNER_MEMORY_RE.match(mem)
+    if not m:
+        return False
+    try:
+        size = int(float(m.group(1)) * _RUNNER_MEMORY_UNITS[m.group(2).lower()])
+    except OverflowError:  # a digit run long enough to be inf
+        return False
+    return _RUNNER_MEMORY_MIN_BYTES <= size < _RUNNER_MEMORY_MAX_BYTES
+
+
 def runner_bounds(*, quiet=False):
     """(memory, pids_limit) for a runner container: PHASEKIT_RUNNER_MEMORY (a
     docker size, e.g. 8g or 512m) and PHASEKIT_RUNNER_PIDS_LIMIT (an integer >=
@@ -2039,11 +2058,10 @@ def runner_bounds(*, quiet=False):
     mem = (os.environ.get(RUNNER_MEMORY_ENV) or "").strip()
     if not mem:
         mem = RUNNER_MEMORY_DEFAULT
-    elif not (_RUNNER_MEMORY_RE.match(mem)
-              and float(re.match(r"[0-9.]+", mem).group()) > 0):
+    elif not _runner_memory_ok(mem):
         if not quiet:
-            print(f"phasekit: {RUNNER_MEMORY_ENV}={mem!r} is not a docker size (e.g. 8g); "
-                  f"using {RUNNER_MEMORY_DEFAULT}", file=sys.stderr)
+            print(f"phasekit: {RUNNER_MEMORY_ENV}={mem!r} is not a docker size from 6m "
+                  f"(e.g. 8g); using {RUNNER_MEMORY_DEFAULT}", file=sys.stderr)
         mem = RUNNER_MEMORY_DEFAULT
     raw = (os.environ.get(RUNNER_PIDS_LIMIT_ENV) or "").strip()
     pids = RUNNER_PIDS_LIMIT_DEFAULT
@@ -2138,7 +2156,7 @@ def runner_argv(target, image, name, script, engine=None, *, env=(), names=(),
     return ["docker", "run", "--rm", "--name", name, "--entrypoint", "bash",
             "--mount", _mount_arg(Path(target).resolve()), "-w", "/workspace",
             "--user", user,
-            "--memory", mem, "--pids-limit", str(pids),
+            "--memory", mem, "--memory-swap", mem, "--pids-limit", str(pids),
             *_forward_env_args(),
             "-e", "GIT_CONFIG_COUNT=1",
             "-e", "GIT_CONFIG_KEY_0=safe.directory",

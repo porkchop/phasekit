@@ -108,7 +108,7 @@ while i < len(args):
         fields = dict(f.split("=", 1) for f in next(csv.reader([args[i + 1]])) if "=" in f)
         mounts[fields["dst"]] = fields["src"]
         i += 2
-    elif a in ("--name", "--entrypoint", "--user", "-w", "--memory", "--pids-limit"):
+    elif a in ("--name", "--entrypoint", "--user", "-w", "--memory", "--memory-swap", "--pids-limit"):
         if a == "-w":
             cwd = args[i + 1]
         i += 2
@@ -574,6 +574,7 @@ class OneComposer(Fixture):
         self.assertEqual(land[:i - 2] + land[i:], gate, "the same call plus the loop's pair")
         self.assertEqual(land[i - 2:i], ["-e", "MAX_ITERATIONS=0"])
         self.assertEqual(land[land.index("--memory") + 1], "8g", "the landing is bounded too")
+        self.assertEqual(land[land.index("--memory-swap") + 1], "8g", "no swap past the bound")
         self.assertEqual(land[land.index("--pids-limit") + 1], "4096")
         src = ENRICH.read_text()
         self.assertEqual(src.count('"docker", "run"'), 1, "runner_argv is the one composer")

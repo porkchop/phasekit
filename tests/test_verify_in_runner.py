@@ -82,7 +82,8 @@ while i < len(args):
         fields = dict(f.split("=", 1) for f in next(csv.reader([args[i + 1]])) if "=" in f)
         mounts[fields["dst"]] = fields["src"]
         i += 2
-    elif a in ("--name", "--entrypoint", "--user", "-w", "--memory", "--pids-limit"):
+    elif a in ("--name", "--entrypoint", "--user", "-w", "--memory", "--memory-swap",
+               "--pids-limit"):
         if a == "-w":
             cwd = args[i + 1]
         i += 2
@@ -330,6 +331,18 @@ class TheRunnerIsBounded(Fixture):
         self.assertEqual((mem, pids), ("8g", "4096"))
         self.assertNotIn("PHASEKIT_RUNNER", err)
 
+    def test_swap_is_bounded_at_the_memory_bound(self):
+        """v0.21.2: --memory-swap equals --memory, so a runner never spills into
+        host swap (docker's default lets it take as much swap again)."""
+        for extra, want in ((None, "8g"), ({"PHASEKIT_RUNNER_MEMORY": "512m"}, "512m"),
+                            ({"PHASEKIT_RUNNER_MEMORY": "0"}, "8g")):
+            with self.subTest(env=extra):
+                self.docker_log.unlink(missing_ok=True)
+                self.bounds(extra)
+                (argv,) = self.runs()
+                self.assertEqual(argv[argv.index("--memory-swap") + 1], want)
+                self.assertLess(argv.index("--memory-swap"), argv.index("scaffold-runner"))
+
     def test_the_environment_sets_them(self):
         mem, pids, _ = self.bounds({"PHASEKIT_RUNNER_MEMORY": "512m",
                                     "PHASEKIT_RUNNER_PIDS_LIMIT": "100"})
@@ -355,6 +368,23 @@ class TheRunnerIsBounded(Fixture):
                 self.assertIn("PHASEKIT_RUNNER_MEMORY", err)
                 if bad_pids.strip():
                     self.assertIn("PHASEKIT_RUNNER_PIDS_LIMIT", err)
+
+    def test_a_size_docker_reads_as_no_bound_is_the_default(self):
+        """v0.21.2, review r1: docker truncates 0.5 or 0.9b to 0 bytes, which it
+        reads as NO memory bound, and refuses anything under 6 MiB; an inf-sized
+        digit run must not raise."""
+        for bad in ("0.5", "0.9b", "0.0000001g", "1m", "5.9m", "9" * 400, "99999999999999999999p"):
+            with self.subTest(mem=bad):
+                self.docker_log.unlink(missing_ok=True)
+                mem, _, err = self.bounds({"PHASEKIT_RUNNER_MEMORY": bad})
+                self.assertEqual(mem, "8g")
+                self.assertIn("PHASEKIT_RUNNER_MEMORY", err)
+        for good in ("6m", "6291456"):
+            with self.subTest(mem=good):
+                self.docker_log.unlink(missing_ok=True)
+                mem, _, err = self.bounds({"PHASEKIT_RUNNER_MEMORY": good})
+                self.assertEqual(mem, good)
+                self.assertNotIn("PHASEKIT_RUNNER_MEMORY", err)
 
     def test_a_killed_gate_names_the_bounds(self):
         r, rep = self.verify_json(env={"FAKE_DOCKER_RUN_RC": "137"})

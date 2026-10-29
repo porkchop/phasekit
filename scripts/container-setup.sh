@@ -65,6 +65,15 @@ set -euo pipefail
 #                             "uid:gid" (e.g. "1001:1001"). Takes precedence over
 #                             PHASEKIT_ROOTLESS_DOCKER. Default: unset (image's
 #                             built-in non-root `node` user, UID 1000).
+#
+# Session bounds (v0.21.2):
+#   PHASEKIT_SESSION_MEMORY      The session container's --memory, and its
+#                                --memory-swap (no swap past it). A docker size
+#                                from 6m (10g, 1.5g, 512m). Default: 10g.
+#   PHASEKIT_SESSION_PIDS_LIMIT  The session container's --pids-limit, an integer
+#                                from 1 to 999999999. Default: 8192.
+#   A malformed value falls back to the default with one stderr line, never to
+#   unbounded.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # v0.19.0: the engine (this checkout) vs the project. A vendored project runs
@@ -86,6 +95,50 @@ fi
 PINNED=0
 if [[ "$ROOT_DIR" != "$ENGINE_DIR" ]]; then PINNED=1; fi
 ENGINE_CONTAINER_DIR="/opt/phasekit"
+
+# v0.21.2: the session container is bounded, as every runner container has been
+# since v0.21.1 (enrich-project.py runner_bounds). Before this the session ran
+# unbounded: on 2026-10-28 a test run inside one took about 25 GB plus all host
+# swap, and the host OOM killer took the operator's own processes first. The
+# swap bound equals the memory bound, so a session never spills into host swap.
+# A bad value falls back to the default, never to unbounded: docker reads a pid
+# limit of 0 (or -1) as UNLIMITED, the worst failure because it looks contained,
+# and a memory size it truncates to 0 bytes (0.5, 0.9b) as no bound at all.
+# Memory is therefore judged in BYTES the way docker computes them (number x
+# unit, truncated) and must lie in [6 MiB, 2^62): 6 MiB is docker's own
+# minimum. The pid limit is judged as a digit STRING (at most 9 significant
+# digits) so bash arithmetic, which wraps silently at 64 bits, never sees a
+# value that could wrap to 0 or below.
+SESSION_MEMORY_DEFAULT="10g"
+SESSION_PIDS_LIMIT_DEFAULT=8192
+SESSION_KILLED_RC=137  # 128 + SIGKILL: a supervisor's docker kill, or the memory bound
+session_bounds() {
+  local mem="${PHASEKIT_SESSION_MEMORY:-}" pids="${PHASEKIT_SESSION_PIDS_LIMIT:-}"
+  local size_re='^([0-9]+(\.[0-9]+)?)([bkmgtpBKMGTP]?)[bB]?$' int_re='^0*([1-9][0-9]{0,8})$'
+  mem="${mem#"${mem%%[![:space:]]*}"}"; mem="${mem%"${mem##*[![:space:]]}"}"
+  pids="${pids#"${pids%%[![:space:]]*}"}"; pids="${pids%"${pids##*[![:space:]]}"}"
+  if [[ -z "$mem" ]]; then
+    mem="$SESSION_MEMORY_DEFAULT"
+  elif ! [[ "$mem" =~ $size_re ]] || ! awk -v n="${BASH_REMATCH[1]}" -v u="${BASH_REMATCH[3]}" 'BEGIN {
+         m = 1; u = tolower(u)
+         if (u == "k") m = 2^10; else if (u == "m") m = 2^20; else if (u == "g") m = 2^30
+         else if (u == "t") m = 2^40; else if (u == "p") m = 2^50
+         b = int(n * m); exit !(b >= 6 * 2^20 && b < 2^62) }'; then
+    echo "phasekit: PHASEKIT_SESSION_MEMORY='$mem' is not a docker size from 6m (e.g. 10g); using $SESSION_MEMORY_DEFAULT" >&2
+    mem="$SESSION_MEMORY_DEFAULT"
+  fi
+  if [[ -z "$pids" ]]; then
+    pids="$SESSION_PIDS_LIMIT_DEFAULT"
+  elif [[ "$pids" =~ $int_re ]]; then
+    pids="${BASH_REMATCH[1]}"
+  else
+    echo "phasekit: PHASEKIT_SESSION_PIDS_LIMIT='$pids' is not an integer from 1 to 999999999 (0 would mean unlimited to docker); using $SESSION_PIDS_LIMIT_DEFAULT" >&2
+    pids="$SESSION_PIDS_LIMIT_DEFAULT"
+  fi
+  SESSION_MEMORY="$mem"
+  SESSION_PIDS_LIMIT="$pids"
+}
+
 IMAGE_NAME="${IMAGE_NAME:-scaffold-runner}"
 CLAUDE_VOLUME="${CLAUDE_VOLUME:-scaffold-claude-config}"
 COMMAND="${1:-build}"
@@ -516,8 +569,12 @@ run_container() {
   local cmd=("$@")
   echo "Starting container from: $ROOT_DIR"
 
+  session_bounds
   local docker_args=(
     --rm
+    --memory "$SESSION_MEMORY"
+    --memory-swap "$SESSION_MEMORY"
+    --pids-limit "$SESSION_PIDS_LIMIT"
     --cap-drop=ALL
     --cap-add=NET_ADMIN
     --cap-add=NET_RAW
@@ -820,7 +877,17 @@ run_container() {
   project_sessions_mount "$sessions_user" || exit 1
   docker_args+=("${PROJECT_SESSIONS_ARGS[@]}")
 
-  docker run "${docker_args[@]}" "$IMAGE_NAME" "${cmd[@]}"
+  local rc=0
+  docker run "${docker_args[@]}" "$IMAGE_NAME" "${cmd[@]}" || rc=$?
+  if [[ "$rc" == "$SESSION_KILLED_RC" ]]; then
+    # The pid bound never SIGKILLs (a fork past it fails with EAGAIN), so it is
+    # not named.
+    # PID 1 is the loop's bash, and a cgroup OOM kills the largest task (a test
+    # worker, claude) rather than it, so a 137 HERE is most often an outside
+    # `docker kill` (a supervisor's timeout); the memory bound comes second.
+    echo "phasekit: the session container was SIGKILLed (exit $SESSION_KILLED_RC): an outside docker kill (e.g. a supervisor's timeout), else its memory bound ($SESSION_MEMORY, PHASEKIT_SESSION_MEMORY) or the host's OOM killer" >&2
+  fi
+  return "$rc"
 }
 
 case "$COMMAND" in

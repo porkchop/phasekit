@@ -248,7 +248,7 @@
       "read_by": ["scripts/enrich-project.py"],
       "default": "8g",
       "container_forwarded": false,
-      "semantics": "v0.21.1. The --memory bound on every runner container the harness starts (the upgrade/migrate gate, `phasekit verify --in-runner`, `phasekit land --in-runner`). A docker size (8g, 8gb, 1.5g, 512m, 1t: units b/k/m/g/t/p, optional trailing b), greater than zero; empty or malformed falls back to the default with one stderr line, never to unbounded. A runner killed with exit 137 is reported as SIGKILLed, naming this bound (the pid bound never SIGKILLs: a fork past it fails with EAGAIN)."
+      "semantics": "v0.21.1. The --memory bound on every runner container the harness starts (the upgrade/migrate gate, `phasekit verify --in-runner`, `phasekit land --in-runner`), and since v0.21.2 its --memory-swap too (the same value). A docker size (8g, 8gb, 1.5g, 512m, 1t: units b/k/m/g/t/p, optional trailing b), since v0.21.2 judged in bytes as docker truncates it, from 6 MiB to below 2^62; empty or malformed falls back to the default with one stderr line, never to unbounded. A runner killed with exit 137 is reported as SIGKILLed, naming this bound (the pid bound never SIGKILLs: a fork past it fails with EAGAIN)."
     },
     {
       "name": "PHASEKIT_RUNNER_PIDS_LIMIT",
@@ -257,6 +257,22 @@
       "default": "4096",
       "container_forwarded": false,
       "semantics": "v0.21.1. The --pids-limit bound on every runner container the harness starts. An integer >= 1; 0, a negative or a non-integer falls back to the default with one stderr line (docker reads 0 as unlimited)."
+    },
+    {
+      "name": "PHASEKIT_SESSION_MEMORY",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "10g",
+      "container_forwarded": true,
+      "semantics": "v0.21.2. The --memory bound on the session container, and its --memory-swap (the same value, so a session never spills into host swap). A docker size (10g, 1.5g, 512m: units b/k/m/g/t/p, optional trailing b) judged in bytes as docker truncates it, from 6 MiB (docker's minimum) to below 2^62; empty, malformed or out of range falls back to the default with one stderr line, never to unbounded (docker reads a size truncated to 0 bytes as no bound). A session container that exits 137 is reported as SIGKILLed: an outside docker kill first, else this bound."
+    },
+    {
+      "name": "PHASEKIT_SESSION_PIDS_LIMIT",
+      "kind": "consumed",
+      "read_by": ["scripts/container-setup.sh"],
+      "default": "8192",
+      "container_forwarded": true,
+      "semantics": "v0.21.2. The --pids-limit bound on the session container. An integer from 1 to 999999999, judged as a digit string so it can never wrap; 0, a negative, a non-integer or a longer number falls back to the default with one stderr line (docker reads 0 as unlimited)."
     },
     {
       "name": "CLAUDE_MODE",
