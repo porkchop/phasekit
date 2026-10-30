@@ -361,7 +361,7 @@
       "read_by": ["scripts/container-setup.sh", "scripts/phasekit-launch.py"],
       "default": "scaffold-claude-config",
       "container_forwarded": true,
-      "semantics": "Named Docker volume mounted at /home/node/.claude, holding persisted Claude subscription credentials — one volume is the fleet's shared auth."
+      "semantics": "Named Docker volume mounted at /home/node/.claude, holding persisted Claude subscription credentials — one volume is the fleet's shared auth. v0.22.1: a container composed by phasekit-launch.py never mounts it whole; its CLAUDE_CONFIG_DIR is a private tmpfs and only the volume's .credentials.json (writable unless a call asks ro, since refresh tokens rotate) and settings.json (read-only) are mounted into it, each by volume-subpath (docker 26+), and only when the volume holds it."
     },
     {
       "name": "PLAYWRIGHT_MCP_VERSION",

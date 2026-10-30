@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import unittest
+from unittest import mock
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -34,9 +35,14 @@ BAD_PIDS = ("0", "-1", "many", "4096.5", "00", "-0", "0x10", "1e3",
             "18446744073709551616", "9223372036854775808", "1000000000", "0" * 30)
 
 
-def compose(role="oneshot", command=("true",), environ=None, **kw):
+FLEET_VOLUME = {".credentials.json", "settings.json", "projects", "history.jsonl"}
+
+
+def compose(role="oneshot", command=("true",), environ=None, entries=FLEET_VOLUME, **kw):
+    """ENTRIES stands in for what the credentials volume holds (no docker probe)."""
     kw.setdefault("user", ROOT)
-    return L.compose(role, "pk-test", list(command), environ=environ or {}, **kw)
+    with mock.patch.object(L, "volume_entries", lambda volume: entries):
+        return L.compose(role, "pk-test", list(command), environ=environ or {}, **kw)
 
 
 def flag(argv, name):
@@ -47,9 +53,17 @@ def envs(argv):
     return [argv[i + 1] for i, a in enumerate(argv) if a == "-e"]
 
 
+
+def mount_values(argv):
+    return [argv[i + 1] for i, a in enumerate(argv) if a == "--mount"]
+
 class Bounds(unittest.TestCase):
     def test_every_role_is_bounded_with_swap_equal_to_memory(self):
+        # the session's own argv is pinned by tests/test_session_bounds.py
         for role, (mem, pids, *_rest) in L.ROLES.items():
+            if role in L.BOUNDS_ONLY_ROLES:
+                self.assertEqual(L.bounds(role, environ={}), (mem, pids))
+                continue
             with self.subTest(role=role):
                 argv = compose(role)
                 self.assertEqual(flag(argv, "--memory"), mem)
@@ -66,6 +80,9 @@ class Bounds(unittest.TestCase):
         for role in L.ROLES:
             with self.subTest(role=role):
                 env = {L.memory_env(role): "3g", L.pids_env(role): "0100"}
+                if role in L.BOUNDS_ONLY_ROLES:
+                    self.assertEqual(L.bounds(role, environ=env), ("3g", 100))
+                    continue
                 argv = compose(role, environ=env)
                 self.assertEqual((flag(argv, "--memory"), flag(argv, "--memory-swap"),
                                   flag(argv, "--pids-limit")), ("3g", "3g", "100"))
@@ -106,14 +123,73 @@ class Composition(unittest.TestCase):
 
     def test_credentials_follow_the_role_and_the_caller(self):
         def creds(argv):
-            return [argv[i + 1] for i, a in enumerate(argv)
-                    if a == "--mount" and "type=volume" in argv[i + 1]]
-        self.assertEqual(creds(compose("runner")), [])
-        self.assertTrue(creds(compose("oneshot"))[0].endswith(",readonly"))
-        self.assertFalse(creds(compose("repair"))[0].endswith(",readonly"))
-        self.assertEqual(creds(compose("oneshot", credentials="none")), [])
-        vol = creds(compose("oneshot", environ={"CLAUDE_VOLUME": "other-vol"}))[0]
-        self.assertIn('"src=other-vol"', vol)
+            return {m.split("volume-subpath=")[1].split(",")[0]: m.endswith(",readonly")
+                    for m in mount_values(argv) if "type=volume" in m}
+        self.assertEqual(creds(compose("runner")), {})
+        # The login is writable by default: a refresh into a read-only login
+        # strands the rotated token and logs the fleet out. Settings: read-only.
+        for role in ("oneshot", "repair"):
+            with self.subTest(role=role):
+                self.assertEqual(creds(compose(role)),
+                                 {".credentials.json": False, "settings.json": True})
+        self.assertEqual(creds(compose("oneshot", credentials="ro")),
+                         {".credentials.json": True, "settings.json": True})
+        self.assertEqual(creds(compose("oneshot", credentials="none")), {})
+        vol = [m for m in mount_values(compose("oneshot", environ={"CLAUDE_VOLUME": "other-vol"}))
+               if "type=volume" in m]
+        self.assertTrue(vol and all('"src=other-vol"' in m for m in vol))
+
+    def test_no_role_mounts_the_shared_volume_whole(self):
+        """v0.22.1: transcripts, history and .claude.json live in the config dir;
+        a container that mounts the whole volume shares them with every other.
+        Every composed role, every credentials mode: the config dir is a private
+        tmpfs any user can write, and the volume reaches it one file at a time."""
+        for role in set(L.ROLES) - set(L.BOUNDS_ONLY_ROLES):
+            for cred in ("none", "ro", "rw"):
+                with self.subTest(role=role, credentials=cred):
+                    mounts = mount_values(compose(role, credentials=cred))
+                    for m in mounts:
+                        if "type=volume" in m and "scaffold-claude-config" in m:
+                            self.assertIn(",volume-subpath=", m)
+                    if cred != "none":
+                        self.assertEqual(
+                            mounts[0], f"type=tmpfs,dst={L.CLAUDE_CONFIG_DIR},tmpfs-mode=1777")
+                        self.assertEqual(
+                            sorted(m.split(",dst=")[1].split(",")[0] for m in mounts[1:3]),
+                            [f"{L.CLAUDE_CONFIG_DIR}/{L.CREDENTIALS_FILE}",
+                             f"{L.CLAUDE_CONFIG_DIR}/{L.SETTINGS_FILE}"])
+
+    def test_a_caller_cannot_mount_the_credentials_volume_whole(self):
+        for spec in ("scaffold-claude-config:/x", "scaffold-claude-config:/home/node/.claude:ro"):
+            with self.subTest(spec=spec), self.assertRaises(L.LaunchError):
+                compose(credentials="none", volumes=[spec])
+        with self.assertRaises(L.LaunchError):
+            compose(environ={"CLAUDE_VOLUME": "v2"}, volumes=["v2:/x"])
+        self.assertTrue(compose(volumes=["other:/x"]))
+
+    def test_a_file_the_volume_lacks_is_not_mounted_and_unknown_mounts_both(self):
+        def subpaths(entries):
+            return sorted(m.split("volume-subpath=")[1].split(",")[0]
+                          for m in mount_values(compose(entries=entries)) if "type=volume" in m)
+        self.assertEqual(subpaths({".credentials.json"}), [".credentials.json"])
+        self.assertEqual(subpaths({"settings.json"}), ["settings.json"])  # an API-key login
+        self.assertEqual(subpaths(set()), [])
+        # unreadable volume: mount both, so a missing one fails the run, never widens it
+        self.assertEqual(subpaths(None), [".credentials.json", "settings.json"])
+        self.assertIn("volume-subpath", L.exit_reason("oneshot", 127))
+
+    def test_the_session_is_bounds_only_here(self):
+        with self.assertRaises(L.LaunchError) as cm:
+            compose("session")
+        self.assertIn("container-setup.sh", str(cm.exception))
+        self.assertEqual(L.bounds("session", environ={}), ("10g", 8192))
+
+    def test_a_volume_subpath_is_one_plain_entry(self):
+        for bad in ("../x", "a/b", "..", ".", "a,b", ""):
+            with self.subTest(subpath=bad), self.assertRaises(L.LaunchError):
+                L.mount_arg("vol", "/d", kind="volume", subpath=bad)
+        with self.assertRaises(L.LaunchError):
+            L.mount_arg("/host", "/d", subpath="x")  # a bind has no subpath
 
     def test_mounts_are_one_field_each_and_split_at_the_last_colon(self):
         argv = compose(mounts=["/srv/a:b,c:/out", "/proj:/project:ro"])
