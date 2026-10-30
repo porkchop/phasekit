@@ -26,6 +26,13 @@
 #                                 composed by the same harness as verify --in-runner; it
 #                                 commits, so it refuses while a container works on the
 #                                 tree. Served by this CLI (scripts/phasekit-pin.py land-runner)
+#   phasekit launch-argv --role R --name N [--mount SRC:DST[:ro]] [--credentials none|ro|rw]
+#                        [--env NAME] [--set NAME=VALUE] [--add-host H] [--workdir D]
+#                        [--entrypoint E] [--json] -- CMD...
+#                                 v0.22.0: print (never run) the `docker run` argv of a
+#                                 runner-image container for ROLE (session, runner, oneshot,
+#                                 repair): the one composer of user, environment, credentials,
+#                                 image and bounds (scripts/phasekit-launch.py)
 #   phasekit scope [--iteration N] [--phase P] [--json]
 #                                 what this iteration (or one phase) changed
 #   phasekit facts [--json]       the facts phasekit DECLARES for downstream tests
@@ -274,6 +281,11 @@ case "$verb" in
     ;;
   self-update)
     self_update
+    ;;
+  launch-argv)
+    # v0.22.0: the one launcher (O5). Needs no project: it composes, and runs nothing.
+    shift
+    exec "${PHASEKIT_PYTHON:-python3}" "$SCRIPT_DIR/phasekit-launch.py" argv "$@"
     ;;
   land)
     # v0.21.0: the landing pass is offered only in the runner — the spelling

@@ -29,7 +29,7 @@ set -euo pipefail
 # names an unrelated subuid inside the container (no passwd entry; a
 # different owner in git's eyes), so the run is uid 0 there — the same knob
 # container-setup.sh uses: PHASEKIT_ROOTLESS_DOCKER=1 (or a daemon that
-# reports rootless in its SecurityOptions) → --user 0:0.
+# reports itself rootless) → --user 0:0.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE_NAME="${IMAGE_NAME:-scaffold-runner}"
@@ -92,17 +92,24 @@ python3 -m unittest "$@" -v
 INNER
 )
 
-run_user="$(id -u):$(id -g)"
-if [[ "${PHASEKIT_ROOTLESS_DOCKER:-}" == "1" ]] \
-   || docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless; then
-  run_user="0:0"
+# v0.22.0: the argv comes from the one launcher (scripts/phasekit-launch.py,
+# the `runner` role): its user rule (uid 0 under rootless docker) and its
+# bounds, which this run lacked before.
+launch=()
+while IFS= read -r -d '' arg; do launch+=("$arg"); done < <(
+  "${PHASEKIT_PYTHON:-python3}" "$ROOT_DIR/scripts/phasekit-launch.py" argv --role runner \
+    --name "phasekit-verify-in-container-$$" --interactive --image "$IMAGE_NAME" \
+    --entrypoint bash --workdir /workspace --mount "$ROOT_DIR:/workspace:ro" \
+    --set "JQ_MIN=$JQ_MIN" --set "PHASEKIT_TEST_LAYOUT=${PHASEKIT_TEST_LAYOUT:-vendored}" \
+    -- -s -- "${TARGETS[@]}")
+if [[ ${#launch[@]} -lt 2 || "${launch[0]} ${launch[1]}" != "docker run" \
+      || " ${launch[*]} " != *" --memory-swap "* ]]; then
+  echo "verify-in-container: the launcher composed no bounded docker run argv" >&2
+  exit 2
 fi
+run_user=""
+for ((i = 0; i < ${#launch[@]} - 1; i++)); do
+  [[ "${launch[i]}" == --user ]] && { run_user="${launch[i + 1]}"; break; }
+done
 echo "verify-in-container: $IMAGE_NAME, repo read-only at /workspace, user $run_user, targets: ${TARGETS[*]}"
-exec docker run --rm -i \
-  --entrypoint bash \
-  --user "$run_user" \
-  -e JQ_MIN="$JQ_MIN" \
-  -e PHASEKIT_TEST_LAYOUT="${PHASEKIT_TEST_LAYOUT:-vendored}" \
-  -v "$ROOT_DIR:/workspace:ro" \
-  -w /workspace \
-  "$IMAGE_NAME" -s -- "${TARGETS[@]}" <<<"$IN_CONTAINER"
+exec "${launch[@]}" <<<"$IN_CONTAINER"

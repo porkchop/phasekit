@@ -197,7 +197,7 @@
     {
       "name": "PHASEKIT_CONTAINER_USER",
       "kind": "consumed",
-      "read_by": ["scripts/container-setup.sh", "scripts/enrich-project.py"],
+      "read_by": ["scripts/container-setup.sh", "scripts/phasekit-launch.py"],
       "default": "unset — image default user (node, UID 1000)",
       "container_forwarded": true,
       "semantics": "Raw docker run --user spec; root normalizes to 0:0 (with HOME=/home/node pinned and IS_SANDBOX=1 exported). Takes precedence over PHASEKIT_ROOTLESS_DOCKER. v0.16.0: also the user `phasekit upgrade` runs the project's gate as in the runner image."
@@ -205,7 +205,7 @@
     {
       "name": "PHASEKIT_ROOTLESS_DOCKER",
       "kind": "consumed",
-      "read_by": ["scripts/container-setup.sh", "scripts/enrich-project.py"],
+      "read_by": ["scripts/container-setup.sh", "scripts/phasekit-launch.py"],
       "default": "unset",
       "container_forwarded": true,
       "semantics": "1 (with PHASEKIT_CONTAINER_USER empty) runs the container as root, the UID-0 mode for rootless Docker where container root maps to the unprivileged host user. v0.16.0: also decides the user the upgrade gate runs as in the runner image (0:0 when rootless, the host uid otherwise; detected from the daemon when unset)."
@@ -213,10 +213,10 @@
     {
       "name": "PHASEKIT_PYTHON",
       "kind": "consumed",
-      "read_by": ["scripts/phasekit.sh"],
+      "read_by": ["scripts/phasekit.sh", "scripts/container-setup.sh"],
       "default": "python3",
-      "container_forwarded": false,
-      "semantics": "Interpreter used to run scripts/enrich-project.py, so a global install can point at an isolated venv (e.g. one that has pyyaml)."
+      "container_forwarded": true,
+      "semantics": "Interpreter used to run scripts/enrich-project.py, so a global install can point at an isolated venv (e.g. one that has pyyaml). v0.22.0: also the interpreter container-setup.sh runs scripts/phasekit-launch.py with, for the session's bounds (so container-setup.sh acts on it, which is what container_forwarded records; the value itself is a host setting and is not passed into the container)."
     },
     {
       "name": "PHASEKIT_UPGRADE_VERIFY",
@@ -237,7 +237,7 @@
     {
       "name": "PHASEKIT_RUNNER_IMAGE",
       "kind": "consumed",
-      "read_by": ["scripts/enrich-project.py"],
+      "read_by": ["scripts/enrich-project.py", "scripts/phasekit-launch.py"],
       "default": "scaffold-runner",
       "container_forwarded": false,
       "semantics": "v0.16.0. The runner image the upgrade gate uses in auto and container modes (v0.20.0: and `phasekit verify --in-runner`, the same harness); the project is mounted read-write at /workspace with git safe.directory set. v0.16.2: a session's environment — HOME=/home/node for uid 0 or 1000 (a throwaway HOME otherwise), CLAUDE_CONFIG_DIR, IS_SANDBOX=1 as root, a global git identity (GIT_USER_NAME/GIT_USER_EMAIL, else the repo's, else 'phasekit upgrade'), and the contracts provider read-only at /contracts."
@@ -245,7 +245,7 @@
     {
       "name": "PHASEKIT_RUNNER_MEMORY",
       "kind": "consumed",
-      "read_by": ["scripts/enrich-project.py"],
+      "read_by": ["scripts/phasekit-launch.py"],
       "default": "8g",
       "container_forwarded": false,
       "semantics": "v0.21.1. The --memory bound on every runner container the harness starts (the upgrade/migrate gate, `phasekit verify --in-runner`, `phasekit land --in-runner`), and since v0.21.2 its --memory-swap too (the same value). A docker size (8g, 8gb, 1.5g, 512m, 1t: units b/k/m/g/t/p, optional trailing b), since v0.21.2 judged in bytes as docker truncates it, from 6 MiB to below 2^62; empty or malformed falls back to the default with one stderr line, never to unbounded. A runner killed with exit 137 is reported as SIGKILLed, naming this bound (the pid bound never SIGKILLs: a fork past it fails with EAGAIN)."
@@ -253,26 +253,58 @@
     {
       "name": "PHASEKIT_RUNNER_PIDS_LIMIT",
       "kind": "consumed",
-      "read_by": ["scripts/enrich-project.py"],
+      "read_by": ["scripts/phasekit-launch.py"],
       "default": "4096",
       "container_forwarded": false,
-      "semantics": "v0.21.1. The --pids-limit bound on every runner container the harness starts. An integer >= 1; 0, a negative or a non-integer falls back to the default with one stderr line (docker reads 0 as unlimited)."
+      "semantics": "v0.21.1. The --pids-limit bound on every runner container the harness starts. An integer >= 1 (v0.22.0: from 1 to 999999999, judged as a digit string, the session's rule); 0, a negative, a non-integer or a longer number falls back to the default with one stderr line (docker reads 0 as unlimited)."
     },
     {
       "name": "PHASEKIT_SESSION_MEMORY",
       "kind": "consumed",
-      "read_by": ["scripts/container-setup.sh"],
+      "read_by": ["scripts/phasekit-launch.py"],
       "default": "10g",
-      "container_forwarded": true,
-      "semantics": "v0.21.2. The --memory bound on the session container, and its --memory-swap (the same value, so a session never spills into host swap). A docker size (10g, 1.5g, 512m: units b/k/m/g/t/p, optional trailing b) judged in bytes as docker truncates it, from 6 MiB (docker's minimum) to below 2^62; empty, malformed or out of range falls back to the default with one stderr line, never to unbounded (docker reads a size truncated to 0 bytes as no bound). A session container that exits 137 is reported as SIGKILLed: an outside docker kill first, else this bound."
+      "container_forwarded": false,
+      "semantics": "v0.21.2 (v0.22.0: read by the launcher module, phasekit-launch.py's `session` role, which container-setup.sh asks for the bounds). The --memory bound on the session container, and its --memory-swap (the same value, so a session never spills into host swap). A docker size (10g, 1.5g, 512m: units b/k/m/g/t/p, optional trailing b) judged in bytes as docker truncates it, from 6 MiB (docker's minimum) to below 2^62; empty, malformed or out of range falls back to the default with one stderr line, never to unbounded (docker reads a size truncated to 0 bytes as no bound). A session container that exits 137 is reported as SIGKILLed: an outside docker kill first, else this bound."
     },
     {
       "name": "PHASEKIT_SESSION_PIDS_LIMIT",
       "kind": "consumed",
-      "read_by": ["scripts/container-setup.sh"],
+      "read_by": ["scripts/phasekit-launch.py"],
       "default": "8192",
-      "container_forwarded": true,
-      "semantics": "v0.21.2. The --pids-limit bound on the session container. An integer from 1 to 999999999, judged as a digit string so it can never wrap; 0, a negative, a non-integer or a longer number falls back to the default with one stderr line (docker reads 0 as unlimited)."
+      "container_forwarded": false,
+      "semantics": "v0.21.2 (v0.22.0: read by the launcher module, phasekit-launch.py's `session` role, which container-setup.sh asks for the bounds). The --pids-limit bound on the session container. An integer from 1 to 999999999, judged as a digit string so it can never wrap; 0, a negative, a non-integer or a longer number falls back to the default with one stderr line (docker reads 0 as unlimited)."
+    },
+    {
+      "name": "PHASEKIT_ONESHOT_MEMORY",
+      "kind": "consumed",
+      "read_by": ["scripts/phasekit-launch.py"],
+      "default": "2g",
+      "container_forwarded": false,
+      "semantics": "v0.22.0. The --memory bound (and --memory-swap, the same value) of the launcher's `oneshot` role: one `claude -p` turn over mounted inputs (scoping, a direction proposal, triage, a deploy-QA check), composed by `phasekit launch-argv --role oneshot`. A docker size judged in bytes from 6 MiB to below 2^62; empty, malformed or out of range falls back to the default with one stderr line, never to unbounded."
+    },
+    {
+      "name": "PHASEKIT_ONESHOT_PIDS_LIMIT",
+      "kind": "consumed",
+      "read_by": ["scripts/phasekit-launch.py"],
+      "default": "512",
+      "container_forwarded": false,
+      "semantics": "v0.22.0. The --pids-limit bound of the launcher's `oneshot` role. An integer from 1 to 999999999, judged as a digit string; anything else falls back to the default with one stderr line (docker reads 0 as unlimited)."
+    },
+    {
+      "name": "PHASEKIT_REPAIR_MEMORY",
+      "kind": "consumed",
+      "read_by": ["scripts/phasekit-launch.py"],
+      "default": "4g",
+      "container_forwarded": false,
+      "semantics": "v0.22.0. The --memory bound (and --memory-swap, the same value) of the launcher's `repair` role: a session that edits a project tree, composed by `phasekit launch-argv --role repair`. Judged as PHASEKIT_ONESHOT_MEMORY is."
+    },
+    {
+      "name": "PHASEKIT_REPAIR_PIDS_LIMIT",
+      "kind": "consumed",
+      "read_by": ["scripts/phasekit-launch.py"],
+      "default": "512",
+      "container_forwarded": false,
+      "semantics": "v0.22.0. The --pids-limit bound of the launcher's `repair` role, judged as PHASEKIT_ONESHOT_PIDS_LIMIT is."
     },
     {
       "name": "CLAUDE_MODE",
@@ -326,7 +358,7 @@
     {
       "name": "CLAUDE_VOLUME",
       "kind": "consumed",
-      "read_by": ["scripts/container-setup.sh"],
+      "read_by": ["scripts/container-setup.sh", "scripts/phasekit-launch.py"],
       "default": "scaffold-claude-config",
       "container_forwarded": true,
       "semantics": "Named Docker volume mounted at /home/node/.claude, holding persisted Claude subscription credentials — one volume is the fleet's shared auth."

@@ -20,6 +20,7 @@ import _suite_tmp  # noqa: F401  (every test under its own TMPDIR; tests/_suite_
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = REPO_ROOT / "scripts" / "enrich-project.py"
+LAUNCH_PATH = REPO_ROOT / "scripts" / "phasekit-launch.py"
 
 
 def _load_module():
@@ -82,6 +83,7 @@ class NegativeControl(unittest.TestCase):
 
             # Copy the real script under test.
             shutil.copy2(SCRIPT_PATH, tmp_root / "scripts" / "enrich-project.py")
+            shutil.copy2(LAUNCH_PATH, tmp_root / "scripts" / "phasekit-launch.py")
 
             # Minimal manifest: classifies only `classified.md`.
             (tmp_root / "capabilities" / "project-capabilities.yaml").write_text(
@@ -147,6 +149,7 @@ class IgnoreConstraintEnforced(unittest.TestCase):
             (tmp_root / "docs").mkdir(parents=True)
 
             shutil.copy2(SCRIPT_PATH, tmp_root / "scripts" / "enrich-project.py")
+            shutil.copy2(LAUNCH_PATH, tmp_root / "scripts" / "phasekit-launch.py")
 
             # Manifest with a forbidden ignore glob (`docs/**`) and a single
             # tracked doc that the glob would match.

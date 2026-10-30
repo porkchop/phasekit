@@ -1593,7 +1593,7 @@ UPGRADE_VERIFY_ENV = "PHASEKIT_UPGRADE_VERIFY"
 UPGRADE_VERIFY_MODES = ("auto", "container", "host", "off")
 UPGRADE_VERIFY_TIMEOUT_ENV = "PHASEKIT_UPGRADE_VERIFY_TIMEOUT"
 UPGRADE_VERIFY_TIMEOUT_DEFAULT = 1800
-RUNNER_IMAGE_ENV = "PHASEKIT_RUNNER_IMAGE"
+RUNNER_IMAGE_ENV = "PHASEKIT_RUNNER_IMAGE"  # = phasekit-launch.py IMAGE_ENV
 RUNNER_IMAGE_DEFAULT = "scaffold-runner"
 # v0.21.1: every runner container is bounded. The harness took over the
 # orchestrator's private docker runs in v0.20.0/v0.21.0 and dropped their
@@ -1601,20 +1601,34 @@ RUNNER_IMAGE_DEFAULT = "scaffold-runner"
 # upgrade/migrate gate, verify --in-runner, land --in-runner). A bad value falls
 # back to the default, never to unbounded: `--pids-limit 0` (or -1) means
 # UNLIMITED to docker, the worst failure because it looks contained.
-RUNNER_MEMORY_ENV = "PHASEKIT_RUNNER_MEMORY"
-RUNNER_MEMORY_DEFAULT = "8g"
-RUNNER_PIDS_LIMIT_ENV = "PHASEKIT_RUNNER_PIDS_LIMIT"
-RUNNER_PIDS_LIMIT_DEFAULT = 4096
-# docker's own size forms: 8g, 8gb, 1.5g, 512m, 1t (units b k m g t p, an
-# optional trailing b). v0.21.2: judged in BYTES as docker computes them (number
-# x unit, truncated), within [6 MiB, 2^62): docker truncates 0.5 or 0.9b to 0
-# bytes, which it reads as NO bound, and refuses anything under its 6 MiB
-# minimum. container-setup.sh's session_bounds applies the same rule.
-_RUNNER_MEMORY_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)([bkmgtp]?)b?$", re.IGNORECASE | re.ASCII)
-_RUNNER_MEMORY_UNITS = {"": 1, "b": 1, "k": 2**10, "m": 2**20, "g": 2**30, "t": 2**40, "p": 2**50}
-_RUNNER_MEMORY_MIN_BYTES = 6 * 2**20
-_RUNNER_MEMORY_MAX_BYTES = 2**62
-RUNNER_KILLED_RC = 137  # 128 + SIGKILL: inside the runner, most often the memory bound
+# v0.21.1: every runner container is bounded. The harness took over the
+# orchestrator's private docker runs in v0.20.0/v0.21.0 and dropped their
+# `--memory 8g --pids-limit 4096`; these restore them for every caller (the
+# upgrade/migrate gate, verify --in-runner, land --in-runner). v0.22.0: the
+# bounds, their validator, the runner user and mount syntax live in ONE place,
+# scripts/phasekit-launch.py (the `runner` role), which every launcher shares.
+def _load_launch():
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "phasekit-launch.py")
+    spec = importlib.util.spec_from_file_location("phasekit_launch", path)
+    module = importlib.util.module_from_spec(spec)
+    saved, sys.dont_write_bytecode = sys.dont_write_bytecode, True  # no __pycache__ in a project
+    try:
+        spec.loader.exec_module(module)
+    except (OSError, SyntaxError) as exc:
+        sys.exit(f"phasekit: cannot load the launcher module {path} ({exc}); this engine is "
+                 "incomplete: reinstall it (`phasekit engines install <tag>`, or re-clone)")
+    finally:
+        sys.dont_write_bytecode = saved
+    return module
+
+
+LAUNCH = _load_launch()
+RUNNER_MEMORY_ENV = LAUNCH.memory_env("runner")
+RUNNER_MEMORY_DEFAULT = LAUNCH.ROLES["runner"][0]
+RUNNER_PIDS_LIMIT_ENV = LAUNCH.pids_env("runner")
+RUNNER_PIDS_LIMIT_DEFAULT = LAUNCH.ROLES["runner"][1]
+RUNNER_KILLED_RC = LAUNCH.KILLED_RC
 UPGRADE_GATE_TAIL_LINES = 40
 EXIT_UPGRADE_GATE_RED = 4
 EXIT_UPGRADE_UNCOMMITTED = 5
@@ -1629,9 +1643,8 @@ ENGINE_CONTAINER_DIR = "/opt/phasekit"
 CONTRACT_ENV = "PHASEKIT_CONTRACT"
 CONTRACT_REL = "contracts/interface.json"
 CONTRACTS_CONTAINER_DIR = "/contracts"
-RUNNER_HOME = "/home/node"
-RUNNER_HOME_USERS = ("0", "root", "1000", "node")  # root, and the image's `node` user, own it
-RUNNER_THROWAWAY_HOME = "/tmp/phasekit-upgrade-home"
+RUNNER_HOME = LAUNCH.HOME
+RUNNER_THROWAWAY_HOME = LAUNCH.THROWAWAY_HOME
 GATE_GIT_NAME_DEFAULT = "phasekit upgrade"
 GATE_GIT_EMAIL_DEFAULT = "phasekit-upgrade@localhost"
 RUNNER_START_FAILED_RC = 125  # docker run's own "could not start" (not an exit of this script): infra
@@ -1727,22 +1740,8 @@ def _docker_state(image):
 
 
 def _runner_user():
-    """The user the gate runs as in the runner image — the pairing
-    scripts/container-setup.sh documents: PHASEKIT_CONTAINER_USER when set;
-    else 0:0 under rootless docker (container root IS the host user); else the
-    host uid."""
-    explicit = (os.environ.get("PHASEKIT_CONTAINER_USER") or "").strip()
-    if explicit:
-        return "0:0" if explicit == "root" else explicit
-    rootless = os.environ.get("PHASEKIT_ROOTLESS_DOCKER") == "1"
-    if not rootless:
-        try:
-            r = subprocess.run(["docker", "info", "--format", "{{json .SecurityOptions}}"],
-                               capture_output=True, text=True, timeout=60)
-            rootless = "rootless" in (r.stdout or "")
-        except (OSError, subprocess.TimeoutExpired):
-            rootless = False
-    return "0:0" if rootless else f"{os.getuid()}:{os.getgid()}"
+    """The user the gate runs as in the runner image (scripts/phasekit-launch.py)."""
+    return LAUNCH.runner_user()
 
 
 def _forward_env_args():
@@ -1764,8 +1763,7 @@ def _forward_env_args():
 
 def _mount_arg(target, dst="/workspace", readonly=False):
     """--mount value; CSV-quoted so a path with ':' or ',' is still one field."""
-    src = str(target).replace('"', '""')
-    return f'type=bind,"src={src}",dst={dst}' + (",readonly" if readonly else "")
+    return LAUNCH.mount_arg(target, dst, readonly=readonly)
 
 
 def _git_config_get(key, cwd, env=None):
@@ -1815,10 +1813,8 @@ def _contracts_unusable(var, path):
 
 
 def _runner_home(user):
-    """container-setup.sh pins HOME=/home/node for a --user override; the gate
-    does the same for the users that can write it, and a throwaway HOME for
-    any other uid (the image's /home/node is not theirs)."""
-    return RUNNER_HOME if user.split(":", 1)[0] in RUNNER_HOME_USERS else RUNNER_THROWAWAY_HOME
+    """HOME for USER in the runner image (scripts/phasekit-launch.py)."""
+    return LAUNCH.home_for(user)
 
 
 def _host_gate_env(target, scratch):
@@ -2037,56 +2033,15 @@ def _split_gate_time(out, nonce):
     return out[:m.start()] + out[m.end():], int(m.group(1)) / 1000.0
 
 
-def _runner_memory_ok(mem):
-    """Whether MEM is a docker size whose byte count, truncated as docker
-    truncates it, is a real bound docker accepts."""
-    m = _RUNNER_MEMORY_RE.match(mem)
-    if not m:
-        return False
-    try:
-        size = int(float(m.group(1)) * _RUNNER_MEMORY_UNITS[m.group(2).lower()])
-    except OverflowError:  # a digit run long enough to be inf
-        return False
-    return _RUNNER_MEMORY_MIN_BYTES <= size < _RUNNER_MEMORY_MAX_BYTES
-
-
 def runner_bounds(*, quiet=False):
-    """(memory, pids_limit) for a runner container: PHASEKIT_RUNNER_MEMORY (a
-    docker size, e.g. 8g or 512m) and PHASEKIT_RUNNER_PIDS_LIMIT (an integer >=
-    1). Unset, empty or malformed falls back to the default with one stderr
-    line; nothing here ever yields an unbounded container."""
-    mem = (os.environ.get(RUNNER_MEMORY_ENV) or "").strip()
-    if not mem:
-        mem = RUNNER_MEMORY_DEFAULT
-    elif not _runner_memory_ok(mem):
-        if not quiet:
-            print(f"phasekit: {RUNNER_MEMORY_ENV}={mem!r} is not a docker size from 6m "
-                  f"(e.g. 8g); using {RUNNER_MEMORY_DEFAULT}", file=sys.stderr)
-        mem = RUNNER_MEMORY_DEFAULT
-    raw = (os.environ.get(RUNNER_PIDS_LIMIT_ENV) or "").strip()
-    pids = RUNNER_PIDS_LIMIT_DEFAULT
-    if raw:
-        try:
-            pids = int(raw, 10)
-        except ValueError:
-            pids = 0
-        if pids < 1:
-            if not quiet:
-                print(f"phasekit: {RUNNER_PIDS_LIMIT_ENV}={raw!r} is not an integer >= 1 (0 "
-                      f"would mean unlimited to docker); using {RUNNER_PIDS_LIMIT_DEFAULT}",
-                      file=sys.stderr)
-            pids = RUNNER_PIDS_LIMIT_DEFAULT
-    return mem, pids
+    """(memory, pids_limit) for a runner container: the `runner` role's bounds
+    (scripts/phasekit-launch.py). Unset, empty or malformed falls back to the
+    default with one stderr line; never an unbounded container."""
+    return LAUNCH.bounds("runner", quiet=quiet)
 
 
 def _killed_hint():
-    # The pid bound never SIGKILLs (fork fails with EAGAIN instead), so it is
-    # not named: a 137 is the memory bound, the host OOM killer, or an outside
-    # `docker kill` / `docker rm -f`.
-    mem, _ = runner_bounds(quiet=True)
-    return (f"SIGKILLed (exit {RUNNER_KILLED_RC}); inside the runner that is most often its "
-            f"memory bound ({mem}, {RUNNER_MEMORY_ENV}), else the host's OOM killer or an "
-            "outside docker kill")
+    return LAUNCH.exit_reason("runner", RUNNER_KILLED_RC)
 
 
 def runner_argv(target, image, name, script, engine=None, *, env=(), names=(),
@@ -2118,7 +2073,7 @@ def runner_argv(target, image, name, script, engine=None, *, env=(), names=(),
                "-e", f"CLAUDE_CONFIG_DIR={RUNNER_HOME}/.claude",
                "-e", f"GIT_USER_NAME={git_name}",
                "-e", f"GIT_USER_EMAIL={git_email}"]
-    if user == "0:0":
+    if LAUNCH.is_root(user):
         session += ["-e", "IS_SANDBOX=1"]
     contracts_var, contracts_path = _contracts_source()
     if contracts_var:
@@ -4087,6 +4042,7 @@ ALWAYS_INSTALLED_FILE_PATHS = (
     "CONTINUE_PROMPT.txt",
     "contracts/interface.json",
     "scripts/container-setup.sh",
+    "scripts/phasekit-launch.py",
     "scripts/verify-container.sh",
     "scripts/phasekit.sh",
     "scripts/phasekit-channel.sh",

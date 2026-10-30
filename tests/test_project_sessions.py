@@ -71,6 +71,8 @@ class ContainerSetupSessionsMount(unittest.TestCase):
         root = tmp / project
         (root / "scripts").mkdir(parents=True)
         shutil.copy(CONTAINER_SCRIPT, root / "scripts" / "container-setup.sh")
+        shutil.copy(CONTAINER_SCRIPT.with_name("phasekit-launch.py"),
+                    root / "scripts" / "phasekit-launch.py")
         (tmp / "bin").mkdir()
         (tmp / "home").mkdir()
         stub = tmp / "bin" / "docker"

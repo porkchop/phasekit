@@ -453,6 +453,14 @@ scripts:
     required: false
     ownership: scaffold
 
+  phasekit-launch:
+    path: scripts/phasekit-launch.py
+    required: false
+    ownership: scaffold
+    # v0.22.0: the one composer of a runner-image `docker run` (roles session,
+    # runner, oneshot, repair; their bounds and one validator). Ships beside
+    # container-setup.sh, which reads the session's bounds from it.
+
   verify-container:
     path: scripts/verify-container.sh
     required: false

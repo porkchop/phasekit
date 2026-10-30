@@ -38,7 +38,7 @@ exit 0
 
 
 class SessionBoundsTest(unittest.TestCase):
-    def _run(self, extra_env=None):
+    def _run(self, extra_env=None, expect_run=True):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             bindir = tmp / "bin"
@@ -53,7 +53,7 @@ class SessionBoundsTest(unittest.TestCase):
             for var in ("ANTHROPIC_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK",
                         "MAX_ITERATIONS", "PHASEKIT_CONTRACTS_MOUNT", "PHASEKIT_CONTAINER_NAME",
                         "PHASEKIT_TRACE", "PHASEKIT_FORWARD_ENV", "PHASEKIT_SESSION_MEMORY",
-                        "PHASEKIT_SESSION_PIDS_LIMIT", "FAKE_SESSION_RC"):
+                        "PHASEKIT_SESSION_PIDS_LIMIT", "FAKE_SESSION_RC", "PHASEKIT_PYTHON"):
                 env.pop(var, None)
             env["HOME"] = str(tmp / "home")
             (tmp / "home").mkdir()
@@ -65,8 +65,8 @@ class SessionBoundsTest(unittest.TestCase):
                      if block.strip()] if log.exists() else []
             runs = [c for c in calls
                     if c and c[0] == "run" and any(a.endswith(":/workspace") for a in c)]
-            self.assertEqual(len(runs), 1, proc.stdout + proc.stderr)
-            return proc, runs[0]
+            self.assertEqual(len(runs), 1 if expect_run else 0, proc.stdout + proc.stderr)
+            return proc, runs[0] if runs else None
 
     def bounds(self, extra_env=None):
         proc, argv = self._run(extra_env)
@@ -147,13 +147,33 @@ class SessionBoundsTest(unittest.TestCase):
                 self.assertEqual(proc.returncode, int(rc))
                 self.assertNotIn("SIGKILL", proc.stderr)
 
+    def test_no_launcher_module_no_session(self):
+        """v0.22.0: the bounds come from phasekit-launch.py; if it cannot answer,
+        the session is refused rather than started unbounded."""
+        proc, _ = self._run({"PHASEKIT_PYTHON": "false"}, expect_run=False)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("refusing to start an unbounded session", proc.stderr)
+
+    def test_a_shim_answering_unbounded_values_is_refused(self):
+        """review r1 (v0.22.0): bash checks the module's answer, so `0 0` or a
+        shim's own noise never reaches docker."""
+        import tempfile
+        for answer in ("0 0", "8g 0", "pyenv: python3: command not found", "10g"):
+            with self.subTest(answer=answer), tempfile.TemporaryDirectory() as tmp:
+                shim = Path(tmp) / "py"
+                shim.write_text(f"#!/bin/sh\necho '{answer}'\n", encoding="utf-8")
+                shim.chmod(0o755)
+                proc, _ = self._run({"PHASEKIT_PYTHON": str(shim)}, expect_run=False)
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertIn("refusing to start an unbounded session", proc.stderr)
+
     def test_the_bounds_are_declared(self):
         env = {v["name"]: v for v in json.loads(MANIFEST.read_text())["env"]}
         self.assertEqual(env["PHASEKIT_SESSION_MEMORY"]["default"], "10g")
         self.assertEqual(env["PHASEKIT_SESSION_PIDS_LIMIT"]["default"], "8192")
         for name in ("PHASEKIT_SESSION_MEMORY", "PHASEKIT_SESSION_PIDS_LIMIT"):
-            self.assertTrue(env[name]["container_forwarded"])  # the manifest's flag: handled by container-setup.sh
-            self.assertEqual(env[name]["read_by"], ["scripts/container-setup.sh"])
+            # v0.22.0: read by the one launcher module; container-setup.sh asks it
+            self.assertEqual(env[name]["read_by"], ["scripts/phasekit-launch.py"])
 
 
 if __name__ == "__main__":

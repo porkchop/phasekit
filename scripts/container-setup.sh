@@ -109,34 +109,25 @@ ENGINE_CONTAINER_DIR="/opt/phasekit"
 # minimum. The pid limit is judged as a digit STRING (at most 9 significant
 # digits) so bash arithmetic, which wraps silently at 64 bits, never sees a
 # value that could wrap to 0 or below.
-SESSION_MEMORY_DEFAULT="10g"
-SESSION_PIDS_LIMIT_DEFAULT=8192
+# v0.22.0: the session's bounds come from the ONE launcher module
+# (scripts/phasekit-launch.py, the `session` role) every phasekit container
+# shares, so there is one validator and one set of defaults. If the module
+# cannot answer, the session does not start: an unbounded session is the
+# 2026-10-28 host OOM, and a second copy of the defaults here is the drift
+# that left it unbounded.
+LAUNCH_PY="$SCRIPT_DIR/phasekit-launch.py"
 SESSION_KILLED_RC=137  # 128 + SIGKILL: a supervisor's docker kill, or the memory bound
 session_bounds() {
-  local mem="${PHASEKIT_SESSION_MEMORY:-}" pids="${PHASEKIT_SESSION_PIDS_LIMIT:-}"
-  local size_re='^([0-9]+(\.[0-9]+)?)([bkmgtpBKMGTP]?)[bB]?$' int_re='^0*([1-9][0-9]{0,8})$'
-  mem="${mem#"${mem%%[![:space:]]*}"}"; mem="${mem%"${mem##*[![:space:]]}"}"
-  pids="${pids#"${pids%%[![:space:]]*}"}"; pids="${pids%"${pids##*[![:space:]]}"}"
-  if [[ -z "$mem" ]]; then
-    mem="$SESSION_MEMORY_DEFAULT"
-  elif ! [[ "$mem" =~ $size_re ]] || ! awk -v n="${BASH_REMATCH[1]}" -v u="${BASH_REMATCH[3]}" 'BEGIN {
-         m = 1; u = tolower(u)
-         if (u == "k") m = 2^10; else if (u == "m") m = 2^20; else if (u == "g") m = 2^30
-         else if (u == "t") m = 2^40; else if (u == "p") m = 2^50
-         b = int(n * m); exit !(b >= 6 * 2^20 && b < 2^62) }'; then
-    echo "phasekit: PHASEKIT_SESSION_MEMORY='$mem' is not a docker size from 6m (e.g. 10g); using $SESSION_MEMORY_DEFAULT" >&2
-    mem="$SESSION_MEMORY_DEFAULT"
+  local out=""
+  out="$("${PHASEKIT_PYTHON:-python3}" "$LAUNCH_PY" bounds --role session)" || out=""
+  read -r SESSION_MEMORY SESSION_PIDS_LIMIT <<< "$out" || true
+  # Checked here too: a wrapper or shim answering `0 0` (docker: unbounded)
+  # or a line of its own noise must be refused, not passed to docker.
+  if ! [[ "${SESSION_MEMORY:-}" =~ ^[0-9]+(\.[0-9]+)?[bkmgtpBKMGTP]?[bB]?$ && "$SESSION_MEMORY" =~ [1-9] \
+          && "${SESSION_PIDS_LIMIT:-}" =~ ^[1-9][0-9]{0,8}$ ]]; then
+    echo "phasekit: could not read the session's bounds from $LAUNCH_PY; refusing to start an unbounded session" >&2
+    exit 1
   fi
-  if [[ -z "$pids" ]]; then
-    pids="$SESSION_PIDS_LIMIT_DEFAULT"
-  elif [[ "$pids" =~ $int_re ]]; then
-    pids="${BASH_REMATCH[1]}"
-  else
-    echo "phasekit: PHASEKIT_SESSION_PIDS_LIMIT='$pids' is not an integer from 1 to 999999999 (0 would mean unlimited to docker); using $SESSION_PIDS_LIMIT_DEFAULT" >&2
-    pids="$SESSION_PIDS_LIMIT_DEFAULT"
-  fi
-  SESSION_MEMORY="$mem"
-  SESSION_PIDS_LIMIT="$pids"
 }
 
 IMAGE_NAME="${IMAGE_NAME:-scaffold-runner}"
@@ -881,11 +872,11 @@ run_container() {
   docker run "${docker_args[@]}" "$IMAGE_NAME" "${cmd[@]}" || rc=$?
   if [[ "$rc" == "$SESSION_KILLED_RC" ]]; then
     # The pid bound never SIGKILLs (a fork past it fails with EAGAIN), so it is
-    # not named.
-    # PID 1 is the loop's bash, and a cgroup OOM kills the largest task (a test
-    # worker, claude) rather than it, so a 137 HERE is most often an outside
-    # `docker kill` (a supervisor's timeout); the memory bound comes second.
-    echo "phasekit: the session container was SIGKILLed (exit $SESSION_KILLED_RC): an outside docker kill (e.g. a supervisor's timeout), else its memory bound ($SESSION_MEMORY, PHASEKIT_SESSION_MEMORY) or the host's OOM killer" >&2
+    # not named. PID 1 is the loop's bash, which a cgroup OOM spares, so the
+    # module names an outside kill first (phasekit-launch.py exit_reason).
+    local why=""
+    why="$("${PHASEKIT_PYTHON:-python3}" "$LAUNCH_PY" reason --role session "$rc" 2>/dev/null)" || true
+    echo "phasekit: ${why:-the session container was SIGKILLed (exit $rc)}" >&2
   fi
   return "$rc"
 }
