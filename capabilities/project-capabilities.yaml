@@ -33,6 +33,7 @@ profiles:
       - architecture-red-team
       - code-reviewer
       - qa-playwright
+      - design-reviewer
     include_skills:
       - autonomous-product-builder
     include_docs:
@@ -181,6 +182,12 @@ agents:
     enabled: true
     source: .claude/agents/qa-playwright.md
     purpose: verify user-visible functionality in browser
+    ownership: scaffold
+
+  design-reviewer:
+    enabled: true
+    source: .claude/agents/design-reviewer.md
+    purpose: advisory taste review of user-visible work against the project's design brief and system
     ownership: scaffold
 
   release-hardening:
@@ -453,6 +460,15 @@ scripts:
     required: false
     ownership: scaffold
 
+  phasekit-ui-check:
+    path: scripts/phasekit-ui-check.mjs
+    required: false
+    ownership: scaffold
+    # v0.23.0: `phasekit ui-check`, the deterministic UI checks (axe, tap
+    # targets, fonts, visual baselines) over docs/project/ui-pages.json. Active
+    # only where that file exists; runs in the runner image (its tools are the
+    # image's pinned /opt/phasekit-ui).
+
   phasekit-launch:
     path: scripts/phasekit-launch.py
     required: false
@@ -684,6 +700,17 @@ files:
     ownership: scaffold-template
     # v0.17.0 — rendered once into downstream docs/project/QUALITY_GATES.md
     # (bootstrap-frozen), the project-owned companion of docs/QUALITY_GATES.md.
+
+  # v0.23.0 — seeded by `phasekit ui-check init` (never overwritten) into the
+  # project-owned docs/project/DESIGN_BRIEF.md, DESIGN_SYSTEM.md, ui-pages.json.
+  templates/project-design-brief.template.md:
+    ownership: scaffold-template
+
+  templates/project-design-system.template.md:
+    ownership: scaffold-template
+
+  templates/project-ui-pages.template.json:
+    ownership: scaffold-template
 
   # --- scaffold-internal (never installable) ---
   .claude/CLAUDE.md:

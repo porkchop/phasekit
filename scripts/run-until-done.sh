@@ -3688,11 +3688,12 @@ phasekit_trailers() {
 # progress or status record (`### Phase 109 — progress record …`), and
 # `## Phase 193 continuation — …` is not a heading of phase 193.
 _phase_plan_py() {
-  # $1 = title | check | later, $2 = phase id, $3 = since (check only). Reads
+  # $1 = title | check | later | visual, $2 = phase id, $3 = since (check only). Reads
   # the plan from docs/PHASES.md; check reads the changed
   # paths from `git diff --cached` since $3. Prints the title (or nothing),
   # the plan_paths JSON object, or (later) `later` when the plan names
-  # another phase in a heading after the one that plans $2.
+  # another phase in a heading after the one that plans $2, or (visual) the
+  # phase's `Visual changes:` declaration as JSON (v0.23.0).
   python3 - "$@" <<'PLAN_PY'
 import json, os, re, subprocess, sys
 
@@ -3849,6 +3850,39 @@ if mode == "title":
         t = clean_title(sec[0])
         if t:
             print(t)
+    sys.exit(0)
+if mode == "visual":
+    # v0.23.0: the phase's `Visual changes:` declaration (the pages whose
+    # ui-check baselines it may rewrite). Same section and fence rules as
+    # `Planned paths:`; `none` declares nothing.
+    fence, declared, pages, invalid = False, False, [], []
+    for ln in (sec[1] if sec else []):
+        if ln.lstrip().startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        if fence:
+            continue
+        m = re.match(r"^\s*(?:[-*+]\s+)?(?:\*\*|__)?visual[ _-]changes(?:\*\*|__)?\s*:(?:\*\*|__)?\s*(.*)$", ln, re.I)
+        if not m:
+            continue
+        declared = True
+        rest = m.group(1).strip()
+        if re.fullmatch(r"\(?\s*none\s*\)?\.?", rest, re.I) or rest in ("", "-", "\u2014"):
+            continue
+        # Only page ids count (`id` or `id@viewport`); anything else on the line
+        # (prose, a `none` beside ids) is `invalid` and the caller refuses the
+        # whole declaration, so a sentence can never declare its words as pages.
+        for tok in re.split(r"[,\s]+", rest):
+            tok = tok.strip().strip("`'\"").rstrip(".;")
+            if not tok:
+                continue
+            if tok.lower() != "none" and re.fullmatch(r"[A-Za-z0-9_.-]+(@(phone|desktop)(-dark)?)?", tok):
+                if tok not in pages:
+                    pages.append(tok)
+            elif tok not in invalid:
+                invalid.append(tok)
+    print(json.dumps({"schema": 1, "phase": pid or None, "source": rel, "found": bool(sec),
+                      "declared": declared, "pages": pages, "invalid": invalid}, sort_keys=True))
     sys.exit(0)
 
 res = {"schema": 1, "phase": pid or None, "source": rel, "declared": False, "globs": [],
@@ -6626,6 +6660,13 @@ run_once() {
 # the PROJECT's own copy of this script, so they run this project's loop
 # code): every function above is defined, nothing below has run — no
 # iteration, no watchdog, no recovery, no branch move.
+# v0.23.0: `visual-changes <phase>` prints the phase's `Visual changes:`
+# declaration as JSON (scripts/phasekit.sh `ui-check --update` reads it).
+if [[ "${1:-}" == "visual-changes" ]]; then
+  cd "$ROOT_DIR"
+  _phase_plan_py visual "${2:-}"
+  exit $?
+fi
 if [[ "${1:-}" == "verify" || "${1:-}" == "scope" ]]; then
   _sub="$1"; shift
   cd "$ROOT_DIR"

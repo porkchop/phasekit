@@ -4050,6 +4050,7 @@ ALWAYS_INSTALLED_FILE_PATHS = (
     "scripts/phasekit-contracts.py",
     "scripts/phasekit-roadmap.py",
     "scripts/phasekit-surface.py",
+    "scripts/phasekit-ui-check.mjs",
     ".devcontainer/devcontainer.json",
     ".devcontainer/Dockerfile",
     ".devcontainer/entrypoint.sh",

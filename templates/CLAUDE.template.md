@@ -25,5 +25,6 @@ Read on demand. These are named, not `@`-imported: an import loads the whole fil
 
 ## Optional references
 - `docs/DESIGN.md` — steady-state system design (subsystems, data flows, hot spots, boundaries). Read first if present; not every project has one.
+- `docs/project/DESIGN_SYSTEM.md` — the visual design system (tokens, components, phone and desktop layout), with its brief `docs/project/DESIGN_BRIEF.md`. If present, UI work follows it; not every project has one.
 
 {{OPTIONAL_REFERENCES}}

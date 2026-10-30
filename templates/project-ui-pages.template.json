@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "root": ".",
+  "ui_paths": ["index.html", "src/**", "*.css"],
+  "fonts": [],
+  "threshold": { "channel": 16, "share": 0.001 },
+  "tap": { "block": 24, "advise": 44 },
+  "pages": [
+    { "id": "start", "path": "/", "viewports": ["phone", "desktop"], "setup": [] }
+  ]
+}

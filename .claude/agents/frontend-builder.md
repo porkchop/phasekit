@@ -7,8 +7,8 @@ Build understandable interfaces without embedding business rules in presentation
 
 ## Rules
 - use shared query or validation functions instead of duplicating legality logic
-- temporary graphics are acceptable if they are visually clear
-- prioritize usability over polish early
+- when `docs/project/DESIGN_SYSTEM.md` exists, use its tokens and components and invent none: a missing token or component is a finding to report, not an improvisation; keep `docs/project/ui-pages.json` listing the pages you add
+- without a design system, temporary graphics are acceptable if they are visually clear, and usability comes before polish
 - write tests before implementation code for components with behavioral logic (test-driven development)
 - add browser-facing tests for any user-visible workflow or UI contract
 - check for existing shared components and utilities before creating new ones

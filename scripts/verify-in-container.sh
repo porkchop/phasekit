@@ -42,10 +42,12 @@ TARGETS=("$@")
 # v0.19.3: the process-reads record, and the adopted gate checks on the image's
 # own node (20: its piped reporter is TAP).
 # v0.19.5: the learnings rotation, on the image's python3.
+# v0.23.0: the UI checks' fixture set, in the image's pinned browser, axe-core
+# and reference font (the only place its browser tier runs).
 [[ ${#TARGETS[@]} -gt 0 ]] || TARGETS=("tests.test_boundary_state" "tests.test_loop_owns_commits"
   "tests.test_guard_scope" "tests.test_scaffold_reads" "tests.test_declared_surface"
   "tests.test_engine_outside" "tests.test_multiphase_invariance" "tests.test_project_tests"
-  "tests.test_adopted_checks" "tests.test_learnings_budget")
+  "tests.test_adopted_checks" "tests.test_learnings_budget" "tests.test_ui_check")
 
 command -v docker >/dev/null 2>&1 || { echo "verify-in-container: docker not found" >&2; exit 2; }
 docker image inspect "$IMAGE_NAME" >/dev/null 2>&1 || {
@@ -85,6 +87,18 @@ got="$( [ -n "$chrome" ] && "$chrome" --version 2>/dev/null | tr -s ' ' | sed 's
 echo "verify-in-container: browser ${got:-none} (pinned: Google Chrome for Testing $want)"
 if [ -z "$want" ] || [ "$got" != "Google Chrome for Testing $want" ]; then
   echo "verify-in-container: FAIL — the image's browser is not the pinned one (rebuild the image: .devcontainer/Dockerfile pins CHROMIUM_VERSION)" >&2
+  exit 3
+fi
+# v0.23.0: the UI checks' tools are pinned too (axe-core, playwright-core, the
+# reference font); without them tests.test_ui_check's browser tier would SKIP,
+# a green run that checked nothing — so a stale image fails here instead.
+df=/workspace/.devcontainer/Dockerfile
+want_ui="$(printf 'playwright-core %s\naxe-core %s\nfont %s' "$(sed -n 's/^ARG PLAYWRIGHT_CORE_VERSION=//p' $df | head -1)" \
+  "$(sed -n 's/^ARG AXE_CORE_VERSION=//p' $df | head -1)" "$(sed -n 's/^ARG UI_FONT_SHA256=//p' $df | head -1)")"
+got_ui="$(cat /opt/phasekit-ui/VERSIONS 2>/dev/null || true)"
+echo "verify-in-container: ui tools: $(printf '%s' "${got_ui:-none}" | tr '\n' ' ')"
+if [ "$got_ui" != "$want_ui" ]; then
+  echo "verify-in-container: FAIL — the image's UI tools are not the pinned ones (rebuild the image: .devcontainer/Dockerfile pins AXE_CORE_VERSION)" >&2
   exit 3
 fi
 cd /workspace

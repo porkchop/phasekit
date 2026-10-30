@@ -33,6 +33,13 @@
 #                                 runner-image container for ROLE (session, runner, oneshot,
 #                                 repair): the one composer of user, environment, credentials,
 #                                 image and bounds (scripts/phasekit-launch.py)
+#   phasekit ui-check [--json] [--update [--phase P]]   (v0.23.0) the deterministic UI checks
+#                                 (scripts/phasekit-ui-check.mjs) over docs/project/ui-pages.json,
+#                                 in the runner image: axe, tap targets, fonts, visual baselines.
+#                                 --update --phase P rewrites the baselines that phase declares
+#                                 under `Visual changes:` (and captures missing ones)
+#   phasekit ui-check init        seed docs/project/DESIGN_BRIEF.md, DESIGN_SYSTEM.md and
+#                                 ui-pages.json (never overwrites)
 #   phasekit scope [--iteration N] [--phase P] [--json]
 #                                 what this iteration (or one phase) changed
 #   phasekit facts [--json]       the facts phasekit DECLARES for downstream tests
@@ -323,6 +330,48 @@ case "$verb" in
       exec bash "$project_root/scripts/run-until-done.sh" "$verb" "$@"
     fi
     PHASEKIT_PROJECT_DIR="$project_root" exec bash "$engine/scripts/run-until-done.sh" "$verb" "$@"
+    ;;
+  ui-check)
+    # v0.23.0: run from the project's engine (pinned: its pin's; vendored: its
+    # own scripts/), like roadmap. For --update --phase P the declaration is
+    # read by the loop's own plan parser (run-until-done.sh visual-changes),
+    # the one parser of a phase's docs/PHASES.md section.
+    shift
+    project_root="$(require_project ui-check)"
+    engine="$(pk_engine_for "$project_root")"
+    phase="" update=0 pass=()
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --phase) phase="${2:-}"; shift 2 || { echo "phasekit ui-check: --phase needs a phase id" >&2; exit 2; } ;;
+        --update) update=1; pass+=("$1"); shift ;;
+        --declared-json)
+          # Internal: only the phase's own declaration may let a baseline change.
+          echo "phasekit ui-check: --declared-json is internal; declare the pages under \`Visual changes:\` and pass --phase P" >&2; exit 2 ;;
+        *) pass+=("$1"); shift ;;
+      esac
+    done
+    if [[ -n "$phase" && "$update" -eq 0 ]]; then
+      echo "phasekit ui-check: --phase is only meaningful with --update" >&2; exit 2
+    fi
+    command -v node >/dev/null 2>&1 || {
+      echo "phasekit ui-check: node is not on PATH (ui-check runs in the runner image)" >&2; exit 3; }
+    if [[ "$update" -eq 1 && -n "$phase" ]]; then
+      declared="$(PHASEKIT_PROJECT_DIR="$project_root" bash "$engine/scripts/run-until-done.sh" visual-changes "$phase")" || {
+        echo "phasekit ui-check: could not read phase $phase's \`Visual changes:\` from docs/PHASES.md" >&2; exit 2; }
+      # Refuse a phase the plan does not have, or a declaration with anything but
+      # page ids on it: the declaration is what lets a baseline change.
+      problem="$(printf '%s' "$declared" | python3 -c 'import json,sys
+d = json.load(sys.stdin)
+if not d.get("found"):
+    print("docs/PHASES.md has no heading for phase %s" % d.get("phase"))
+elif d.get("invalid"):
+    print("its `Visual changes:` line has words that are not page ids (id or id@viewport): %s" % ", ".join(d["invalid"]))')" || problem="its declaration could not be read"
+      if [[ -n "$problem" ]]; then
+        echo "phasekit ui-check: phase $phase: $problem" >&2; exit 2
+      fi
+      pass+=(--declared-json "$declared")
+    fi
+    PHASEKIT_SCAFFOLD_ROOT="$SCAFFOLD_ROOT" exec node "$engine/scripts/phasekit-ui-check.mjs" --project "$project_root" "${pass[@]}"
     ;;
   roadmap)
     shift

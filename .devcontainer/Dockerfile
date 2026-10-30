@@ -162,6 +162,41 @@ RUN npx -y "playwright-core@${PLAYWRIGHT_CORE_VERSION}" install chromium && \
   echo "browser: $reported" && \
   test "$reported" = "Google Chrome for Testing ${CHROMIUM_VERSION}"
 
+# SCAFFOLD: the UI checks' tools (v0.23.0, `phasekit ui-check`), PINNED like the
+# browser: playwright-core at the version that installed it (so it drives that
+# exact build) and axe-core, in one fixed prefix the check imports from, so a
+# project needs no node_modules. Neither package has dependencies. The build
+# fails unless both report their pinned versions. One reference font family,
+# fetched by checksum (DejaVu 2.37), backs the check's own fontconfig, which
+# maps system-ui / sans-serif / monospace to it: screenshots are a function of
+# this image, never of whatever fonts apt happened to pull in.
+ARG AXE_CORE_VERSION=4.13.0
+ARG UI_FONT_URL=https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2
+ARG UI_FONT_SHA256=fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7
+USER root
+RUN mkdir -p /opt/phasekit-ui/fonts && \
+  npm install --prefix /opt/phasekit-ui --no-audit --no-fund --omit=dev \
+    "playwright-core@${PLAYWRIGHT_CORE_VERSION}" "axe-core@${AXE_CORE_VERSION}" && \
+  test "$(node -p "require('/opt/phasekit-ui/node_modules/playwright-core/package.json').version")" = "${PLAYWRIGHT_CORE_VERSION}" && \
+  test "$(node -p "require('/opt/phasekit-ui/node_modules/axe-core/package.json').version")" = "${AXE_CORE_VERSION}" && \
+  curl -fsSL -o /tmp/ui-font.tar.bz2 "${UI_FONT_URL}" && \
+  echo "${UI_FONT_SHA256}  /tmp/ui-font.tar.bz2" | sha256sum -c - && \
+  tar xjf /tmp/ui-font.tar.bz2 -C /opt/phasekit-ui/fonts --strip-components=2 --wildcards \
+    '*/ttf/DejaVuSans.ttf' '*/ttf/DejaVuSans-Bold.ttf' '*/ttf/DejaVuSansMono.ttf' '*/ttf/DejaVuSansMono-Bold.ttf' && \
+  rm -f /tmp/ui-font.tar.bz2 && \
+  printf '%s\n' '<?xml version="1.0"?>' '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">' '<fontconfig>' \
+    '  <dir>/opt/phasekit-ui/fonts</dir>' '  <cachedir>/tmp/phasekit-ui-fontcache</cachedir>' \
+    '  <alias><family>system-ui</family><prefer><family>DejaVu Sans</family></prefer></alias>' \
+    '  <alias><family>sans-serif</family><prefer><family>DejaVu Sans</family></prefer></alias>' \
+    '  <alias><family>serif</family><prefer><family>DejaVu Sans</family></prefer></alias>' \
+    '  <alias><family>monospace</family><prefer><family>DejaVu Sans Mono</family></prefer></alias>' \
+    '  <alias><family>ui-monospace</family><prefer><family>DejaVu Sans Mono</family></prefer></alias>' \
+    '</fontconfig>' > /opt/phasekit-ui/fonts/fonts.conf && \
+  printf 'playwright-core %s\naxe-core %s\nfont %s\n' "${PLAYWRIGHT_CORE_VERSION}" "${AXE_CORE_VERSION}" "${UI_FONT_SHA256}" \
+    > /opt/phasekit-ui/VERSIONS && \
+  chmod -R a+rX /opt/phasekit-ui
+USER node
+
 # Copy and set up firewall script
 COPY init-firewall.sh /usr/local/bin/
 # SCAFFOLD: Copy entrypoint wrapper for CLI-only firewall init

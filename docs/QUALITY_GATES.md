@@ -62,6 +62,7 @@ A phase is only complete when all of the following are true:
 - relevant tests pass
 - `code-reviewer` approves
 - `qa-playwright` approves for user-visible or browser-based work
+- where the project has `docs/project/ui-pages.json`: `phasekit ui-check` is green in its full tier, and a UI-touching phase ran `design-reviewer` (advisory; see "UI checks" below)
 - docs are updated for any rule or architecture decision
 - `artifacts/phase-approval.json` is written with `approved: true`
 - the outer orchestration layer creates a git commit before the next phase begins
@@ -409,6 +410,50 @@ zero — `unplanned_count` is null) or `underivable`. It warns and never
 refuses. A scoping session writes the declaration when it plans a phase; the
 supervisor counts `unplanned_count` and the share of phases `inside` their
 plan.
+
+### UI checks (v0.23.0)
+A project with a UI opts in by adding `docs/project/ui-pages.json` (`phasekit ui-check init` seeds it
+beside `docs/project/DESIGN_BRIEF.md` and `docs/project/DESIGN_SYSTEM.md`, never overwriting). Two
+halves, kept apart on purpose:
+
+- **`phasekit ui-check` (deterministic, blocking).** In the runner image's pinned browser, for every
+  page and viewport (phone 390×844, desktop 1440×900, optionally `-dark`) with motion, time and
+  randomness frozen: axe-core (WCAG 2.x A/AA), tap targets, rendered fonts, and a screenshot compared
+  with `tests/ui-baselines/<id>@<viewport>.png`. Time is virtual (a fake clock drives Date, timers,
+  animation frames and differences between `performance.now` readings; a `wait` step is page time;
+  a raw `performance.now` value is not fixed, so never display one), randomness is seeded, and
+  nothing leaves loopback. RED: an axe violation of impact `serious` or `critical`; a tap target under 24 px; a
+  page-loaded font not declared under `fonts`, or a system font other than the reference; a baseline
+  difference the phase did not declare, an unreadable baseline, or a baseline the last commit has
+  and the tree lost; an uncaught page error, a same-origin request that failed or was answered
+  4xx/5xx, or a request or WebSocket off loopback; a page that never settles, a page or setup
+  failure, or a view that did not complete; a timeout. A project may tighten the thresholds in
+  `ui-pages.json`, never loosen them. A new baseline is written only for a view that ended clean.
+  **Limits, recorded (v0.23.0):** the declaration is checked when `--update` runs, not yet at
+  landing, so a baseline replaced by hand is caught only by review; Web Workers are not frozen (a
+  worker-driven page can differ between runs, which fails closed); axe runs in the page's own
+  JavaScript, so it trusts the page's code not to tamper with it. Advisory: other axe impacts, tap targets under 44 px, missing baselines. Evidence goes to
+  the ignored `artifacts/logs/ui-check/<stamp>/`. It belongs in the project's FULL tier (verification
+  sprint and completion), never the fast per-commit tier: add `phasekit ui-check` to the full branch of
+  `scripts/phasekit-verify.sh`, and run it once in a UI-touching phase before its approval.
+- **`design-reviewer` (judgement, advisory).** On a phase whose planned or changed paths overlap the
+  `ui_paths` globs, with a design system present, the agent judges the newest ui-check screenshots
+  against the brief and the system and writes `artifacts/design-review/<iteration>-<phase>.json`. It
+  never fails a gate; a MAJOR finding the phase does not fix goes in the phase's `deferrals`.
+
+A phase that means to change how a page looks declares it in its docs/PHASES.md section, when the
+phase is planned:
+
+```
+Visual changes: summary, stats@phone
+```
+
+(a bare page id covers all its viewports; `none` declares nothing; anything on the line that is not
+a page id, or names a page or viewport `ui-pages.json` does not have, refuses the whole
+declaration). `phasekit ui-check --update
+--phase P` rewrites exactly those baselines (the old one is kept in the evidence directory as
+`<id>@<viewport>.before.png`) and captures missing ones; the phase commits them. Any other difference
+stays RED. A first ui-check phase captures its baselines after its redesign lands, not before.
 
 ### No-churn rule
 The wrapper only commits when the iteration produced a **substantive** change.

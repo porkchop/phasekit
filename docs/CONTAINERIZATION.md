@@ -126,6 +126,17 @@ The working directory (`/workspace`) is bind-mounted from the host, so all chang
 
 **The image is never built or retagged per dispatch.** One shared image (`IMAGE_NAME`, default `scaffold-runner`) serves every project; a project on an older engine must not retag it for all the others. `run` and `shell` use the existing image; only when it does not exist at all are they allowed to build it once, from the engine's `.devcontainer/` (the first run of a fresh install). `PHASEKIT_IMAGE_PREBUILT=1` skips even the existence check. Rebuild deliberately with `phasekit container build` (it builds from the engine's `.devcontainer/`), for example after a release that changes the image.
 
+## UI checks' tools (v0.23.0)
+
+`phasekit ui-check` (docs/QUALITY_GATES.md, "UI checks") runs on tools the image pins in
+`/opt/phasekit-ui`: playwright-core at `PLAYWRIGHT_CORE_VERSION` (the version that installed the
+pinned browser), axe-core at `AXE_CORE_VERSION`, and one reference font family (DejaVu 2.37, fetched
+by sha256) behind a fontconfig that maps `system-ui`, `sans-serif`, `serif`, `monospace` and
+`ui-monospace` to it, so screenshots depend on the image and never on whatever fonts apt installed.
+The build fails unless the versions match; `/opt/phasekit-ui/VERSIONS` records them and
+`scripts/verify-in-container.sh` asserts them. An image built before v0.23.0 has none of this:
+`phasekit ui-check` exits 3 there. Rebuild it with `phasekit container build`.
+
 ## Playwright MCP server (browser automation)
 
 The container includes Chromium and the `@playwright/mcp` server, giving the `qa-playwright` subagent direct browser tools (`browser_navigate`, `browser_snapshot`, `browser_take_screenshot`, `browser_click`, etc.) for verifying user-visible functionality during autonomous execution.

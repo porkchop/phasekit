@@ -39,6 +39,7 @@ Before non-trivial work, read:
 - `docs/SPEC.md` — what {{PROJECT_NAME}} is supposed to do
 - `docs/ARCHITECTURE.md` — technical architecture
 - `docs/DESIGN.md` (if present) — steady-state system design: subsystems, data flows, hot spots, boundaries
+- `docs/project/DESIGN_SYSTEM.md` (if present) — the visual design system UI work follows, with its brief `docs/project/DESIGN_BRIEF.md`
 - `docs/PHASES.md` — phase plan for this project
 {{#vendored}}- `docs/QUALITY_GATES.md` — universal/testing/DRY/drift/planning/control-loop/commit gates (scaffold-owned)
 {{/vendored}}{{#pinned}}- `QUALITY_GATES.md` in phasekit's engine docs — universal/testing/DRY/drift/planning/control-loop/commit gates (`phasekit docs` prints the directory; the engine is outside this repository)

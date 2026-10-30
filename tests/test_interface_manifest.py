@@ -72,6 +72,7 @@ def swept_files():
     """The shipped runtime surface the manifest claims to cover."""
     files = sorted(REPO_ROOT.glob("scripts/*.sh"))
     files += sorted(REPO_ROOT.glob("scripts/*.py"))
+    files += sorted(REPO_ROOT.glob("scripts/*.mjs"))  # v0.23.0: phasekit-ui-check.mjs
     files += sorted(REPO_ROOT.glob(".claude/hooks/*.sh"))
     assert files, "sweep scope resolved to no files — the sweep is vacuous"
     return files
