@@ -41,13 +41,13 @@ LAYOUT_MODULES = (
     "test_boundary_state", "test_branch_squash", "test_compact_reanchor",
     "test_completion_commit_order", "test_completion_key_order",
     "test_contracts_awareness_v070", "test_contracts_gate_v070", "test_declared_contract",
-    "test_deadline_watchdog", "test_deadman_handoff", "test_declared_surface",
+    "test_deadline_watchdog", "test_deadman_handoff", "test_declared_surface", "test_deferral_shape",
     "test_engine_outside", "test_guard_scope", "test_iteration_facts", "test_land_in_runner",
     "test_learnings_budget",
     "test_loop_owns_commits", "test_meta_retired", "test_multiphase_invariance", "test_no_verdict_retry",
     "test_output_discipline", "test_post_completion", "test_project_tests", "test_require_verdict_hook",
     "test_run_until_done_v060", "test_run_until_done_v066", "test_scaffold_lock",
-    "test_scaffold_reads", "test_session_resume", "test_suite_tmpdir",
+    "test_scaffold_reads", "test_session_resume", "test_suite_tmpdir", "test_ui_landing",
     "test_verify_in_runner", "test_wrapup_nudge_hook",
 )
 

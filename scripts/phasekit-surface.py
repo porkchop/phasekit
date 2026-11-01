@@ -1267,17 +1267,73 @@ def suites_line(report):
             "project\"). Advisory only: the check's exit code is unchanged.")
 
 
+# --- deferral-items (v0.24.0, queue row 2418) ----------------------------------
+# A deferral entry is {item, reason, suggested_task} plus a key (contracts/
+# interface.json approval-deferrals). The loop refuses a landing that writes
+# one without an `item` since v0.24.0; entries an older loop already
+# committed stay in the ledger, and a supervisor's mirror (it requires
+# `item`) never imports them. This names them so a session can re-list each
+# key WITH an item (the ledger upserts by key). Printed, never an exit code.
+DEFERRAL_LEDGER = "artifacts/deferrals.json"
+DEFERRAL_ITEMS_ID = "deferral-items"
+DEFERRAL_ITEMS_SHOWN = 20
+
+
+def _has_item(entry):
+    item = entry.get("item") if isinstance(entry, dict) else None
+    return isinstance(item, str) and bool(item.strip())
+
+
+def deferral_item_lines(root):
+    """The `deferral-items` advisory: one line plus one per entry (at most
+    DEFERRAL_ITEMS_SHOWN) for each OPEN ledger entry without a non-empty
+    string `item`; [] when there are none or the ledger is absent/unreadable."""
+    # the COMMITTED ledger: a draft a refused `phasekit verify` composed on
+    # disk is this session's, not an older loop's (review round 2)
+    try:
+        r = subprocess.run(["git", "-C", str(root), "show", "HEAD:" + DEFERRAL_LEDGER],
+                           capture_output=True, text=True, timeout=10)
+        ledger = json.loads(r.stdout) if r.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        ledger = None
+    if ledger is None:
+        return []
+    opened = ledger.get("open") if isinstance(ledger, dict) else None
+    if not isinstance(opened, list):
+        return []
+    bad = [e for e in opened if not _has_item(e)]
+    if not bad:
+        return []
+    one = len(bad) == 1
+    out = [f"ADVISORY {DEFERRAL_ITEMS_ID}: {len(bad)} open entr{'y' if one else 'ies'} in "
+           f"{DEFERRAL_LEDGER} carr{'ies' if one else 'y'} no `item`, so a supervisor's "
+           "mirror cannot import them (approval-deferrals: {item, reason, suggested_task} plus a "
+           "key). Re-list each key WITH an `item` in the next verdict's `deferrals` (the ledger "
+           "upserts by key):"]
+    for e in bad[:DEFERRAL_ITEMS_SHOWN]:
+        if isinstance(e, dict):
+            fields = ", ".join(sorted(k for k in e if k not in ("key", "key_derived"))) or "none"
+            out.append(f"  {str(e.get('key') or '(no key)')}: has {fields}")
+        else:
+            out.append("  (an entry that is not an object)")
+    if len(bad) > DEFERRAL_ITEMS_SHOWN:
+        out.append(f"  … and {len(bad) - DEFERRAL_ITEMS_SHOWN} more")
+    return out
+
+
 def check_lines(root):
     """What `phasekit check` prints for the test-subject advisories, in both
     layouts: scaffold-reads (with the phasekit-only widening), process-reads,
-    criterion-suites. Each is isolated: one failing never costs another."""
+    criterion-suites; v0.24.0: deferral-items (ledger entries without an
+    `item`). Each is isolated: one failing never costs another."""
     root = Path(root)
     tracked = _tracked(root)
     out = []
     for fn in (lambda: _named(advisory_line, scaffold_reads(root)),
                lambda: _named(process_line, process_reads(root, tracked,
                                                           time.monotonic() + SCAN_BUDGET_S)),
-               lambda: [suites_line(criterion_suites(root, tracked))]):
+               lambda: [suites_line(criterion_suites(root, tracked))],
+               lambda: deferral_item_lines(root)):
         try:
             out.extend(x for x in fn() if x)
         except Exception:  # noqa: BLE001 - an advisory never fails the check

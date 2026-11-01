@@ -31,7 +31,9 @@ Every finding names the clause it rests on (a `DESIGN_SYSTEM.md` or brief sectio
 no clause behind it is not a finding.
 
 ## Output
-Write `artifacts/design-review/<iteration>-<phase>.json` (tracked, small) and nothing else:
+Write `artifacts/design-review/<iteration>-<phase>.json` (tracked, small) and nothing else, with both
+parts bare: the iteration number and the phase id (`7-1.json` for iteration 7, phase 1). The loop looks
+for this file when a UI phase lands and prints an advisory line when it is missing:
 
 ```json
 {"schema": 1, "iteration": 0, "phase": "0",

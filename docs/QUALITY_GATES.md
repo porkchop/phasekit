@@ -143,6 +143,13 @@ iteration's change-request) that a session decides not to implement is a
   `deferrals` array: `{"item": "<the criterion or ask>", "reason": "<one
   line>", "suggested_task": "<one-line title for the follow-up>"}`.
   `item` MUST name the AC number when the deferral maps to a criterion.
+  `item` is REQUIRED (v0.24.0): the loop refuses a landing whose record
+  carries an entry with no non-empty `item` (one written with only
+  `summary` or `reason`), naming each entry in
+  `artifacts/phase-verify-failed.json` before the gate runs; `phasekit
+  verify` reports it RED. A supervisor cannot import an entry without one.
+  Entries an older loop already committed are named by `phasekit check`
+  (`ADVISORY deferral-items`): re-list each key with an `item`.
 - Each entry carries a stable dedupe identifier: an optional `"key"`
   field, defaulting to the cited AC number (e.g. `AC#3`) when `item`
   names one, and REQUIRED explicitly (kebab-case) when it does not. The
@@ -429,8 +436,12 @@ halves, kept apart on purpose:
   4xx/5xx, or a request or WebSocket off loopback; a page that never settles, a page or setup
   failure, or a view that did not complete; a timeout. A project may tighten the thresholds in
   `ui-pages.json`, never loosen them. A new baseline is written only for a view that ended clean.
-  **Limits, recorded (v0.23.0):** the declaration is checked when `--update` runs, not yet at
-  landing, so a baseline replaced by hand is caught only by review; Web Workers are not frozen (a
+  **At landing (v0.24.0):** every approval-class landing of a ui-check project records
+  `ui_landing` (the record, the phase-close evidence, boundary-state.json): baselines the phase
+  changed or deleted outside its `Visual changes:` declaration are named on one line (warn only, not
+  a refusal), and a phase whose changed paths match `ui_paths` with a design system present but no
+  design-review record gets one `ADVISORY design-review:` line.
+  **Limits, recorded (v0.23.0):** Web Workers are not frozen (a
   worker-driven page can differ between runs, which fails closed); axe runs in the page's own
   JavaScript, so it trusts the page's code not to tamper with it. Advisory: other axe impacts, tap targets under 44 px, missing baselines. Evidence goes to
   the ignored `artifacts/logs/ui-check/<stamp>/`. It belongs in the project's FULL tier (verification

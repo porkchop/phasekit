@@ -2207,6 +2207,19 @@ Make them stageable (an empty or nested repository: remove its .git or move it o
     return 2
   fi
 
+  # v0.24.0 (queue row 2418): a landing never carries a deferral entry
+  # without an `item` (approval-deferrals) — refused before the gate runs,
+  # through the channel the repair turn reads, the breaker bounding it.
+  if [[ "$kind" != update ]]; then
+    local shape_bad
+    shape_bad="$(deferral_shape_refusals)"
+    if [[ -n "$shape_bad" ]]; then
+      record_deferral_shape_refusal "$shape_bad"
+      unstage_verdicts_after_refusal
+      return 1
+    fi
+  fi
+
   # Pre-commit verification gate. On failure, leave changes staged so the
   # next iteration can keep working from the same state — every change but
   # the verdict artifacts (v0.18.0) — and return non-zero so the caller does
@@ -2273,6 +2286,9 @@ git refused the loop's commit of the staged work (a project git hook, the commit
   # record's `plan_paths`; the boundary record carries the last one.
   if [[ "$kind" != update ]] && jq -e '(.plan_paths // null) | type == "object"' "$file" >/dev/null 2>&1; then
     _boundary_write '.plan_paths = $p' --argjson p "$(jq -c '.plan_paths' "$file" 2>/dev/null || echo null)"
+  fi
+  if [[ "$kind" != update ]] && jq -e '(.ui_landing // null) | type == "object"' "$file" >/dev/null 2>&1; then
+    _boundary_write '.ui_landing = $u' --argjson u "$(jq -c '.ui_landing' "$file" 2>/dev/null || echo null)"
   fi
   # Branch-per-iteration (v0.14.0): an approval-class commit also lands on the
   # target as one squash commit. A refused squash leaves the branch commit in
@@ -3415,6 +3431,87 @@ normalize_deferral_keys() {
   return 0
 }
 
+deferral_shape_refusals() {
+  # v0.24.0 (queue row 2418): prints one line per deferral entry, in the
+  # approval-class records this landing carries, that has no non-empty
+  # string `item` (or is not an object at all); prints nothing when every
+  # entry has one. The contract shape is {item, reason, suggested_task} plus
+  # a key (approval-deferrals); a supervisor's mirror requires `item`, so an
+  # entry written with only `summary` or `reason` lands in the ledger and is
+  # never imported (xmeo-v3, 2026-10-31: 7 of 35 open entries, 3 of them
+  # MAJOR, never reached the planner). The caller REFUSES the landing on any
+  # line: the refusal goes through record_commit_refusal, the one channel a
+  # repair turn reads (v0.18.2), so it is not the blind refusal v0.14.5
+  # declined in normalize_deferral_keys.
+  # An entry IDENTICAL to an open entry of the ledger before this landing
+  # (HEAD's, else its seed) is carried, not written by this record — a
+  # completion record's composed `deferrals` is the whole open set — and
+  # is never refused here: entries already committed without an item are
+  # the `phasekit check` advisory's to name. Call after
+  # prepare_verdicts_for_landing (keys normalized, the set composed). Never
+  # invents an item from `summary`. Always returns 0.
+  local f files=() d
+  for f in phase-approval.json project-complete.json; do
+    [[ -f "$ARTIFACTS_DIR/$f" ]] || continue
+    artifact_never_landed "$ARTIFACTS_DIR/$f" || continue
+    if [[ "$f" == project-complete.json ]]; then completion_record_rides || continue; fi
+    # a `deferrals` that is present and not an array can enter no ledger
+    # (review round 1, MINOR 2): the same harm in another shape
+    if jq -e 'type == "object" and (.deferrals != null) and ((.deferrals | type) != "array")' "$ARTIFACTS_DIR/$f" >/dev/null 2>&1; then
+      echo "artifacts/$f: \`deferrals\` is not an array of {item, reason, suggested_task} objects"
+      continue
+    fi
+    jq -e 'type == "object" and ((.deferrals // []) | type == "array")' "$ARTIFACTS_DIR/$f" >/dev/null 2>&1 || continue
+    files+=("$ARTIFACTS_DIR/$f")
+  done
+  [[ ${#files[@]} -gt 0 ]] || return 0
+  d="$(mktemp -d)" || return 0
+  _ledger_base_to "$d/base.json" 2>/dev/null || true
+  jq -e 'type == "object"' "$d/base.json" >/dev/null 2>&1 || printf '{"open": [], "closed": []}\n' > "$d/base.json"
+  for f in "${files[@]}"; do
+    jq -r --slurpfile base "$d/base.json" --arg rec "artifacts/$(basename "$f")" '
+      ($base[0].open // []) as $open
+      | ([($base[0].closed // [])[] | tostring]) as $closed
+      | (.deferrals // []) | to_entries[]
+      | .key as $i | .value as $e
+      | select(($e | type) != "object"
+               or (($e.item // null) | type) != "string"
+               or (($e.item | gsub("^\\s+|\\s+$"; "")) | length) == 0)
+      | select(($e | type) != "object"
+               or (($e.key // null) as $k
+                   | $k == null
+                   or (($closed | index($k | tostring)) == null
+                       and ([$open[] | select(type == "object" and ((.key // "") | tostring) == ($k | tostring))] | first) != $e)))
+      | if ($e | type) != "object" then "\($rec): deferrals[\($i)] is not an object"
+        else "\($rec): deferral \(if (($e.key // "") | tostring | length) > 0 then "key \($e.key | tostring)" else "deferrals[\($i)] (no key)" end) has no `item` (its fields: \([$e | keys[] | select(. != "key_derived")] | join(", ")))"
+        end' "$f" 2>/dev/null || true
+  done
+  rm -rf "$d"
+  return 0
+}
+
+record_deferral_shape_refusal() {
+  # $1 = deferral_shape_refusals' lines. The one refusal record and message,
+  # shared by the boundary landing and the wrap-up (review round 1, BLOCKER:
+  # the wrap-up landed what the boundary refused). $2 = "once" (the wrap-up):
+  # a refusal of these very lines already standing is not recorded again —
+  # the same unchanged record with no repair turn between must not spend a
+  # second breaker attempt (review round 2, MAJOR 1/2; light mode tripped
+  # its 2-attempt breaker with zero repair turns).
+  local lines label="deferral entries without item (approval-deferrals)"
+  lines="$(printf '%s\n' "$1" | sed -n '1,20p')"
+  echo "run-until-done: REFUSED — deferral entries without an \`item\` (approval-deferrals):" >&2
+  printf '%s\n' "$lines" | sed 's/^/  /' >&2
+  if [[ "${2:-}" == once ]] && jq -e --arg l "$label" --arg t "$lines" \
+       '.commit_refusal == true and .label == $l and ((.log_tail // "") | tostring | contains($t))' \
+       "$ARTIFACTS_DIR/phase-verify-failed.json" >/dev/null 2>&1; then
+    echo "  (already recorded for these entries; no breaker attempt spent)" >&2
+    return 0
+  fi
+  record_commit_refusal "$label" "$lines
+Every deferral entry needs a non-empty \`item\` naming what was deferred (its AC number when it maps to a criterion) — the contract shape is {item, reason, suggested_task} plus a key (contracts/interface.json approval-deferrals). A supervisor cannot import an entry without one, so it would never reach the planner or the operator. Edit the record(s) named above: give each named entry an \`item\` (\`summary\` is not read; keep its key), then end your turn — the loop retries the landing."
+}
+
 # --- iteration facts (v0.18.0) ------------------------------------------------
 # foundry-meta designs/DESIGN-session-efficiency.md §4, links [H]–[J]. Until
 # v0.17.0 the facts about an iteration were the MODEL's: the commit subject
@@ -3688,12 +3785,15 @@ phasekit_trailers() {
 # progress or status record (`### Phase 109 — progress record …`), and
 # `## Phase 193 continuation — …` is not a heading of phase 193.
 _phase_plan_py() {
-  # $1 = title | check | later | visual, $2 = phase id, $3 = since (check only). Reads
+  # $1 = title | check | later | visual | ui, $2 = phase id, $3 = since
+  # (check and ui), $4 = the iteration label (ui). Reads
   # the plan from docs/PHASES.md; check reads the changed
   # paths from `git diff --cached` since $3. Prints the title (or nothing),
   # the plan_paths JSON object, or (later) `later` when the plan names
   # another phase in a heading after the one that plans $2, or (visual) the
-  # phase's `Visual changes:` declaration as JSON (v0.23.0).
+  # phase's `Visual changes:` declaration as JSON (v0.23.0), or (ui) the
+  # ui_landing JSON object — nothing when docs/project/ui-pages.json is
+  # absent (v0.24.0).
   python3 - "$@" <<'PLAN_PY'
 import json, os, re, subprocess, sys
 
@@ -3851,10 +3951,10 @@ if mode == "title":
         if t:
             print(t)
     sys.exit(0)
-if mode == "visual":
-    # v0.23.0: the phase's `Visual changes:` declaration (the pages whose
-    # ui-check baselines it may rewrite). Same section and fence rules as
-    # `Planned paths:`; `none` declares nothing.
+def visual_decl(sec):
+    """v0.23.0: the phase's `Visual changes:` declaration (the pages whose
+    ui-check baselines it may rewrite) as (declared, pages, invalid). Same
+    section and fence rules as `Planned paths:`; `none` declares nothing."""
     fence, declared, pages, invalid = False, False, [], []
     for ln in (sec[1] if sec else []):
         if ln.lstrip().startswith(("```", "~~~")):
@@ -3881,8 +3981,104 @@ if mode == "visual":
                     pages.append(tok)
             elif tok not in invalid:
                 invalid.append(tok)
+    return declared, pages, invalid
+
+if mode == "visual":
+    declared, pages, invalid = visual_decl(sec)
     print(json.dumps({"schema": 1, "phase": pid or None, "source": rel, "found": bool(sec),
                       "declared": declared, "pages": pages, "invalid": invalid}, sort_keys=True))
+    sys.exit(0)
+if mode == "ui":
+    # v0.24.0 (queue row 2378 items 1 and 2): what a UI phase's landing
+    # changed against what it declared — warn and record, never a refusal.
+    UI_CONFIG = "docs/project/ui-pages.json"
+    BASELINES = "tests/ui-baselines/"
+    if not os.path.isfile(UI_CONFIG):
+        sys.exit(0)                     # ui-check not opted in: no record at all
+    label = sys.argv[4] if len(sys.argv) > 4 else ""
+    CAP_LIST = 200
+    res = {"schema": 1, "phase": pid or None,
+           "baselines": {"status": "underivable", "declared": False, "pages": [], "invalid": [], "unknown": [],
+                         "changed": [], "undeclared": [], "undeclared_count": None},
+           "design_review": {"status": "underivable", "record": None, "ui_changed": [],
+                             "ui_changed_count": None}}
+    if not pid or not since:
+        res["note"] = "no phase id" if not pid else "no base to compare against"
+        print(json.dumps(res, sort_keys=True)); sys.exit(0)
+    try:
+        raw = subprocess.run(["git", "diff", "--cached", "--no-renames", "--name-status", "-z", since],
+                             capture_output=True, check=True).stdout.split(b"\0")
+    except Exception:
+        res["note"] = "git could not list the changed paths"
+        print(json.dumps(res, sort_keys=True)); sys.exit(0)
+    entries, i = [], 0
+    while i + 1 < len(raw):
+        st, pth = raw[i].decode("ascii", "replace")[:1], raw[i + 1].decode("utf-8", "replace")
+        i += 2
+        if pth:
+            entries.append((st, pth))
+    # 1. baselines: a changed or deleted tests/ui-baselines/ path must be one
+    # the phase declared (`id` covers all its viewports; `id@viewport` one).
+    # A NEW baseline (a view captured for the first time) needs no
+    # declaration, as for `phasekit ui-check --update`. An invalid
+    # declaration covers nothing: ui-check refuses it whole.
+    try:
+        cfg = json.load(open(UI_CONFIG, encoding="utf-8"))
+    except (OSError, ValueError):
+        cfg = None
+    cfg = cfg if isinstance(cfg, dict) else {}
+    views = {}
+    for pg in (cfg.get("pages") if isinstance(cfg.get("pages"), list) else []):
+        if isinstance(pg, dict) and isinstance(pg.get("id"), str):
+            vps = pg.get("viewports") if isinstance(pg.get("viewports"), list) and pg.get("viewports") else ["phone", "desktop"]
+            views[pg["id"]] = [str(v) for v in vps]
+    declared, pages, invalid = visual_decl(sec)
+    # ui-check refuses a declaration naming a page or viewport the config
+    # does not have (a prose word that happens to be a valid id): so here
+    unknown = [d for d in pages if d.split("@")[0] not in views
+               or ("@" in d and d.split("@", 1)[1] not in views[d.split("@")[0]])]
+    cover = set() if (invalid or unknown) else set(pages)
+    touched = [(st, p) for st, p in entries if p.startswith(BASELINES) and st != "A"]
+    undeclared = []
+    for st, p in touched:
+        m = re.fullmatch(r"([A-Za-z0-9_.-]+)@((?:phone|desktop)(?:-dark)?)\.png", p[len(BASELINES):])
+        if not m or not (m.group(1) in cover or "%s@%s" % (m.group(1), m.group(2)) in cover):
+            undeclared.append(p)
+    b = res["baselines"]
+    b.update({"declared": declared, "pages": pages, "invalid": invalid, "unknown": unknown,
+              "changed": [{"path": p, "status": st} for st, p in touched][:CAP_LIST],
+              "undeclared": undeclared[:CAP_LIST], "undeclared_count": len(undeclared),
+              "status": "none" if not touched else ("outside" if undeclared else "inside")})
+    # 2. design review: a phase whose changed paths match `ui_paths` (the
+    # `Planned paths:` glob dialect), with docs/project/DESIGN_SYSTEM.md
+    # present, is expected to carry artifacts/design-review/<N>-<phase>.json
+    # (standalone: any `*-<phase>.json`). Advisory only.
+    d = res["design_review"]
+    globs = [str(g) for g in cfg["ui_paths"]] if isinstance(cfg.get("ui_paths"), list) else []
+    pats = [r for r in (glob_re(g) for g in globs) if r]
+    ui_changed = sorted({p for st, p in entries if not p.startswith("artifacts/") and any(r.match(p) for r in pats)})
+    d["ui_changed"], d["ui_changed_count"] = ui_changed[:20], len(ui_changed)
+    rdir = "artifacts/design-review"
+    # `<iteration>-<phase>`, bare (7-1.json); the spelled-out forms a
+    # reviewer may write (iteration-7-phase-1.json) count too (review round 1)
+    have = sorted(os.listdir(rdir)) if os.path.isdir(rdir) else []
+    if label:
+        want = "%s-%s.json" % (label, pid)
+        forms = ["%s%s-%s%s.json" % (a, label, b, pid) for a in ("", "iteration-") for b in ("", "phase-")]
+        found = next((n for n in forms if n in have and os.path.isfile(os.path.join(rdir, n))), None)
+    else:
+        want = "*-%s.json" % pid
+        names = [n for n in have if n.endswith("-%s.json" % pid)]
+        found = names[-1] if names else None
+    if not os.path.isfile("docs/project/DESIGN_SYSTEM.md"):
+        d.update({"status": "not-applicable", "note": "no docs/project/DESIGN_SYSTEM.md"})
+    elif not ui_changed:
+        d.update({"status": "not-applicable", "note": "no changed path matches ui_paths"})
+    elif found:
+        d.update({"status": "present", "record": rdir + "/" + found})
+    else:
+        d.update({"status": "missing", "record": rdir + "/" + want})
+    print(json.dumps(res, sort_keys=True))
     sys.exit(0)
 
 res = {"schema": 1, "phase": pid or None, "source": rel, "declared": False, "globs": [],
@@ -3938,6 +4134,32 @@ phase_plan_check() {
     no-plan-declared) echo "plan: phase ${p:-?} — no plan declared ($(jq -r '.note // ""' <<<"$j")); $(jq -r '.changed_count' <<<"$j") changed path(s), none compared." >&2 ;;
     *) echo "plan: phase ${p:-?} — the plan check is underivable ($(jq -r '.note // ""' <<<"$j"))." >&2 ;;
   esac
+  printf '%s\n' "$(jq -c . <<<"$j")"
+}
+
+phase_ui_check() {
+  # v0.24.0 (queue row 2378 items 1 and 2). $1 = normalized phase id, $2 =
+  # since, $3 = the iteration label (may be empty). Prints the `ui_landing`
+  # JSON — nothing at all when docs/project/ui-pages.json is absent (ui-check
+  # not opted in) — and at most one stderr line per finding: baselines under
+  # tests/ui-baselines/ changed or deleted outside the phase's `Visual
+  # changes:` declaration, and the ADVISORY design-review line. Warn and
+  # record only, never a refusal.
+  local p="${1:-}" since="${2:-}" n="${3:-}" j
+  [[ -f "$ROOT_DIR/docs/project/ui-pages.json" ]] || return 0
+  j="$(cd "$ROOT_DIR" && _phase_plan_py ui "$p" "$since" "$n" 2>/dev/null)" || j=""
+  if [[ -z "$j" ]] || ! jq -e 'type == "object"' <<<"$j" >/dev/null 2>&1; then
+    j="$(jq -cn --arg p "$p" '{schema: 1, phase: (if $p == "" then null else $p end), note: "the UI landing check could not run (python3 unavailable?)",
+      baselines: {status: "underivable", declared: false, pages: [], invalid: [], unknown: [], changed: [], undeclared: [], undeclared_count: null},
+      design_review: {status: "underivable", record: null, ui_changed: [], ui_changed_count: null}}')"
+  fi
+  case "$(jq -r '.baselines.status' <<<"$j")" in
+    outside) echo "ui: phase ${p:-?} — $(jq -r '.baselines.undeclared_count' <<<"$j") baseline(s) under tests/ui-baselines/ changed or deleted OUTSIDE its \`Visual changes:\` declaration (warn only; recorded as ui_landing): $(jq -r '.baselines.undeclared[:10] | join(", ")' <<<"$j")" >&2 ;;
+    inside) echo "ui: phase ${p:-?} — $(jq -r '.baselines.changed | length' <<<"$j") changed baseline(s), all within its \`Visual changes:\` declaration." >&2 ;;
+  esac
+  if [[ "$(jq -r '.design_review.status' <<<"$j")" == missing ]]; then
+    echo "ADVISORY design-review: phase ${p:-?} changed $(jq -r '.design_review.ui_changed_count' <<<"$j") UI path(s) (ui_paths in docs/project/ui-pages.json) and docs/project/DESIGN_SYSTEM.md exists, but it carries no $(jq -r '.design_review.record' <<<"$j") — run the design-reviewer agent (advisory; never a refusal; recorded as ui_landing)." >&2
+  fi
   printf '%s\n' "$(jq -c . <<<"$j")"
 }
 
@@ -4293,6 +4515,12 @@ write_phase_evidence() {
   # record, mtime kept), and so does the evidence file below.
   plan="$(phase_plan_check "$p" "$since")"
   _stamp_plan_paths "$f" "$plan"
+  # v0.24.0 (row 2378): a ui-check project's landing also records its
+  # baselines against its `Visual changes:` and whether a design review is
+  # missing (`ui_landing`, warn only), in the record and the evidence file.
+  local ui
+  ui="$(phase_ui_check "$p" "$since" "$n")"
+  _stamp_ui_landing "$f" "$ui"
   [[ -n "$n" ]] || return 0
   if [[ -z "$p" && "$name" != complete ]]; then echo "run-until-done: WARN — the approval names no usable phase; no phase-close evidence written (F5)." >&2; return 0; fi
   [[ -n "$since" ]] || return 0
@@ -4307,7 +4535,7 @@ write_phase_evidence() {
     rm -f -- "$ROOT_DIR/$stale"
   done < <(git -C "$ROOT_DIR" ls-files -z --others --exclude-standard -- "artifacts/iterations/$n" 2>/dev/null; \
            git -C "$ROOT_DIR" diff --cached --name-only -z --diff-filter=A -- "artifacts/iterations/$n" 2>/dev/null)
-  if ! (cd "$ROOT_DIR" && PK_PLAN_PATHS="$plan" python3 - "$since" "$rel" "$n" "$p" "$base" <<'EVIDENCE_PY'
+  if ! (cd "$ROOT_DIR" && PK_PLAN_PATHS="$plan" PK_UI_LANDING="$ui" python3 - "$since" "$rel" "$n" "$p" "$base" <<'EVIDENCE_PY'
 import hashlib, json, os, subprocess, sys
 since, rel, n, p, base = sys.argv[1:6]
 raw = subprocess.run(["git", "diff", "--cached", "--no-renames", "--name-status", "-z", since],
@@ -4360,6 +4588,12 @@ except ValueError:
     plan = None
 if isinstance(plan, dict):
     record["plan_paths"] = plan
+try:
+    ui = json.loads(os.environ.get("PK_UI_LANDING") or "null")
+except ValueError:
+    ui = None
+if isinstance(ui, dict):
+    record["ui_landing"] = ui
 with open(rel, "w", encoding="utf-8") as fh:
     json.dump(record, fh, indent=1, sort_keys=True)
     fh.write("\n")
@@ -4380,6 +4614,24 @@ _stamp_plan_paths() {
   [[ -f "$f" && -n "$j" ]] || return 0
   jq -e 'type == "object"' "$f" >/dev/null 2>&1 || return 0
   out="$(jq --argjson p "$j" '.plan_paths = $p' "$f" 2>/dev/null)" || return 0
+  _rewrite_json_keeping_mtime "$f" "$out" || true
+  git add -f -- "$f" 2>/dev/null || true
+  return 0
+}
+
+_stamp_ui_landing() {
+  # v0.24.0: $1 = the approval-class record being landed, $2 = the
+  # ui_landing JSON, or empty (not a ui-check project: a copied key is
+  # dropped, nothing else is touched). Mtime kept, re-staged. Best-effort.
+  local f="$1" j="$2" out
+  [[ -f "$f" ]] || return 0
+  jq -e 'type == "object"' "$f" >/dev/null 2>&1 || return 0
+  if [[ -n "$j" ]]; then
+    out="$(jq --argjson u "$j" '.ui_landing = $u' "$f" 2>/dev/null)" || return 0
+  else
+    jq -e 'has("ui_landing")' "$f" >/dev/null 2>&1 || return 0
+    out="$(jq 'del(.ui_landing)' "$f" 2>/dev/null)" || return 0
+  fi
   _rewrite_json_keeping_mtime "$f" "$out" || true
   git add -f -- "$f" 2>/dev/null || true
   return 0
@@ -4541,6 +4793,16 @@ phasekit_verify() {
     fi
   fi
   prepare_verdicts_for_landing
+  # v0.24.0 (row 2418): the landing refuses a deferral entry without an
+  # `item` before its gate runs; say so here instead of a green that lies.
+  local shape_bad
+  shape_bad="$(deferral_shape_refusals)"
+  if [[ -n "$shape_bad" ]]; then
+    echo "phasekit verify: RED — the landing will refuse deferral entries without an \`item\` (approval-deferrals: {item, reason, suggested_task} plus a key; \`summary\` is not read):" >&2
+    printf '%s\n' "$shape_bad" | sed -n '1,20s/^/  /p' >&2
+    echo "phasekit verify: give each named entry an \`item\`, then run it again. The gate was not run." >&2
+    return 1
+  fi
   drv="$(evidence_driver)"
   stage_landing_tree "$drv" landing
   if [[ -n "${STAGE_LOCKED:-}" ]]; then
@@ -6154,9 +6416,24 @@ wrapup_commit() {
   # would have landed it, so the two gates judge one tree and a red verdict
   # memoised by either answers the next start's recovery (review round 2).
   # Otherwise it is a checkpoint and carries none.
-  local _wdrv
+  local _wdrv _wshape="" _wnote=""
   _wdrv="$(evidence_driver)"
   [[ -z "${STAGE_FAILED:-}" ]] || _wdrv=""
+  if [[ -n "$_wdrv" ]]; then
+    # v0.24.0 (row 2418; review round 1, BLOCKER): a wrap-up that would land
+    # a record the boundary refuses for a deferral entry without an `item`
+    # lands it neither: the verdicts stay out (the rest is a checkpoint) and
+    # the refusal stands for the next session's repair turn.
+    _wshape="$(deferral_shape_refusals)"
+    if [[ -n "$_wshape" ]]; then
+      record_deferral_shape_refusal "$_wshape" once
+      echo "Wrap-up: the verdicts stay out (deferral entries without an \`item\`); committing the rest as a checkpoint." >&2
+      git reset -q -- "$ARTIFACTS_DIR/phase-approval.json" "$ARTIFACTS_DIR/project-complete.json" 2>/dev/null || true
+      _wdrv=""
+      # a red gate below overwrites the refusal's capture: the baton keeps it
+      _wnote="; ALSO your verdict was kept out because deferral entries lack an \`item\` ($(printf '%s\n' "$_wshape" | sed -n '1,3p' | tr '\n' ' ')) — give each an \`item\`, keep its key"
+    fi
+  fi
   if [[ -n "$_wdrv" ]]; then
     if artifact_never_landed "$_wdrv"; then write_phase_evidence "$_wdrv"; fi
   else
@@ -6206,13 +6483,13 @@ wrapup_commit() {
         # Written only once the commit is real (review finding 5): a baton
         # that says "preserved as a wip commit" over a commit that never
         # landed would misdirect the next session.
-        write_session_handoff false "the verify gate was RED at wrap-up and the standing work was preserved as an UNVERIFIED wip commit (fall-through); the approval artifact, if any, is on disk uncommitted for the stranded-artifact recovery: audit the wip, fix the verify failure recorded in artifacts/phase-verify-failed.json, then land the work properly"
+        write_session_handoff false "the verify gate was RED at wrap-up and the standing work was preserved as an UNVERIFIED wip commit (fall-through); the approval artifact, if any, is on disk uncommitted for the stranded-artifact recovery: audit the wip, fix the verify failure recorded in artifacts/phase-verify-failed.json, then land the work properly${_wnote}"
         echo "Wrap-up: verify failed — standing work preserved as an UNVERIFIED wip commit $(git rev-parse --short HEAD 2>/dev/null) (fall-through); the next session's gates judge it. phase-verify-failed.json + session-handoff.json record the state." >&2
         WRAPUP_UNVERIFIED=1
         return 0
       fi
     fi
-    write_session_handoff false "fix the verify failure recorded in artifacts/phase-verify-failed.json, then write your verdict (phase-update.json at least) — the loop commits the standing work"
+    write_session_handoff false "fix the verify failure recorded in artifacts/phase-verify-failed.json, then write your verdict (phase-update.json at least) — the loop commits the standing work${_wnote}"
     echo "Wrap-up: verify failed — leaving work uncommitted (phase-verify-failed.json + session-handoff.json record the state for the next session)." >&2
     return 0
   fi
@@ -6221,7 +6498,9 @@ wrapup_commit() {
     echo "Wrap-up: post-verify gates refused the staged work — leaving it uncommitted (session-handoff.json records the state)." >&2
     return 0
   fi
-  if [[ -n "${STAGE_FAILED:-}" ]]; then
+  if [[ -n "$_wshape" ]]; then
+    write_session_handoff true "standing work was committed at wrap-up as a checkpoint, but NOT your verdict: its deferral entries lack an \`item\` (artifacts/phase-verify-failed.json names them) — give each an \`item\`, keep its key, and end your turn; the loop lands the verdict"
+  elif [[ -n "${STAGE_FAILED:-}" ]]; then
     write_session_handoff true "standing work was committed at wrap-up EXCEPT paths git cannot stage: $STAGE_FAILED — make them stageable (an empty or nested repository: remove its .git or move it outside the tree; an unreadable file: fix its permissions) or remove them, then continue from the next unapproved phase"
   else
     write_session_handoff true "standing work was committed at wrap-up; re-orient and continue from the next unapproved phase"
@@ -6242,7 +6521,7 @@ wrapup_commit() {
     return 0
   fi
   # a refusal the wrap-up could not stage past still stands (review round 6)
-  [[ -n "${STAGE_FAILED:-}" ]] || clear_commit_refusal
+  [[ -n "${STAGE_FAILED:-}" || -n "$_wshape" ]] || clear_commit_refusal
   auto_push_if_enabled
 }
 
