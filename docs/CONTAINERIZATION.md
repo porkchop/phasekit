@@ -15,6 +15,28 @@ The container runs Claude Code with `--permission-mode bypassPermissions`. This 
 - **Full repo access** — the bind mount gives Claude read/write access to the entire repository, including `.git` history (the guard refuses git writes by command; a program that runs git itself is caught by the loop's whole-tree check at every completion)
 - **`git add -A`** — the wrapper's commit function stages all changes; `.gitignore` and the loop's own exclusions (artifacts/logs/, artifacts/scratch/) are the only defense against committing unexpected files — scratch goes in `artifacts/scratch/` or `/tmp`
 
+### Push credentials: only with `AUTO_PUSH=1` (v0.24.1)
+
+The host's ssh-agent socket (mounted at `/ssh-agent`, with `SSH_AUTH_SOCK=/ssh-agent`), `GH_TOKEN` and `GITHUB_TOKEN` enter the container **only when `AUTO_PUSH=1`** — the one setting under which the loop pushes. Until v0.24.0 they crossed whenever the host had them set, so a session that never pushes still held a credential that could. With `AUTO_PUSH` unset (or any value other than `1`), none of them cross, and one stderr line names what was withheld — names only, never a value:
+
+```
+container: AUTO_PUSH is not 1 — push credentials withheld: SSH_AUTH_SOCK GH_TOKEN (set AUTO_PUSH=1 to forward them)
+```
+
+One rule at every door a phasekit container is started through:
+
+| Door | Push credentials |
+|---|---|
+| `container-setup.sh run` / `shell` / `setup` (the session) | only with `AUTO_PUSH=1` |
+| `PHASEKIT_FORWARD_ENV` (session and runner) | refused by name, always — these names cross only through their own door |
+| the runner gate (`phasekit verify --in-runner`, the upgrade/migrate gate) | never |
+| `phasekit land --in-runner` | only with `--push`, which is `AUTO_PUSH=1` |
+| `phasekit launch-argv` | `--env NAME` only beside `--set AUTO_PUSH=1`, otherwise withheld with the same names-only line; `--set` of a token is refused (a value on argv), and the agent socket by `--set SSH_AUTH_SOCK=…` or a `--mount` at `/ssh-agent` (or of the host's socket) is refused without `--set AUTO_PUSH=1`; `--env AUTO_PUSH` is refused (AUTO_PUSH comes from `--set` only) |
+
+`~/.ssh/known_hosts` (host keys, public) is still mounted read-only when present. Only these three names are push credentials to phasekit: a supervisor that lists another credential in `PHASEKIT_FORWARD_ENV` (`GH_ENTERPRISE_TOKEN`, `GIT_ASKPASS`, a `GIT_CONFIG_*` credential helper) owns that choice, and a token written into the repository's own remote URL reaches the container with the `/workspace` mount whatever `AUTO_PUSH` says. An interactive `phasekit container shell` from which you want to push by hand takes `AUTO_PUSH=1` too.
+
+**This is a backstop, not the full fix.** The command guard (`deny-dangerous-commands.sh`) still matches patterns, so a push spelled in a form it does not recognise is stopped by this change only because nothing to push *with* is in the container. A real shell parser for the guard (row 1300, option A) remains open. Nothing in phasekit itself needs push credentials when `AUTO_PUSH` is unset: the update check uses anonymous HTTPS, and branch-per-iteration's remote guard fetch is best-effort by design (a failed fetch uses the last-seen `origin/<target>`).
+
 ### Network firewall (best-effort)
 
 The container uses Anthropic's reference firewall (`init-firewall.sh`) to restrict outbound network access:
@@ -198,6 +220,9 @@ This registers the server in your user-level Claude configuration. Add `--headle
 | `PHASEKIT_CONTAINER_USER` | (unset) | Lower-level override for `docker run --user` (`root` or `uid:gid`); takes precedence over `PHASEKIT_ROOTLESS_DOCKER` |
 | `PHASEKIT_CONTRACTS_MOUNT` | (unset) | Host path to a provider's contracts tree; bind-mounted read-only at `/contracts`; see [Cross-project contracts mount](#cross-project-contracts-mount) |
 | `PHASEKIT_PROJECT_DIR` | (unset) | The project directory for an engine outside the tree (pinned). Set by `phasekit run` / `phasekit container`; unset means the vendored layout (the script's own checkout is the project) |
+| `AUTO_PUSH` | (unset) | `1`: the loop pushes after each commit, and the push credentials below are forwarded. Anything else: no push, and no push credential enters the container (v0.24.1; see "Push credentials" under Security model) |
+| `SSH_AUTH_SOCK` | (host's value) | The host's ssh-agent socket, mounted at `/ssh-agent` — only with `AUTO_PUSH=1` |
+| `GH_TOKEN` / `GITHUB_TOKEN` | (unset) | Forwarded by name for HTTPS-with-token pushes — only with `AUTO_PUSH=1` |
 | `PHASEKIT_IMAGE_PREBUILT` | (unset) | Pinned projects: `1` skips the check that the image exists (and the one-time build when it does not) |
 
 ## Per-project session directory

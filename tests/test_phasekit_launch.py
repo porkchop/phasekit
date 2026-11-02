@@ -201,8 +201,9 @@ class Composition(unittest.TestCase):
                 compose(mounts=[bad])
 
     def test_secrets_cross_by_name_only_and_only_when_set(self):
-        argv = compose(secrets=["GH_TOKEN", "UNSET_ONE"], environ={"GH_TOKEN": "s3cr3t-value"})
-        self.assertIn("GH_TOKEN", envs(argv))
+        # v0.24.1: a push credential (GH_TOKEN) needs AUTO_PUSH=1 (tests/test_push_credentials.py)
+        argv = compose(secrets=["API_SECRET", "UNSET_ONE"], environ={"API_SECRET": "s3cr3t-value"})
+        self.assertIn("API_SECRET", envs(argv))
         self.assertNotIn("UNSET_ONE", envs(argv))
         self.assertNotIn("s3cr3t-value", " ".join(argv))
         for bad in ("A=B", "1X", "HOME"):

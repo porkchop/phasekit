@@ -1748,10 +1748,18 @@ def _forward_env_args():
     """`-e NAME` for each PHASEKIT_FORWARD_ENV key that is set — the same keys
     scripts/container-setup.sh forwards to a session, so a suite that needs
     them is not red only at upgrade time. By name: docker reads the value from
-    this environment, so it never appears in argv."""
+    this environment, so it never appears in argv.
+
+    v0.24.1: a push credential (LAUNCH.PUSH_CREDENTIAL_NAMES) is refused, with
+    one names-only stderr line, as container-setup.sh refuses it: it crosses
+    only through runner_argv's own door, under AUTO_PUSH=1."""
     args = []
     raw = (os.environ.get("PHASEKIT_FORWARD_ENV") or "").replace("\n", ",")
     for name in (n.strip() for n in raw.split(",")):
+        if name in LAUNCH.PUSH_CREDENTIAL_NAMES:
+            print(f"phasekit: PHASEKIT_FORWARD_ENV: refusing '{name}' - a push credential "
+                  "crosses only with AUTO_PUSH=1, never through this list", file=sys.stderr)
+            continue
         if (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name or "")
                 and name not in ("HOME", "PATH", "CLAUDE_CONFIG_DIR", "IS_SANDBOX",
                                  "PHASEKIT_CONTRACTS_DIR", "PHASEKIT_CONTRACT",
@@ -2064,6 +2072,9 @@ def runner_argv(target, image, name, script, engine=None, *, env=(), names=(),
     GITHUB_TOKEN; FORWARD_SSH mounts the ssh-agent SOCKET (never a key) and
     known_hosts read-only, as container-setup.sh does for a session's push.
     The gate passes none of them: no credentials, no ssh agent.
+    v0.24.1 (row 1300 option B): a push credential — a NAMES entry in
+    LAUNCH.PUSH_CREDENTIAL_NAMES, or the FORWARD_SSH socket — crosses only when
+    ENV sets AUTO_PUSH=1 (LAUNCH.push_allowed), the one rule every door keeps.
 
     v0.21.1: every call is bounded (runner_bounds: --memory, --pids-limit)."""
     user = _runner_user()
@@ -2091,7 +2102,8 @@ def runner_argv(target, image, name, script, engine=None, *, env=(), names=(),
     # (the engine's mount when pinned, the project's own copy when vendored)
     session += ["-e", f"{CONTRACT_ENV}="
                       f"{ENGINE_CONTAINER_DIR if engine is not None else '/workspace'}/{CONTRACT_REL}"]
-    if forward_ssh:
+    push = LAUNCH.push_allowed(env)
+    if forward_ssh and push:
         sock = (os.environ.get("SSH_AUTH_SOCK") or "").strip()
         if sock and _is_socket(sock):
             session += ["--mount", _mount_arg(Path(sock), "/ssh-agent"),
@@ -2102,7 +2114,7 @@ def runner_argv(target, image, name, script, engine=None, *, env=(), names=(),
                                               f"{_runner_home(user)}/.ssh/known_hosts",
                                               readonly=True)]
     for secret in names:
-        if os.environ.get(secret):
+        if os.environ.get(secret) and (push or secret not in LAUNCH.PUSH_CREDENTIAL_NAMES):
             session += ["-e", secret]
     for key, value in env:
         session += ["-e", f"{key}={value}"]
@@ -2389,7 +2401,8 @@ LAND_BLOCKED = "artifacts/phase-blocked.json"
 LAND_NO_MODEL_MARK = "phasekit land: refused a model call"
 LAND_NO_MODEL_RC = 97
 LAND_LOCK_NAME = "phasekit-land.lock"
-LAND_PUSH_SECRETS = ("GH_TOKEN", "GITHUB_TOKEN")
+# the tokens; the ssh-agent socket crosses by forward_ssh (both only with AUTO_PUSH=1)
+LAND_PUSH_SECRETS = tuple(n for n in LAUNCH.PUSH_CREDENTIAL_NAMES if n != "SSH_AUTH_SOCK")
 LAND_COMMITS_MAX = 50
 LAND_STATUSES = ("landed", "nothing", "refused", "failed", "not-run")
 # git's in-progress markers: a landing never runs over a half-done operation

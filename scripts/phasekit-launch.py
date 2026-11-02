@@ -83,6 +83,16 @@ _PIDS_RE = re.compile(r"0*([1-9][0-9]{0,8})", re.ASCII)  # 1..999999999, as a st
 _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
 # Names this module sets for the container; a caller can never override them.
 OWNED_NAMES = ("HOME", "PATH", "CLAUDE_CONFIG_DIR", "IS_SANDBOX")
+# Push credentials (v0.24.1, row 1300 option B): they enter a container only
+# when that container's AUTO_PUSH is 1, the one setting under which the loop
+# pushes. ONE rule at every door: container-setup.sh's session (its
+# PUSH_CREDENTIAL_NAMES, pinned equal to this by the tests), the runner and its
+# PHASEKIT_FORWARD_ENV keys (scripts/enrich-project.py), and compose() below,
+# where a push credential named by --env crosses only beside --set AUTO_PUSH=1.
+# A backstop: the command guard still matches patterns (row 1300 option A).
+PUSH_CREDENTIAL_NAMES = ("SSH_AUTH_SOCK", "GH_TOKEN", "GITHUB_TOKEN")
+AUTO_PUSH_ON = "1"
+SSH_AGENT_DST = "/ssh-agent"  # where every phasekit door mounts the agent socket
 
 
 class LaunchError(ValueError):
@@ -145,6 +155,23 @@ def _role(role):
         return ROLES[role]
     except KeyError:
         raise LaunchError(f"unknown role '{role}' (one of: {', '.join(ROLES)})") from None
+
+
+def push_allowed(pairs):
+    """Whether PAIRS ((name, value) in the order docker reads them; the last
+    wins) give the container AUTO_PUSH=1, the one case a push credential may
+    cross."""
+    value = None
+    for key, val in pairs:
+        if key == "AUTO_PUSH":
+            value = val
+    return value == AUTO_PUSH_ON
+
+
+def withheld_note(names):
+    """The one stderr line naming the push credentials withheld (names only)."""
+    return (f"phasekit: AUTO_PUSH is not 1; push credentials withheld: {' '.join(names)} "
+            "(they cross only with AUTO_PUSH=1)")
 
 
 def runner_user(environ=None):
@@ -263,26 +290,48 @@ def compose(role, name, command, *, mounts=(), volumes=(), credentials=None, sec
         # Claude Code refuses bypassPermissions as uid 0 unless the environment
         # declares itself sandboxed; under rootless docker it is.
         argv += ["-e", "IS_SANDBOX=1"]
+    # v0.24.1: whether this container may hold a push credential. AUTO_PUSH
+    # comes from --set only (--env AUTO_PUSH is refused below), so the last
+    # --set is what the container reads.
+    push = push_allowed(item.partition("=")[::2] for item in sets)
     for item in sets:
         key, sep, value = item.partition("=")
         if not sep or not _NAME_RE.fullmatch(key):
             raise LaunchError(f"--set '{key}' is not NAME=VALUE")
         if key in OWNED_NAMES:
             raise LaunchError(f"--set {key}: the launcher owns that name")
+        if key in PUSH_CREDENTIAL_NAMES and (key != "SSH_AUTH_SOCK" or not push):
+            # a token by value would sit on argv; the agent socket's path only
+            # beside AUTO_PUSH=1
+            raise LaunchError(f"--set {key}: a push credential crosses only by name (--env), "
+                              "beside --set AUTO_PUSH=1")
         argv += ["-e", f"{key}={value}"]
+    withheld = []
     for secret in secrets:
         if not _NAME_RE.fullmatch(secret):
             raise LaunchError(f"--env '{secret[:40]}' is not a variable name (names only)")
         if secret in OWNED_NAMES:
             raise LaunchError(f"--env {secret}: the launcher owns that name")
+        if secret == "AUTO_PUSH":
+            raise LaunchError("--env AUTO_PUSH: set it with --set AUTO_PUSH=VALUE (it decides "
+                              "whether a push credential may cross)")
         if env.get(secret):
+            if secret in PUSH_CREDENTIAL_NAMES and not push:
+                withheld.append(secret)  # v0.24.1: only beside --set AUTO_PUSH=1
+                continue
             argv += ["-e", secret]  # by name: docker reads the value, argv never holds it
+    if withheld:
+        print(withheld_note(withheld), file=sys.stderr)
     volume = (env.get(CREDENTIALS_VOLUME_ENV) or "").strip() or CREDENTIALS_VOLUME_DEFAULT
     if credentials != "none":
         for value in credentials_mounts(volume, credentials, volume_entries(volume)):
             argv += ["--mount", value]
+    agent_sock = (env.get("SSH_AUTH_SOCK") or "").strip()
     for spec in mounts:
         src, dst, readonly = _parse_mount(spec)
+        if not push and (dst == SSH_AGENT_DST or (agent_sock and src == agent_sock)):
+            raise LaunchError(f"--mount {dst}: the ssh-agent socket is a push credential; it "
+                              "crosses only beside --set AUTO_PUSH=1")
         argv += ["--mount", mount_arg(src, dst, readonly=readonly)]
     for spec in volumes:
         src, dst, readonly = _parse_mount(spec)
@@ -336,7 +385,8 @@ def main(argv=None):
     a.add_argument("--credentials", choices=("none", "ro", "rw"),
                    help="the login file read-only, writable, or none (default: the role's)")
     a.add_argument("--env", action="append", default=[], metavar="NAME",
-                   help="a secret crossed by name, only when set")
+                   help="a secret crossed by name, only when set; a push credential "
+                        f"({', '.join(PUSH_CREDENTIAL_NAMES)}) only beside --set AUTO_PUSH=1")
     a.add_argument("--set", action="append", default=[], metavar="NAME=VALUE")
     a.add_argument("--add-host", action="append", default=[], metavar="HOST:IP")
     a.add_argument("--workdir")

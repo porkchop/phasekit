@@ -429,12 +429,32 @@ class Container(unittest.TestCase):
 
     def test_secrets_cross_by_name_never_on_the_command_line(self):
         self.assertFalse(self.F["value_on_command_line"])
+        push = self.F["push_credentials"]
         for name in self.F["secrets_forwarded_by_name"]:
             with self.subTest(name=name):
-                _, argv = self._run({name: self.SECRET})
+                # v0.24.1: a push credential crosses only with AUTO_PUSH=1
+                extra = {"AUTO_PUSH": "1"} if name in push["names"] else {}
+                _, argv = self._run({name: self.SECRET, **extra})
                 self.assertNotIn(self.SECRET, "\n".join(a for a in argv if not a.startswith("ENV:")))
                 envs = [argv[i + 1] for i, a in enumerate(argv) if a == "-e" and i + 1 < len(argv)]
                 self.assertIn(name, envs)
+
+    def test_push_credentials_are_withheld_without_auto_push(self):
+        push = self.F["push_credentials"]
+        self.assertEqual(push["only_when"], "AUTO_PUSH=1")
+        for name in push["names"]:
+            if name == "SSH_AUTH_SOCK":
+                continue  # needs a real socket: tests/test_push_credentials.py
+            with self.subTest(name=name):
+                p, argv = self._run({name: self.SECRET})
+                envs = [argv[i + 1] for i, a in enumerate(argv) if a == "-e" and i + 1 < len(argv)]
+                self.assertNotIn(name, envs)
+                line = next((ln for ln in p.stderr.splitlines() if push["withheld_note"] in ln), "")
+                self.assertIn(name, line.split(push["withheld_note"], 1)[-1].split())
+                self.assertNotIn(self.SECRET, p.stdout + p.stderr)
+        p, argv = self._run({self.F["forward_env"]["env"]: ",".join(push["names"])})
+        for name in push["names"]:
+            self.assertIn(f"refusing '{name}'", p.stderr)
 
     def test_forward_env_reserved_names_are_refused(self):
         fe = self.F["forward_env"]

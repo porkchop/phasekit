@@ -111,7 +111,7 @@
       "read_by": ["scripts/container-setup.sh", "scripts/run-until-done.sh", "scripts/enrich-project.py"],
       "default": "",
       "container_forwarded": true,
-      "semantics": "Comma-separated NAMES of project-specific environment keys a supervisor has placed in container-setup.sh's process env (v0.14.3) — the one door for non-PHASEKIT_ keys such as the backend URL a client bakes at build time. container-setup.sh adds `-e NAME` (v0.18.2: by name — the value never on docker's command line; until v0.18.1 `-e NAME=<value>`) for every listed name that is set, skips unset names silently and malformed names loudly, refuses the names the script itself sets for the container (HOME, PATH, CLAUDE_CONFIG_DIR, IS_SANDBOX), forwards the list itself (the loop prints `Project env forwarded by the supervisor: …` at start), and prints a names-only witness (`container: forwarding project env: …`); values never touch a file or a log — a token written as NAME=value is reported by its name part only. Newlines count as separators. Unset: nothing beyond the fixed allowlist crosses the container wall. The Foundry orchestrator sets it from a project's declared env_file (its #562). v0.16.2: `phasekit upgrade` (scripts/enrich-project.py) forwards the same keys by name to its container gate, refusing HOME, PATH, CLAUDE_CONFIG_DIR, IS_SANDBOX, PHASEKIT_CONTRACTS_DIR, GIT_USER_NAME and GIT_USER_EMAIL; the gate's own git config and session values follow them, so a forwarded key never overrides them. v0.18.2: each listed key crosses as `-e NAME` (docker reads the value from its own environment) — until v0.18.1 it was `-e NAME=value`, which put the value on docker's command line, readable by every account on the host in the process table."
+      "semantics": "Comma-separated NAMES of project-specific environment keys a supervisor has placed in container-setup.sh's process env (v0.14.3) — the one door for non-PHASEKIT_ keys such as the backend URL a client bakes at build time. container-setup.sh adds `-e NAME` (v0.18.2: by name — the value never on docker's command line; until v0.18.1 `-e NAME=<value>`) for every listed name that is set, skips unset names silently and malformed names loudly, refuses the names the script itself sets for the container (HOME, PATH, CLAUDE_CONFIG_DIR, IS_SANDBOX) and (v0.24.1) the push credentials SSH_AUTH_SOCK, GH_TOKEN and GITHUB_TOKEN, which cross only through their own door under AUTO_PUSH=1 (the upgrade gate refuses them too), forwards the list itself (the loop prints `Project env forwarded by the supervisor: …` at start), and prints a names-only witness (`container: forwarding project env: …`); values never touch a file or a log — a token written as NAME=value is reported by its name part only. Newlines count as separators. Unset: nothing beyond the fixed allowlist crosses the container wall. The Foundry orchestrator sets it from a project's declared env_file (its #562). v0.16.2: `phasekit upgrade` (scripts/enrich-project.py) forwards the same keys by name to its container gate, refusing HOME, PATH, CLAUDE_CONFIG_DIR, IS_SANDBOX, PHASEKIT_CONTRACTS_DIR, GIT_USER_NAME and GIT_USER_EMAIL; the gate's own git config and session values follow them, so a forwarded key never overrides them. v0.18.2: each listed key crosses as `-e NAME` (docker reads the value from its own environment) — until v0.18.1 it was `-e NAME=value`, which put the value on docker's command line, readable by every account on the host in the process table."
     },
     {
       "name": "PHASEKIT_VERIFY_CMD",
@@ -345,7 +345,7 @@
       "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh"],
       "default": "unset — no push",
       "container_forwarded": true,
-      "semantics": "1 makes the loop git push after every loop-created commit (iteration and wrap-up); push failure is non-fatal."
+      "semantics": "1 makes the loop git push after every loop-created commit (iteration and wrap-up); push failure is non-fatal. v0.24.1 (row 1300 option B): also the one condition under which a push credential (SSH_AUTH_SOCK's agent socket, GH_TOKEN, GITHUB_TOKEN) enters a container — container-setup.sh, the runner (phasekit land --in-runner --push) and phasekit launch-argv (--set AUTO_PUSH=1) apply the same rule; unset or any other value withholds them, with one names-only stderr line. A backstop: the command guard still matches patterns (option A, a real shell parser, stays open)."
     },
     {
       "name": "IMAGE_NAME",
@@ -401,26 +401,26 @@
     {
       "name": "GH_TOKEN",
       "kind": "consumed",
-      "read_by": ["scripts/container-setup.sh"],
+      "read_by": ["scripts/container-setup.sh", "scripts/enrich-project.py", "scripts/phasekit-launch.py"],
       "default": "unset — not forwarded",
       "container_forwarded": true,
-      "semantics": "GitHub token for HTTPS push / gh CLI, forwarded when set. GITHUB_TOKEN is honoured independently under its own name."
+      "semantics": "GitHub token for HTTPS push / gh CLI, forwarded by name when set AND AUTO_PUSH=1 (v0.24.1; until v0.24.0 whenever set). GITHUB_TOKEN is honoured independently under its own name. PHASEKIT_FORWARD_ENV refuses it."
     },
     {
       "name": "GITHUB_TOKEN",
       "kind": "consumed",
-      "read_by": ["scripts/container-setup.sh"],
+      "read_by": ["scripts/container-setup.sh", "scripts/enrich-project.py", "scripts/phasekit-launch.py"],
       "default": "unset — not forwarded",
       "container_forwarded": true,
-      "semantics": "Alternate name for GH_TOKEN; both are forwarded independently when set."
+      "semantics": "Alternate name for GH_TOKEN; both are forwarded independently when set, and only with AUTO_PUSH=1 (v0.24.1)."
     },
     {
       "name": "SSH_AUTH_SOCK",
       "kind": "consumed",
-      "read_by": ["scripts/container-setup.sh"],
+      "read_by": ["scripts/container-setup.sh", "scripts/enrich-project.py", "scripts/phasekit-launch.py"],
       "default": "unset or not a socket — no agent forwarding",
       "container_forwarded": true,
-      "semantics": "Host ssh-agent socket, bind-mounted into the container and rewritten to /ssh-agent for the child."
+      "semantics": "Host ssh-agent socket, bind-mounted into the container and rewritten to /ssh-agent for the child — only with AUTO_PUSH=1 (v0.24.1; until v0.24.0 whenever it was a socket)."
     },
     {
       "name": "CLAUDE_TOOL_INPUT",
@@ -1279,7 +1279,7 @@
       ]
     },
     "container": {
-      "summary": "What scripts/container-setup.sh gives the container. Secrets travel by NAME: `docker run -e NAME` with the value exported into docker's own environment — never on docker's command line, where every host account can read it (since v0.18.2). PHASEKIT_FORWARD_ENV names cross the same way; the reserved names are refused. PHASEKIT_ITERATION_MODE crosses only when set non-empty.",
+      "summary": "What scripts/container-setup.sh gives the container. Secrets travel by NAME: `docker run -e NAME` with the value exported into docker's own environment — never on docker's command line, where every host account can read it (since v0.18.2). PHASEKIT_FORWARD_ENV names cross the same way; the reserved names and the push credentials (push_credentials.names) are refused. v0.24.1: the push credentials (the ssh-agent socket, GH_TOKEN, GITHUB_TOKEN) cross only with AUTO_PUSH=1; otherwise one stderr line names those withheld (names only). PHASEKIT_ITERATION_MODE crosses only when set non-empty.",
       "secrets_forwarded_by_name": [
         "ANTHROPIC_API_KEY",
         "GH_TOKEN",
@@ -1295,6 +1295,16 @@
           "CLAUDE_CONFIG_DIR",
           "IS_SANDBOX"
         ]
+      },
+      "push_credentials": {
+        "names": [
+          "SSH_AUTH_SOCK",
+          "GH_TOKEN",
+          "GITHUB_TOKEN"
+        ],
+        "only_when": "AUTO_PUSH=1",
+        "withheld_note": "push credentials withheld:",
+        "refused_by_forward_env": true
       },
       "iteration_mode_only_when_set": true,
       "claude_config": {

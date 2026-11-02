@@ -556,6 +556,60 @@ check_auth() {
   echo "Continuing anyway — Claude will fail if no credentials are available at runtime." >&2
 }
 
+# Push credentials (v0.24.1, row 1300 option B): the host's ssh-agent socket
+# and GH_TOKEN / GITHUB_TOKEN enter a container ONLY when AUTO_PUSH=1 — the one
+# setting under which the loop pushes (run-until-done.sh auto_push_if_enabled
+# tests `== "1"`, so this does too). Until v0.24.0 they crossed whenever the
+# host had them, so a session that never pushes still held a credential that
+# could. Unset, or any other value: none of them cross, and one stderr line
+# names what was withheld (names only, never a value). The same rule holds at
+# every door: PHASEKIT_FORWARD_ENV refuses these names (here and in
+# scripts/enrich-project.py), the runner gate never gets them, `phasekit land
+# --in-runner` gets them only with --push (which is AUTO_PUSH=1), and
+# `phasekit launch-argv` crosses one only alongside --set AUTO_PUSH=1.
+#
+# A BACKSTOP, not the fix: the command guard (.claude/hooks/
+# deny-dangerous-commands.sh) still matches patterns, so a push it fails to
+# recognise is stopped here only because nothing to push WITH is present.
+# Option A (a real shell parser in the guard) stays open on row 1300.
+#
+# The names are phasekit-launch.py PUSH_CREDENTIAL_NAMES; tests pin the two
+# lists equal.
+PUSH_CREDENTIAL_NAMES=(SSH_AUTH_SOCK GH_TOKEN GITHUB_TOKEN)
+is_push_credential() {
+  local _pc_n
+  for _pc_n in "${PUSH_CREDENTIAL_NAMES[@]}"; do
+    [[ "$1" == "$_pc_n" ]] && return 0
+  done
+  return 1
+}
+push_credential_args() {
+  PUSH_CREDENTIAL_ARGS=()
+  local _pc_withheld=() _pc_name
+  for _pc_name in "${PUSH_CREDENTIAL_NAMES[@]}"; do
+    if [[ "$_pc_name" == SSH_AUTH_SOCK ]]; then
+      # The socket only, and only when it is one: no key is ever copied.
+      # Requires a running ssh-agent on the host with the right key loaded.
+      [[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK:-}" ]] || continue
+    else
+      [[ -n "${!_pc_name:-}" ]] || continue
+    fi
+    if [[ "${AUTO_PUSH:-}" != "1" ]]; then
+      _pc_withheld+=("$_pc_name")
+    elif [[ "$_pc_name" == SSH_AUTH_SOCK ]]; then
+      PUSH_CREDENTIAL_ARGS+=(-v "$SSH_AUTH_SOCK:/ssh-agent" -e SSH_AUTH_SOCK=/ssh-agent)
+    else
+      # By NAME (v0.18.2): docker reads the value from its own environment.
+      export "${_pc_name?}"
+      PUSH_CREDENTIAL_ARGS+=(-e "$_pc_name")
+    fi
+  done
+  if [[ ${#_pc_withheld[@]} -gt 0 ]]; then
+    echo "container: AUTO_PUSH is not 1 — push credentials withheld: ${_pc_withheld[*]} (set AUTO_PUSH=1 to forward them)" >&2
+  fi
+  return 0
+}
+
 run_container() {
   local cmd=("$@")
   echo "Starting container from: $ROOT_DIR"
@@ -750,6 +804,12 @@ run_container() {
           echo "container: PHASEKIT_FORWARD_ENV: refusing '$_fwd_name' — the container script owns that name" >&2
           continue ;;
       esac
+      if is_push_credential "$_fwd_name"; then
+        # v0.24.1: a push credential crosses only through its own door, and
+        # only under AUTO_PUSH=1 (push_credential_args) — never this list.
+        echo "container: PHASEKIT_FORWARD_ENV: refusing '$_fwd_name' — a push credential crosses only with AUTO_PUSH=1, never through this list" >&2
+        continue
+      fi
       if [[ -n "${!_fwd_name:-}" ]]; then
         # v0.18.2: `-e NAME` — docker reads the value from its own
         # environment. `-e NAME=value` put the value on docker's command
@@ -832,30 +892,15 @@ run_container() {
     docker_args+=(-e PHASEKIT_TRACE="$PHASEKIT_TRACE")
   fi
 
-  # Forward the host's SSH agent so `git push` to SSH remotes (git@github.com:…)
-  # works inside the container. No keys are copied — the container only sees
-  # the agent socket. Requires a running ssh-agent on the host with the right
-  # key loaded (`ssh-add ~/.ssh/id_ed25519`).
-  if [[ -n "${SSH_AUTH_SOCK:-}" ]] && [[ -S "$SSH_AUTH_SOCK" ]]; then
-    docker_args+=(-v "$SSH_AUTH_SOCK:/ssh-agent")
-    docker_args+=(-e SSH_AUTH_SOCK=/ssh-agent)
-  fi
+  # Push credentials — the ssh-agent socket, GH_TOKEN, GITHUB_TOKEN — only
+  # under AUTO_PUSH=1 (v0.24.1; push_credential_args above).
+  push_credential_args
+  docker_args+=(${PUSH_CREDENTIAL_ARGS[@]+"${PUSH_CREDENTIAL_ARGS[@]}"})
 
   # Mount known_hosts so the container trusts the same host keys as the host
   # (avoids prompts for `git@github.com` etc. on first connection).
   if [[ -f "$HOME/.ssh/known_hosts" ]]; then
     docker_args+=(-v "$HOME/.ssh/known_hosts:/home/node/.ssh/known_hosts:ro")
-  fi
-
-  # GH_TOKEN / GITHUB_TOKEN for HTTPS-with-PAT push workflows. Pass through
-  # if set; container uses it via gh CLI or git credential helper.
-  if [[ -n "${GH_TOKEN:-}" ]]; then
-    export GH_TOKEN
-    docker_args+=(-e GH_TOKEN)
-  fi
-  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    export GITHUB_TOKEN
-    docker_args+=(-e GITHUB_TOKEN)
   fi
 
   # Per-project session directory (v0.18.8; see PROJECT_SESSIONS_SEED_SH

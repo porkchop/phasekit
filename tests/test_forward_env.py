@@ -154,7 +154,8 @@ class ForwardEnvTest(unittest.TestCase):
         values = {"ANTHROPIC_API_KEY": "sk-ant-" + "k" * 24, "GH_TOKEN": "ghp_" + "g" * 24,
                   "GITHUB_TOKEN": "ghp_" + "h" * 24, "XMEO_SEQUENCER_URL": SECRET_VALUE,
                   "PHASEKIT_FORWARD_ENV": "XMEO_SEQUENCER_URL"}
-        _, argv = self._run(values)
+        # v0.24.1: the push tokens cross only with AUTO_PUSH=1 (tests/test_push_credentials.py)
+        _, argv = self._run({**values, "AUTO_PUSH": "1"})
         joined = "\n".join(argv)
         for name in ("ANTHROPIC_API_KEY", "GH_TOKEN", "GITHUB_TOKEN", "XMEO_SEQUENCER_URL"):
             with self.subTest(name=name):

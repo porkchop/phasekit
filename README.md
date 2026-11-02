@@ -210,7 +210,7 @@ For projects whose feedback loop depends on CI / deploy previews / github-pages-
 AUTO_PUSH=1 phasekit loop
 ```
 
-For container-mode auto-push, the container also needs git auth. The setup script forwards both:
+For container-mode auto-push, the container also needs git auth. With `AUTO_PUSH=1` the setup script forwards both (v0.24.1: **only** then — without `AUTO_PUSH=1` no push credential enters the container, and stderr names what was withheld; see docs/CONTAINERIZATION.md "Push credentials"):
 
 - **SSH remotes** (`git@github.com:...`): the container forwards your host's SSH agent if one is running. Run `ssh-add ~/.ssh/id_ed25519` on the host before invoking.
 - **HTTPS remotes with a token**: set `GH_TOKEN` (or `GITHUB_TOKEN`) on the host; it's passed through.
