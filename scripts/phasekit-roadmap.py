@@ -17,8 +17,9 @@ phasekit is a public tool that runs with no supervisor. A project that never
 wants a roadmap must notice nothing:
 
   * no file                -> `next` answers `absent: true, exhausted: true`, exit 0
-  * nothing in the loop, the gates, CONTINUE_PROMPT or QUALITY_GATES reads,
-    requires or mentions the file (tests/test_roadmap.py pins that)
+  * nothing in the gates, CONTINUE_PROMPT or QUALITY_GATES reads, requires or
+    mentions the file, and the loop reads it at exactly one place, only when it
+    exists (tests/test_roadmap.py pins both)
   * `phasekit upgrade` never writes one; only an explicit `init` does
 
 THE READER IS TOLERANT, AND LOUD ABOUT WHAT IT SKIPS
@@ -62,15 +63,32 @@ THE FORMAT (pinned in contracts/interface.json, convention `roadmap-entries`)
     `needs:` done. `## Later` is never eligible.
   * An entry is done when it is checked, wherever it sits.
 
+WHAT AN ITERATION ADDS, IT RESOLVES (v0.25.0)
+---------------------------------------------
+A planner follows every unchecked `## Next` entry. An iteration that writes
+entries and builds them, but leaves them unchecked, makes the planner file each
+one again as a whole iteration that only ticks a box (xmeo-v3 iterations
+301-304, 2026-11-03). `added --base FILE` names the entries a planner would
+follow (under `## Next`, unchecked, not superseded, parseable, on one line)
+whose id is not an entry of FILE, the roadmap as the iteration began; the loop
+refuses a completion that leaves one of them unresolved. Resolved means one of:
+ticked (`done R<n>`), ticked as not built (`done R<n> --not-built REASON`), or
+named with a reason in the completion record's `roadmap_open` (the entry stays
+unchecked and a later iteration takes it). Moving it under `## Later` or
+superseding it also takes it out of the planner's way.
+
 Usage:
   python3 scripts/phasekit-roadmap.py next [--repo DIR] [--file PATH]
   python3 scripts/phasekit-roadmap.py done R<n> --iteration LABEL [--date YYYY-MM-DD]
+                                                [--not-built REASON]
                                                 [--repo DIR] [--file PATH]
   python3 scripts/phasekit-roadmap.py init [--repo DIR] [--file PATH]
+  python3 scripts/phasekit-roadmap.py added --base FILE [--repo DIR] [--file PATH]
 
 Exit codes (every subcommand):
   0  success — `next` read the file or found none; `done` moved the entry or it
-     was already done; `init` wrote the file
+     was already done; `init` wrote the file; `added` read both files (either
+     may be absent)
   2  usage error (argparse)
   3  `done`: the id is not in the roadmap, is superseded, appears more than once,
      or its line does not parse
@@ -167,6 +185,12 @@ To replace an entry, keep its line and write `SUPERSEDED by R<m>: ` right after
 its id. `(needs: …)` goes last on the line. Only unchecked entries under
 `## Next` whose needs are all done are "next"; `## Later` is a parking lot you
 promote from by moving a line.
+
+An entry an iteration adds under `## Next` is resolved before that iteration
+completes: tick it when it is built (`phasekit roadmap done R<n> --iteration N`),
+tick it as not built when it was decided against (add `--not-built "why"`), or
+name it with a reason in the completion record's `roadmap_open` to leave it for
+a later iteration. A planner files every unchecked `## Next` entry as new work.
 """
 
 
@@ -782,7 +806,8 @@ def cmd_done(args) -> int:
         # The user's line is kept verbatim: only the mark flips and the
         # iteration suffix is appended (trailing whitespace is trimmed).
         first = body[:entry.mark_col] + "x" + body[entry.mark_col + 1:]
-        moved = [f"{first} — iteration {args.iteration} ({args.date}){eol}"]
+        note = f", not built: {args.not_built}" if args.not_built else ""
+        moved = [f"{first} — iteration {args.iteration} ({args.date}){note}{eol}"]
         moved += [ln if ln.endswith("\n") else ln + eol for ln in lines[entry.index + 1:entry.end]]
 
         others = [e for e in parsed.entries.values()
@@ -813,8 +838,51 @@ def cmd_done(args) -> int:
             _write_atomic(target, "".join(lines))
         except OSError as exc:
             raise RoadmapError(f"cannot write {rel}: {os.strerror(exc.errno or 0)}") from exc
-    _emit(json.dumps({"id": args.id, "changed": True, "iteration": args.iteration,
-                      "date": args.date}))
+    result = {"id": args.id, "changed": True, "iteration": args.iteration, "date": args.date}
+    if args.not_built:
+        result["not_built"] = args.not_built
+    _emit(json.dumps(result))
+    return EXIT_OK
+
+
+def added_report(parsed: Parsed, base: Parsed | None) -> list[dict]:
+    """The entries a planner would follow — under `## Next`, unchecked, not
+    superseded, parseable, on exactly one line — whose id is not an entry of
+    `base` (the roadmap as the iteration began; None when it had none). An id
+    `base` carries in any section, done or not, is not this iteration's — nor
+    one on ANY checkbox line of its text that the reader skipped (an unknown
+    heading, an unclosed fence: review round 1, finding 4), so fixing the
+    file's structure never makes old entries "added"."""
+    before: set[str] = set()
+    if base is not None:
+        before = set(base.entries)
+        for raw in base.lines:
+            cm = ANY_CHECKBOX_RE.match(raw.rstrip("\r\n").lstrip("\ufeff"))
+            im = ID_RE.match(cm.group("rest")) if cm else None
+            if im:
+                before.add(im.group("id"))
+    out = []
+    for eid in parsed.order:
+        e = parsed.entries[eid]
+        if (e.section != "next" or e.done or e.superseded_by or e.broken or e.duplicated
+                or eid in before):
+            continue
+        out.append({"id": eid, "title": e.title, "line": e.line})
+    return out
+
+
+def cmd_added(args) -> int:
+    repo, path, rel = _resolve(args)
+    base_path = Path(args.base)
+    base_path = base_path if base_path.is_absolute() else (repo / base_path)
+    base = parse(_read(base_path)) if _present(base_path) else None
+    if not _present(path):
+        _emit(json.dumps({"schema": SCHEMA, "file": rel, "absent": True,
+                          "base_absent": base is None, "added": []}, indent=2))
+        return EXIT_OK
+    _emit(json.dumps({"schema": SCHEMA, "file": rel, "absent": False,
+                      "base_absent": base is None,
+                      "added": added_report(parse(_read(path)), base)}, indent=2))
     return EXIT_OK
 
 
@@ -859,6 +927,10 @@ def _iteration(value: str) -> str:
     return _one_line(value, "iteration label")
 
 
+def _reason(value: str) -> str:
+    return _one_line(value, "--not-built reason")
+
+
 def _entry_id(value: str) -> str:
     if not ID_ONLY_RE.match(value):
         raise argparse.ArgumentTypeError(f"not an R<n> id (no leading zeros): {value!r}")
@@ -882,14 +954,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_done.add_argument("--iteration", required=True, type=_iteration)
     p_done.add_argument("--date", type=_date,
                         default=time.strftime("%Y-%m-%d", time.gmtime()))
+    p_done.add_argument("--not-built", default=None, type=_reason, metavar="REASON",
+                        help="tick it as decided against: appends ', not built: REASON'")
     common(p_done)
     common(sub.add_parser("init", help="write a starter roadmap if none exists"))
+    p_added = sub.add_parser("added", help="the unchecked ## Next entries whose id the base "
+                                           "roadmap does not carry, as JSON")
+    p_added.add_argument("--base", required=True,
+                         help="the roadmap as the iteration began (absent = none)")
+    common(p_added)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    handler = {"next": cmd_next, "done": cmd_done, "init": cmd_init}[args.cmd]
+    handler = {"next": cmd_next, "done": cmd_done, "init": cmd_init,
+               "added": cmd_added}[args.cmd]
     try:
         return handler(args)
     except RoadmapError as exc:

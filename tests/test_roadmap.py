@@ -625,6 +625,66 @@ class Writer(_Repo):
         self.assertEqual(self.path.read_text(encoding="utf-8"), BASE)
 
 
+class NotBuiltAndAdded(_Repo):
+    """v0.25.0 (queue row 2560): `done --not-built REASON` and `added --base FILE`."""
+
+    def test_not_built_appends_the_reason_after_the_iteration(self):
+        self.write("## Next\n- [ ] R177 Only if R176 picks a rule — scope\n## Done\n")
+        r = run("done", "R177", "--iteration", "303", "--date", "2026-11-03",
+                "--not-built", "no damping rule was chosen", repo=self.repo)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["not_built"], "no damping rule was chosen")
+        self.assertEqual(self.path.read_text(encoding="utf-8"),
+                         "## Next\n## Done\n- [x] R177 Only if R176 picks a rule — scope — "
+                         "iteration 303 (2026-11-03), not built: no damping rule was chosen\n")
+
+    def test_not_built_reason_must_be_one_line(self):
+        self.write("## Next\n- [ ] R1 A\n")
+        for bad in ("", "  ", "two\nlines"):
+            r = run("done", "R1", "--iteration", "3", "--not-built", bad, repo=self.repo)
+            self.assertEqual(r.returncode, 2, (bad, r.stderr))
+        self.assertIn("- [ ] R1 A", self.path.read_text(encoding="utf-8"))
+
+    def _added(self, base_text):
+        base = self.repo / "base.md"
+        if base_text is not None:
+            base.write_text(base_text, encoding="utf-8")
+        r = run("added", "--base", str(base), repo=self.repo)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_added_names_only_new_followable_entries(self):
+        self.write("## Next\n- [ ] R1 Old\n- [ ] R2 New (needs: R1)\n- [x] R3 New and done\n"
+                   "- [ ] R4 SUPERSEDED by R2: gone\n- [ ] R5 bad (needs: soon)\n"
+                   "- [ ] R6 once\n- [ ] R6 twice\n- [ ] R8 Was later\n## Later\n- [ ] R7 parked\n")
+        d = self._added("## Next\n- [ ] R1 Old\n## Later\n- [ ] R8 Was later\n")
+        self.assertFalse(d["absent"])
+        self.assertFalse(d["base_absent"])
+        self.assertEqual([(a["id"], a["title"], a["line"]) for a in d["added"]], [("R2", "New", 3)])
+
+    def test_an_id_the_base_carried_outside_the_sections_is_not_added(self):
+        self.write("## Next\n- [ ] R3 Was under Backlog\n- [ ] R4 Was fenced\n- [ ] R5 New\n")
+        d = self._added("## Backlog\n- [ ] R3 Was under Backlog\n## Next\n```\n- [ ] R4 Was fenced\n")
+        self.assertEqual(ids(d["added"]), ["R5"])
+
+    def test_added_with_no_base_counts_every_followable_entry(self):
+        self.write("## Next\n- [ ] R1 A\n- [ ] R2 B\n")
+        d = self._added(None)
+        self.assertTrue(d["base_absent"])
+        self.assertEqual(ids(d["added"]), ["R1", "R2"])
+
+    def test_added_with_no_roadmap_is_empty(self):
+        d = self._added("## Next\n- [ ] R1 A\n")
+        self.assertTrue(d["absent"])
+        self.assertEqual(d["added"], [])
+
+    def test_added_base_unreadable_is_exit_5(self):
+        self.write("## Next\n- [ ] R1 A\n")
+        (self.repo / "base.md").write_bytes(b"\xff\xfe")
+        r = run("added", "--base", str(self.repo / "base.md"), repo=self.repo)
+        self.assertEqual(r.returncode, 5, r.stderr)
+
+
 class Init(_Repo):
     def test_init_writes_a_template_that_reads_clean(self):
         self.path.parent.rmdir()
@@ -675,6 +735,45 @@ LOOP_SURFACES = (
 ROADMAP_CALLS = re.compile(r"phasekit-roadmap|phasekit roadmap|ROADMAP\.md|roadmap (next|done|init)")
 
 
+def _function(text, name):
+    start = text.index(f"\n{name}() {{")
+    return text[start:text.index("\n}\n", start) + 3]
+
+
+def _loop_without_the_roadmap_check(text):
+    """The loop minus its one roadmap site: the check, its refusal record,
+    the three places that call it (the landing, `phasekit verify`, the
+    wrap-up), each a block that starts at its call, and the wrap-up's handoff
+    branch for it."""
+    for name in ("roadmap_open_refusals", "record_roadmap_open_refusal"):
+        text = text.replace(_function(text, name), "\n")
+    out, skip = [], 0
+    for line in text.split("\n"):
+        if skip == 3:
+            # the wrap-up's handoff branch for it, up to the next `elif`
+            if line.strip().startswith("elif "):
+                skip = 0
+                out.append(line)
+            continue
+        if '[[ -n "$_wroad" ]]' in line:
+            skip = 3
+            continue
+        if "$(roadmap_open_refusals)" in line:
+            skip = 1
+            continue
+        if skip:
+            # the block after the call: `if [[ -n … ]]; then` … its `fi`
+            if skip == 1 and line.strip().startswith("if "):
+                skip = 2
+                continue
+            if skip == 2:
+                if line.strip() == "fi":
+                    skip = 0
+                continue
+        out.append(line)
+    return "\n".join(out)
+
+
 class NoUndueBurden(unittest.TestCase):
     def test_prompt_and_gate_docs_never_mention_a_roadmap(self):
         for rel in ("CONTINUE_PROMPT.txt", "docs/QUALITY_GATES.md"):
@@ -683,6 +782,8 @@ class NoUndueBurden(unittest.TestCase):
                                 f"{rel} must not ask a session anything about a roadmap")
 
     def test_the_loop_container_hooks_and_templates_never_call_the_tool(self):
+        # v0.25.0: the loop itself reads the roadmap at ONE place (pinned
+        # below); everything else stays as v0.15.0 pinned it.
         paths = [REPO_ROOT / rel for rel in LOOP_SURFACES]
         paths += sorted((REPO_ROOT / ".claude" / "hooks").glob("*"))
         paths += sorted((REPO_ROOT / "templates").glob("CLAUDE*"))
@@ -690,8 +791,22 @@ class NoUndueBurden(unittest.TestCase):
         for p in paths:
             if p.is_file():
                 checked += 1
-                self.assertNotRegex(p.read_text(encoding="utf-8"), ROADMAP_CALLS, str(p))
+                text = p.read_text(encoding="utf-8")
+                if p.name == "run-until-done.sh":
+                    text = _loop_without_the_roadmap_check(text)
+                self.assertNotRegex(text, ROADMAP_CALLS, str(p))
         self.assertGreaterEqual(checked, len(LOOP_SURFACES), "a pinned surface went missing")
+
+    def test_the_loop_reads_the_roadmap_only_when_it_exists(self):
+        # v0.25.0 (queue row 2560): the completion check returns before it
+        # names the reader when docs/ROADMAP.md is absent, and the reader is
+        # invoked nowhere else (tests/test_roadmap_completion.py runs it).
+        text = (REPO_ROOT / "scripts" / "run-until-done.sh").read_text(encoding="utf-8")
+        body = _function(text, "roadmap_open_refusals")
+        guard = body.index('[[ -f "$rm" ]] || return 0')
+        self.assertLess(body.index('rm="$ROOT_DIR/docs/ROADMAP.md"'), guard)
+        self.assertLess(guard, body.index('"$tool" added'))
+        self.assertEqual(text.count("phasekit-roadmap.py"), 1, "one reader site")
 
     def test_no_profile_installs_a_roadmap(self):
         m = _enrich_module()

@@ -2218,6 +2218,14 @@ Make them stageable (an empty or nested repository: remove its .git or move it o
       unstage_verdicts_after_refusal
       return 1
     fi
+    # v0.25.0 (queue row 2560): a completing landing resolves the roadmap
+    # entries its iteration added (roadmap_open_refusals).
+    shape_bad="$(roadmap_open_refusals)"
+    if [[ -n "$shape_bad" ]]; then
+      record_roadmap_open_refusal "$shape_bad"
+      unstage_verdicts_after_refusal
+      return 1
+    fi
   fi
 
   # Pre-commit verification gate. On failure, leave changes staged so the
@@ -3512,6 +3520,95 @@ record_deferral_shape_refusal() {
 Every deferral entry needs a non-empty \`item\` naming what was deferred (its AC number when it maps to a criterion) — the contract shape is {item, reason, suggested_task} plus a key (contracts/interface.json approval-deferrals). A supervisor cannot import an entry without one, so it would never reach the planner or the operator. Edit the record(s) named above: give each named entry an \`item\` (\`summary\` is not read; keep its key), then end your turn — the loop retries the landing."
 }
 
+roadmap_open_refusals() {
+  # v0.25.0 (queue row 2560): prints one line per docs/ROADMAP.md entry that
+  # THIS iteration added under `## Next` and left unresolved at its
+  # completion; prints nothing otherwise. A supervisor's planner follows
+  # every unchecked `## Next` entry, so an entry the iteration wrote and
+  # built but did not tick is filed again as a whole iteration that only
+  # ticks it (xmeo-v3 iteration 300 wrote R175-R187, built them, left all
+  # unchecked; iterations 301-304 each re-proved and ticked one). Resolved:
+  # ticked (`phasekit roadmap done`, `--not-built REASON` for one decided
+  # against), or named with a non-empty `reason` in a riding record's
+  # `roadmap_open` (left for a later iteration, deliberately).
+  # Applies only to a landing that completes the iteration: a never-landed
+  # completion record that rides (not one the loop synthesized from a final
+  # approval — that approval was judged at its own landing), or a
+  # never-landed approval with final_phase: true. "Added" = an entry id the
+  # roadmap at the iteration's base (iteration_base_sha) does not carry, read
+  # by the roadmap's one reader (its `added` subcommand). Silent — never
+  # a refusal — when there is no roadmap (it is OPTIONAL: a project without
+  # one notices nothing), no base, no reader, or the reader fails (fail-open:
+  # a fact the loop cannot derive is never a stall; the WARN says why).
+  # Always returns 0.
+  local rm="$ROOT_DIR/docs/ROADMAP.md" tool="${ENGINE_DIR:-$ROOT_DIR}/scripts/phasekit-roadmap.py"
+  local recs=() pc="$ARTIFACTS_DIR/project-complete.json" pa="$ARTIFACTS_DIR/phase-approval.json"
+  local n base d out rc=0
+  [[ -f "$rm" ]] || return 0
+  if [[ -f "$pc" ]] && artifact_never_landed "$pc" && completion_record_rides \
+     && ! jq -e '(.recorded_by // "") | tostring | startswith("phasekit run-until-done.sh — boundary-state step 3")' "$pc" >/dev/null 2>&1; then
+    recs+=("$pc")
+  fi
+  if [[ -f "$pa" ]] && artifact_never_landed "$pa" \
+     && jq -e '.final_phase == true' "$pa" >/dev/null 2>&1; then
+    recs+=("$pa")
+  fi
+  [[ ${#recs[@]} -gt 0 ]] || return 0
+  if [[ ! -f "$tool" ]]; then
+    echo "run-until-done: WARN — roadmap check skipped: $tool is missing" >&2
+    return 0
+  fi
+  n="$(supervising_iteration_label)"
+  base="$(iteration_base_sha "$n")"
+  [[ -n "$base" ]] || return 0
+  d="$(mktemp -d)" || return 0
+  git show "$base:docs/ROADMAP.md" > "$d/base.md" 2>/dev/null || rm -f "$d/base.md"
+  out="$(python3 "$tool" added --repo "$ROOT_DIR" --base "$d/base.md" 2>"$d/err")" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    echo "run-until-done: WARN — roadmap check skipped: the roadmap reader exited $rc ($(head -n 1 "$d/err" 2>/dev/null))" >&2
+    rm -rf "$d"
+    return 0
+  fi
+  printf '%s\n' "$out" > "$d/added.json"
+  jq -s '[.[] | (.roadmap_open // [])
+          | if type == "array" then .[] else empty end
+          | select(type == "object" and ((.id // null) | type) == "string"
+                   and ((.reason // null) | type) == "string"
+                   and ((.reason | gsub("^\\s+|\\s+$"; "")) | length) > 0)
+          | .id | gsub("^\\s+|\\s+$"; "")]' "${recs[@]}" > "$d/open.json" 2>/dev/null \
+    || printf '[]\n' > "$d/open.json"
+  jq -r --slurpfile open "$d/open.json" '
+      (.added // [])[] | select(.id as $i | ($open[0] | index($i)) == null)
+      | "\(.id) (docs/ROADMAP.md line \(.line)): \(.title | tostring | .[0:100])"' \
+    "$d/added.json" 2>/dev/null || true
+  rm -rf "$d"
+  return 0
+}
+
+record_roadmap_open_refusal() {
+  # $1 = roadmap_open_refusals' lines; $2 = "once" (the wrap-up), as
+  # record_deferral_shape_refusal: the same unchanged refusal already
+  # standing spends no second breaker attempt.
+  local lines n label="roadmap entries this iteration added left unresolved"
+  lines="$(printf '%s\n' "$1" | sed -n '1,30p')"
+  n="$(supervising_iteration_label)"
+  [[ -n "$n" ]] || n="<iteration label>"
+  echo "run-until-done: REFUSED — docs/ROADMAP.md entries this iteration added under ## Next are still unchecked:" >&2
+  printf '%s\n' "$lines" | sed 's/^/  /' >&2
+  if [[ "${2:-}" == once ]] && jq -e --arg l "$label" --arg t "$lines" \
+       '.commit_refusal == true and .label == $l and ((.log_tail // "") | tostring | contains($t))' \
+       "$ARTIFACTS_DIR/phase-verify-failed.json" >/dev/null 2>&1; then
+    echo "  (already recorded for these entries; no breaker attempt spent)" >&2
+    return 0
+  fi
+  record_commit_refusal "$label" "$lines
+This iteration added the entries above under ## Next of docs/ROADMAP.md and left them unchecked. A supervisor's planner files every unchecked ## Next entry as new work, so each would cost a whole later iteration that only ticks it. Resolve each one before the iteration completes:
+  - built (here, or already true): phasekit roadmap done R<n> --iteration $n
+  - decided not to build: phasekit roadmap done R<n> --iteration $n --not-built \"<why>\"
+  - left for a later iteration on purpose: keep it unchecked and name it in your completion record (artifacts/project-complete.json, or the final phase-approval.json): \"roadmap_open\": [{\"id\": \"R<n>\", \"reason\": \"<why it stays open>\"}]
+THEN RE-WRITE THE RECORD YOU WROTE (same content is fine; add roadmap_open if you use it): the loop lands only a verdict written after this refusal, so ticking the roadmap alone completes nothing. End your turn — the loop retries the landing."
+}
+
 # --- iteration facts (v0.18.0) ------------------------------------------------
 # foundry-meta designs/DESIGN-session-efficiency.md §4, links [H]–[J]. Until
 # v0.17.0 the facts about an iteration were the MODEL's: the commit subject
@@ -4801,6 +4898,13 @@ phasekit_verify() {
     echo "phasekit verify: RED — the landing will refuse deferral entries without an \`item\` (approval-deferrals: {item, reason, suggested_task} plus a key; \`summary\` is not read):" >&2
     printf '%s\n' "$shape_bad" | sed -n '1,20s/^/  /p' >&2
     echo "phasekit verify: give each named entry an \`item\`, then run it again. The gate was not run." >&2
+    return 1
+  fi
+  shape_bad="$(roadmap_open_refusals)"
+  if [[ -n "$shape_bad" ]]; then
+    echo "phasekit verify: RED — the landing will refuse this completion: docs/ROADMAP.md entries this iteration added under ## Next are still unchecked:" >&2
+    printf '%s\n' "$shape_bad" | sed -n '1,30s/^/  /p' >&2
+    echo "phasekit verify: tick each one built (phasekit roadmap done R<n> --iteration <label>), tick one decided against with --not-built \"<why>\", or name one left for a later iteration in your record's \"roadmap_open\": [{\"id\": \"R<n>\", \"reason\": \"…\"}]; then run it again. The gate was not run." >&2
     return 1
   fi
   drv="$(evidence_driver)"
@@ -6416,7 +6520,7 @@ wrapup_commit() {
   # would have landed it, so the two gates judge one tree and a red verdict
   # memoised by either answers the next start's recovery (review round 2).
   # Otherwise it is a checkpoint and carries none.
-  local _wdrv _wshape="" _wnote=""
+  local _wdrv _wshape="" _wnote="" _wroad=""
   _wdrv="$(evidence_driver)"
   [[ -z "${STAGE_FAILED:-}" ]] || _wdrv=""
   if [[ -n "$_wdrv" ]]; then
@@ -6432,6 +6536,19 @@ wrapup_commit() {
       _wdrv=""
       # a red gate below overwrites the refusal's capture: the baton keeps it
       _wnote="; ALSO your verdict was kept out because deferral entries lack an \`item\` ($(printf '%s\n' "$_wshape" | sed -n '1,3p' | tr '\n' ' ')) — give each an \`item\`, keep its key"
+    fi
+  fi
+  if [[ -n "$_wdrv" ]]; then
+    # v0.25.0 (queue row 2560): the same for a completion that leaves the
+    # roadmap entries its iteration added unresolved.
+    _wshape="$(roadmap_open_refusals)"
+    if [[ -n "$_wshape" ]]; then
+      record_roadmap_open_refusal "$_wshape" once
+      _wroad=1
+      echo "Wrap-up: the verdicts stay out (roadmap entries this iteration added are unresolved); committing the rest as a checkpoint." >&2
+      git reset -q -- "$ARTIFACTS_DIR/phase-approval.json" "$ARTIFACTS_DIR/project-complete.json" 2>/dev/null || true
+      _wdrv=""
+      _wnote="; ALSO your verdict was kept out because docs/ROADMAP.md entries this iteration added are still unchecked ($(printf '%s\n' "$_wshape" | sed -n '1,3p' | cut -d' ' -f1 | tr '\n' ' ')) — tick each built one (phasekit roadmap done), tick one decided against with --not-built, or name one left open in the record's roadmap_open"
     fi
   fi
   if [[ -n "$_wdrv" ]]; then
@@ -6498,7 +6615,9 @@ wrapup_commit() {
     echo "Wrap-up: post-verify gates refused the staged work — leaving it uncommitted (session-handoff.json records the state)." >&2
     return 0
   fi
-  if [[ -n "$_wshape" ]]; then
+  if [[ -n "$_wroad" ]]; then
+    write_session_handoff true "standing work was committed at wrap-up as a checkpoint, but NOT your verdict: docs/ROADMAP.md entries this iteration added under ## Next are still unchecked (artifacts/phase-verify-failed.json names them) — tick each built one (phasekit roadmap done R<n> --iteration <label>), tick one decided against with --not-built \"<why>\", or name one left for a later iteration in the record's roadmap_open, and end your turn; the loop lands the verdict"
+  elif [[ -n "$_wshape" ]]; then
     write_session_handoff true "standing work was committed at wrap-up as a checkpoint, but NOT your verdict: its deferral entries lack an \`item\` (artifacts/phase-verify-failed.json names them) — give each an \`item\`, keep its key, and end your turn; the loop lands the verdict"
   elif [[ -n "${STAGE_FAILED:-}" ]]; then
     write_session_handoff true "standing work was committed at wrap-up EXCEPT paths git cannot stage: $STAGE_FAILED — make them stageable (an empty or nested repository: remove its .git or move it outside the tree; an unreadable file: fix its permissions) or remove them, then continue from the next unapproved phase"
