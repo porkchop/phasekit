@@ -42,6 +42,7 @@ profiles:
       - PHASES
       - QUALITY_GATES
       - PROJECT_QUALITY_GATES
+      - PROJECT_RULES
       - PROD_REQUIREMENTS
       - USAGE_PATTERNS
       - CAPABILITY_MANIFEST
@@ -242,6 +243,17 @@ docs:
     # describe phasekit's own machinery), and the only one a fleet project
     # ever amended.
 
+  PROJECT_RULES:
+    path: docs/project/RULES.md
+    required: false
+    ownership: bootstrap-frozen
+    # v0.26.0: the project rules register — the rules a project learned from
+    # its incidents, each with the one place it is implemented and the test
+    # that pins it. Seeded once (empty, with its format) from
+    # templates/project-rules.template.md and never written again, as the
+    # QUALITY_GATES companion; a pinned project seeds it with `phasekit rules
+    # init`. scripts/phasekit-rules.py checks it at every landing.
+
   PROD_REQUIREMENTS:
     path: docs/PROD_REQUIREMENTS.md
     required: true
@@ -432,6 +444,16 @@ scripts:
     # project's own copy. INERT without the file: nothing in the loop, the gates
     # or the prompts calls it, and upgrade never writes a roadmap. The starter
     # template is embedded in the script, so it has one home.
+
+  phasekit-rules:
+    path: scripts/phasekit-rules.py
+    required: false
+    ownership: scaffold
+    # v0.26.0 the one checker of docs/project/RULES.md (`check`: the format, a
+    # unique id, a Test that exists; `--record FILE`: a record's
+    # `rules_touched` names only register ids) and its seeder (`init`). The
+    # loop runs `check` at every landing; `phasekit check` and `phasekit rules
+    # check` run it on demand. Absent or empty register: passes. Stdlib only.
 
   generate-skill:
     path: scripts/generate-skill.py
@@ -700,6 +722,12 @@ files:
     ownership: scaffold-template
     # v0.17.0 — rendered once into downstream docs/project/QUALITY_GATES.md
     # (bootstrap-frozen), the project-owned companion of docs/QUALITY_GATES.md.
+
+  templates/project-rules.template.md:
+    ownership: scaffold-template
+    # v0.26.0 — rendered once into downstream docs/project/RULES.md
+    # (bootstrap-frozen), the project rules register; also read by
+    # `phasekit rules init`.
 
   # v0.23.0 — seeded by `phasekit ui-check init` (never overwritten) into the
   # project-owned docs/project/DESIGN_BRIEF.md, DESIGN_SYSTEM.md, ui-pages.json.

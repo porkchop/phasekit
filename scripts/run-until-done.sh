@@ -2226,6 +2226,14 @@ Make them stageable (an empty or nested repository: remove its .git or move it o
       unstage_verdicts_after_refusal
       return 1
     fi
+    # v0.26.0: every landing keeps the project rules register honest and
+    # names only rules it has (rules_register_refusals).
+    shape_bad="$(rules_register_refusals)"
+    if [[ -n "$shape_bad" ]]; then
+      record_rules_register_refusal "$shape_bad"
+      unstage_verdicts_after_refusal
+      return 1
+    fi
   fi
 
   # Pre-commit verification gate. On failure, leave changes staged so the
@@ -3609,6 +3617,79 @@ This iteration added the entries above under ## Next of docs/ROADMAP.md and left
 THEN RE-WRITE THE RECORD YOU WROTE (same content is fine; add roadmap_open if you use it): the loop lands only a verdict written after this refusal, so ticking the roadmap alone completes nothing. End your turn — the loop retries the landing."
 }
 
+rules_register_refusals() {
+  # v0.26.0: prints one line per finding of the project rules register
+  # (docs/project/RULES.md, project-owned) and of the `rules_touched` ids the
+  # records this landing carries name; prints nothing otherwise. A rule an
+  # incident taught, held as code in two places, drifts when a later change
+  # updates one place (xmeo-v3, 2026-11-07: three halt-mode bugs of that one
+  # shape); the register writes each rule down with the test that pins it,
+  # and this keeps it honest. Findings (scripts/phasekit-rules.py check,
+  # exit 3): a malformed entry, a duplicate id, a Test naming a file or a
+  # test that does not exist, a `rules_touched` id the register lacks.
+  # Applies to every landing of a verdict (phase approval or completion),
+  # whatever the record: a register broken by this tree refuses until fixed.
+  # Silent — never a refusal — when there is no register and no record names
+  # rules (it is OPTIONAL: a project without one notices nothing), and when
+  # the checker is missing or cannot complete (fail-open: a WARN names it).
+  # $1 = "verdict" (`phasekit verify`): judge only when a verdict record
+  # rides, as the landing would — a tree with only a phase-update lands
+  # whatever its register says. Always returns 0.
+  local reg="$ROOT_DIR/docs/project/RULES.md" tool="${ENGINE_DIR:-$ROOT_DIR}/scripts/phasekit-rules.py"
+  local f recs=() named="" out rc=0 err
+  for f in phase-approval.json project-complete.json; do
+    [[ -f "$ARTIFACTS_DIR/$f" ]] || continue
+    artifact_never_landed "$ARTIFACTS_DIR/$f" || continue
+    if [[ "$f" == project-complete.json ]]; then completion_record_rides || continue; fi
+    recs+=(--record "$ARTIFACTS_DIR/$f")
+    if jq -e 'type == "object" and .rules_touched != null' "$ARTIFACTS_DIR/$f" >/dev/null 2>&1; then
+      named=1
+    fi
+  done
+  if [[ ! -e "$reg" && ! -L "$reg" && -z "$named" ]]; then
+    return 0
+  fi
+  if [[ "${1:-}" == verdict && ${#recs[@]} -eq 0 ]]; then
+    return 0
+  fi
+  if [[ ! -f "$tool" ]]; then
+    echo "run-until-done: WARN — rules register check skipped: $tool is missing" >&2
+    return 0
+  fi
+  err="$(mktemp)" || return 0
+  out="$(python3 "$tool" check --repo "$ROOT_DIR" ${recs[@]+"${recs[@]}"} 2>"$err")" || rc=$?
+  if [[ "$rc" -eq 3 ]]; then
+    printf '%s\n' "$out"
+  elif [[ "$rc" -ne 0 ]]; then
+    echo "run-until-done: WARN — rules register check skipped: the rules checker exited $rc ($(head -n 1 "$err" 2>/dev/null))" >&2
+  fi
+  rm -f "$err"
+  return 0
+}
+
+record_rules_register_refusal() {
+  # $1 = rules_register_refusals' lines; $2 = "once" (the wrap-up), as
+  # record_deferral_shape_refusal: the same unchanged refusal already
+  # standing spends no second breaker attempt.
+  local lines label="project rules register (docs/project/RULES.md)"
+  lines="$(printf '%s\n' "$1" | sed -n '1,30p')"
+  echo "run-until-done: REFUSED — the project rules register (docs/project/RULES.md) or a record's rules_touched has findings:" >&2
+  printf '%s\n' "$lines" | sed 's/^/  /' >&2
+  if [[ "${2:-}" == once ]] && jq -e --arg l "$label" --arg t "$lines" \
+       '.commit_refusal == true and .label == $l and ((.log_tail // "") | tostring | contains($t))' \
+       "$ARTIFACTS_DIR/phase-verify-failed.json" >/dev/null 2>&1; then
+    echo "  (already recorded for these findings; no breaker attempt spent)" >&2
+    return 0
+  fi
+  record_commit_refusal "$label" "$lines
+docs/project/RULES.md is this project's rules register (docs/QUALITY_GATES.md \"Project rules register\"), and the landing keeps it honest. Fix each line above:
+  - a malformed entry: write it as \`## <ID> — <the rule in one sentence>\` followed by the bullets \`- Incident:\`, \`- Implemented in:\` and \`- Test:\`, each once (every level-2 heading in the file is an entry);
+  - a duplicate id: give the newer rule a new id (ids are never reused);
+  - a Test naming a file or test that does not exist: name the test that pins the rule now (\`path/to/test-file\` in backticks, optionally its test name in backticks), or write \`no test yet\` — never delete the rule to silence this;
+  - a rules_touched id the register does not have: add the rule to docs/project/RULES.md, or correct the id in your record.
+\`phasekit rules check\` runs the same check. THEN RE-WRITE THE RECORD YOU WROTE (same content is fine): the loop lands only a verdict written after this refusal. End your turn — the loop retries the landing."
+}
+
 # --- iteration facts (v0.18.0) ------------------------------------------------
 # foundry-meta designs/DESIGN-session-efficiency.md §4, links [H]–[J]. Until
 # v0.17.0 the facts about an iteration were the MODEL's: the commit subject
@@ -4905,6 +4986,13 @@ phasekit_verify() {
     echo "phasekit verify: RED — the landing will refuse this completion: docs/ROADMAP.md entries this iteration added under ## Next are still unchecked:" >&2
     printf '%s\n' "$shape_bad" | sed -n '1,30s/^/  /p' >&2
     echo "phasekit verify: tick each one built (phasekit roadmap done R<n> --iteration <label>), tick one decided against with --not-built \"<why>\", or name one left for a later iteration in your record's \"roadmap_open\": [{\"id\": \"R<n>\", \"reason\": \"…\"}]; then run it again. The gate was not run." >&2
+    return 1
+  fi
+  shape_bad="$(rules_register_refusals verdict)"
+  if [[ -n "$shape_bad" ]]; then
+    echo "phasekit verify: RED — the landing will refuse this verdict: the project rules register (docs/project/RULES.md) or a record's rules_touched has findings:" >&2
+    printf '%s\n' "$shape_bad" | sed -n '1,30s/^/  /p' >&2
+    echo "phasekit verify: fix each entry as docs/QUALITY_GATES.md \"Project rules register\" says (\`## <ID> — <rule>\` with \`- Incident:\`, \`- Implemented in:\`, \`- Test:\`; unique ids; a Test that exists, or \`no test yet\`) and name only register ids in rules_touched; then run it again (\`phasekit rules check\` is the same check). The gate was not run." >&2
     return 1
   fi
   drv="$(evidence_driver)"
@@ -6520,7 +6608,7 @@ wrapup_commit() {
   # would have landed it, so the two gates judge one tree and a red verdict
   # memoised by either answers the next start's recovery (review round 2).
   # Otherwise it is a checkpoint and carries none.
-  local _wdrv _wshape="" _wnote="" _wroad=""
+  local _wdrv _wshape="" _wnote="" _wroad="" _wrules=""
   _wdrv="$(evidence_driver)"
   [[ -z "${STAGE_FAILED:-}" ]] || _wdrv=""
   if [[ -n "$_wdrv" ]]; then
@@ -6549,6 +6637,17 @@ wrapup_commit() {
       git reset -q -- "$ARTIFACTS_DIR/phase-approval.json" "$ARTIFACTS_DIR/project-complete.json" 2>/dev/null || true
       _wdrv=""
       _wnote="; ALSO your verdict was kept out because docs/ROADMAP.md entries this iteration added are still unchecked ($(printf '%s\n' "$_wshape" | sed -n '1,3p' | cut -d' ' -f1 | tr '\n' ' ')) — tick each built one (phasekit roadmap done), tick one decided against with --not-built, or name one left open in the record's roadmap_open"
+    fi
+  fi
+  if [[ -n "$_wdrv" ]]; then
+    # v0.26.0: the same for a landing the project rules register refuses.
+    _wrules="$(rules_register_refusals)"
+    if [[ -n "$_wrules" ]]; then
+      record_rules_register_refusal "$_wrules" once
+      echo "Wrap-up: the verdicts stay out (the project rules register or a record's rules_touched has findings); committing the rest as a checkpoint." >&2
+      git reset -q -- "$ARTIFACTS_DIR/phase-approval.json" "$ARTIFACTS_DIR/project-complete.json" 2>/dev/null || true
+      _wdrv=""
+      _wnote="; ALSO your verdict was kept out because the project rules register (docs/project/RULES.md) or the record's rules_touched has findings ($(printf '%s\n' "$_wrules" | sed -n '1,2p' | tr '\n' ' ')) — fix them (phasekit rules check)"
     fi
   fi
   if [[ -n "$_wdrv" ]]; then
@@ -6615,7 +6714,9 @@ wrapup_commit() {
     echo "Wrap-up: post-verify gates refused the staged work — leaving it uncommitted (session-handoff.json records the state)." >&2
     return 0
   fi
-  if [[ -n "$_wroad" ]]; then
+  if [[ -n "$_wrules" ]]; then
+    write_session_handoff true "standing work was committed at wrap-up as a checkpoint, but NOT your verdict: the project rules register (docs/project/RULES.md) or the record's rules_touched has findings (artifacts/phase-verify-failed.json names them) — fix each one (\`phasekit rules check\` is the same check), re-write your record, and end your turn; the loop lands the verdict"
+  elif [[ -n "$_wroad" ]]; then
     write_session_handoff true "standing work was committed at wrap-up as a checkpoint, but NOT your verdict: docs/ROADMAP.md entries this iteration added under ## Next are still unchecked (artifacts/phase-verify-failed.json names them) — tick each built one (phasekit roadmap done R<n> --iteration <label>), tick one decided against with --not-built \"<why>\", or name one left for a later iteration in the record's roadmap_open, and end your turn; the loop lands the verdict"
   elif [[ -n "$_wshape" ]]; then
     write_session_handoff true "standing work was committed at wrap-up as a checkpoint, but NOT your verdict: its deferral entries lack an \`item\` (artifacts/phase-verify-failed.json names them) — give each an \`item\`, keep its key, and end your turn; the loop lands the verdict"
@@ -6640,7 +6741,7 @@ wrapup_commit() {
     return 0
   fi
   # a refusal the wrap-up could not stage past still stands (review round 6)
-  [[ -n "${STAGE_FAILED:-}" || -n "$_wshape" ]] || clear_commit_refusal
+  [[ -n "${STAGE_FAILED:-}" || -n "$_wshape" || -n "$_wrules" ]] || clear_commit_refusal
   auto_push_if_enabled
 }
 
@@ -6824,6 +6925,12 @@ Do, in order:
 2. Review the change for correctness, completeness against the task, scope
    containment, and quality. Fix any defect you find directly in the working
    tree with minimal edits. Do NOT expand scope or refactor beyond the task.
+   Answer the two mandatory review checks (docs/QUALITY_GATES.md "DRY and
+   reuse gate"): does this behaviour already exist elsewhere in the repo (if
+   so the change uses it, or the record says why not), and does the change
+   keep every docs/project/RULES.md rule it touches (the record's
+   `rules_touched` names them)? A NO without a reason is a MAJOR defect: fix
+   it as above.
 3. If the work is fundamentally unsound or clearly outgrew a light task,
    delete artifacts/project-complete.json, write artifacts/phase-blocked.json
    explaining why, and stop.

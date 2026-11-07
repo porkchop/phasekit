@@ -5,12 +5,15 @@
 #   phasekit adopt [profile]      enrich an existing repo (no overwrite)
 #   phasekit bootstrap [profile]  enrich a greenfield project
 #   phasekit upgrade [flags...]   re-provision against the current scaffold
-#   phasekit check                detect file drift vs the recorded manifest
+#   phasekit check                detect file drift vs the recorded manifest; (v0.26.0) also
+#                                 checks the project rules register (exit 8 on findings)
 #   phasekit check-version        is a newer scaffold release available?
 #   phasekit status               current phase state (derived from artifacts)
 #   phasekit channel [name]       show or set the self-update channel (stable|edge|<ref>)
 #   phasekit self-update          move this phasekit clone along its channel
 #   phasekit roadmap next|done|init  the OPTIONAL docs/ROADMAP.md (see scripts/phasekit-roadmap.py)
+#   phasekit rules check|init     (v0.26.0) the project rules register docs/project/RULES.md
+#                                 (see scripts/phasekit-rules.py)
 #   phasekit verify [--tier fast|full]  run THIS project's gate exactly as the loop's
 #                                 commit gate will; a green verdict is reused by it
 #   phasekit verify --in-runner [--tier auto|fast|full] [--json] [--timeout S]
@@ -204,6 +207,46 @@ channel_cmd() {
   fi
 }
 
+# The scripts directory whose phasekit-rules.py judges project $1: a pinned
+# project's engine (an engine older than v0.26.0 has none), else this CLI's —
+# as `roadmap` resolves its tool.
+rules_tool_dir() {
+  local root="$1" engine
+  if [[ -n "$root" && "$(pk_layout "$root")" == pinned ]]; then
+    engine="$(pk_engine_for "$root")" || return 1
+    printf '%s\n' "$engine/scripts"
+  else
+    printf '%s\n' "$SCRIPT_DIR"
+  fi
+}
+
+# `phasekit check`'s second half (v0.26.0): the project rules register,
+# docs/project/RULES.md. $1 = project root (may be empty), $2 = the layout
+# check's exit code. Exits with $2 when it is non-zero (findings are still
+# printed), else 8 on findings (scripts/phasekit-rules.py exit 3), else 0. A
+# missing register is clean; a checker that is missing or cannot complete is
+# a note, never a code. A pin that is not installed (6) is never resolved
+# here: check does not fetch.
+rules_check_verb() {
+  local root="$1" crc="$2" dir rrc=0
+  if [[ -z "$root" || "$crc" -eq 6 || ! -e "$root/docs/project/RULES.md" ]]; then
+    exit "$crc"
+  fi
+  dir="$(rules_tool_dir "$root" 2>/dev/null)" || dir=""
+  if [[ -z "$dir" || ! -f "$dir/phasekit-rules.py" ]]; then
+    echo "phasekit check: note — docs/project/RULES.md was not checked (this engine has no rules checker)" >&2
+    exit "$crc"
+  fi
+  "${PHASEKIT_PYTHON:-python3}" "$dir/phasekit-rules.py" check --repo "$root" || rrc=$?
+  if [[ "$rrc" -eq 3 ]]; then
+    echo "RULES: docs/project/RULES.md has findings (above); docs/QUALITY_GATES.md \"Project rules register\"" >&2
+    [[ "$crc" -ne 0 ]] || exit 8
+  elif [[ "$rrc" -ne 0 ]]; then
+    echo "phasekit check: note — the rules checker could not complete (exit $rrc)" >&2
+  fi
+  exit "$crc"
+}
+
 verb="${1:-}"
 case "$verb" in
   adopt|bootstrap)
@@ -221,13 +264,19 @@ case "$verb" in
     exec "${ENGINE[@]}" --upgrade "$PWD" "$@"
     ;;
   check)
+    # v0.26.0: after the layout's own check, the project rules register
+    # (rules_check_verb). The layout's non-zero code wins; findings in an
+    # otherwise clean check are exit 8.
     shift
     root="$(pk_project_root)"
+    crc=0
     if [[ -n "$root" && "$(pk_layout "$root")" == pinned ]]; then
       require_pin_tool check
-      exec "${PIN[@]}" check "$@"
+      "${PIN[@]}" check "$@" || crc=$?
+    else
+      "${ENGINE[@]}" --check "$PWD" "$@" || crc=$?
     fi
-    exec "${ENGINE[@]}" --check "$PWD" "$@"
+    rules_check_verb "$root" "$crc"
     ;;
   init|migrate|engines|plugin|docs|resolve)
     require_pin_tool "$verb"
@@ -372,6 +421,14 @@ elif d.get("invalid"):
       pass+=(--declared-json "$declared")
     fi
     PHASEKIT_SCAFFOLD_ROOT="$SCAFFOLD_ROOT" exec node "$engine/scripts/phasekit-ui-check.mjs" --project "$project_root" "${pass[@]}"
+    ;;
+  rules)
+    shift
+    root="$(pk_project_root)"
+    tool_dir="$(rules_tool_dir "$root")"
+    # act on the project, not the working directory, unless the caller named one
+    if (( $# > 0 )) && [[ -n "$root" && " $* " != *" --repo"* ]]; then set -- "$@" --repo "$root"; fi
+    exec "${PHASEKIT_PYTHON:-python3}" "$tool_dir/phasekit-rules.py" "$@"
     ;;
   roadmap)
     shift

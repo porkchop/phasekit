@@ -21,3 +21,4 @@ Build core domain logic with strong tests.
 - tests added or updated
 - assumptions made
 - gaps or follow-up work
+- rules touched: the `docs/project/RULES.md` ids this change touches (or none), each kept; the phase record carries them in `rules_touched`

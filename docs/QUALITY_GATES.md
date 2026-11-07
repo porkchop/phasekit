@@ -94,11 +94,41 @@ Why: in October 2026 about 84k lines and 1,860 tests across three projects teste
 
 The rule is adopted, not enforced (a refusal is a stall). After the gate the loop prints, once per session, `ADVISORY process-reads: N test file(s) read process documents (…first 5…)` and records each in `artifacts/boundary-state.json` `process_reads` (`[{"test": <file>, "paths": [<the documents it reads>]}]`), decided by the scaffold-reads lexer (a path in a string sample, a comment or a list of names is data) and counting only reads rooted in this project (a supervisor's fixture trees are not). `phasekit check` prints the same advisory, the widened `scaffold-reads` (a test whose only subject is phasekit, below), and `criterion-suites`: test files over 3,000 lines whose tests are mostly named for criteria or iterations (`ac[0-9]+`, `iteration-NN`, `spec_declares`), and families of test files named per iteration or phase. Never a red gate; `phasekit migrate` reports the process-reads count as information and never refuses on it.
 
+### Test-suite hygiene (v0.26.0)
+
+A suite that only grows stops being run. These rules keep it fast and honest (foundry-meta `designs/DESIGN-test-suite-hygiene.md`, decided 2026-11-07). They are adopted, not enforced: phasekit refuses no landing over them, review holds them, and where a supervisor acts on one the rule says so.
+
+- **Budgets become work.** The per-commit tier stays within 60 s ("Verify budget" below); the full tier within 25 % of the session bound and under the in-session tool limit. A project never raises its own budget. phasekit measures the tiers and prints the advisory; a supervisor turns an over-budget tier into a delegated work request. phasekit itself never refuses a slow tier.
+- **Tests retire with their criterion.** When a criterion is superseded, the same phase removes its tests or folds them into the replacement's. The SPEC stays append-only; tests do not.
+- **The full tier reaches master.** Besides completion, a nightly full-tier run on master, outside any session, files a defect on red. That run is a supervisor's; phasekit runs the full tier only at completion and at the verification sprint.
+- **No snapshot numbers as bounds.** A bound derives from the parameters under test. Anything that depends on rules or a version states that version.
+- **Tree state is the loop's job, not a test's.** A test never judges the working tree itself (a stale build, a stale record, the tree's size). The gate rebuilds what it tests before testing it, and phasekit's landing checks own the records.
+- **Browser checks share the budget.** Each has a measured time, runs one at a time, and re-runs only when a file it depends on changed.
+- **Tests do not wait on the real clock.** Drive time-dependent code with a controllable clock; a real-time wait is only for a test whose subject is time itself, and that test keeps the wait as short as its subject allows. If the product has no clock seam, adding one is part of the budget work.
+
 ## DRY and reuse gate
 - business rules and validation logic must exist in exactly one place
 - if the same logic appears in more than one layer, extract it to a shared module or justify the duplication in a decision memo
 - builders must check for existing utilities and shared modules before creating new ones
 - code-reviewer must reject changes that introduce unjustified duplication
+- **the reuse question (v0.26.0):** sharing building blocks is not enough. A behaviour — a flow, the sequence that joins the blocks, a rule — written inline a second time drifts exactly like duplicated logic. Every review (code-reviewer, and every fresh-context round) answers two checks in its output: *does this behaviour already exist elsewhere in the repo* (if so, the change uses it or the record says why not), and *does the change keep every `docs/project/RULES.md` rule it touches*. A NO without a reason is a MAJOR finding, triaged like any other. Planning asks the same question first: a change request that asks to reuse the earlier work's looks has not said whether to reuse its behaviour, so the plan does.
+
+## Project rules register (v0.26.0)
+
+`docs/project/RULES.md` is the project's list of rules it has learned, usually from incidents. It is project-owned: phasekit seeds it once, empty, with its format, and never overwrites it (`phasekit rules init` seeds it where it is absent, as in a pinned project). Strategy-planner and project-lead read it before planning, as they read LEARNINGS.
+
+```markdown
+## RULE-1 — Prices shown and prices charged come from one table
+- Incident: 2026-11-07, the cart showed the old price after a sale ended
+- Implemented in: `src/pricing/table.ts` (`priceFor`)
+- Test: `tests/pricing.test.ts` `cart and checkout read one table`
+```
+
+Every level-2 heading is an entry: an id (capital letters, digits and hyphens, unique, never reused), the rule in one sentence, and `Incident:`, `Implemented in:` (the ONE place the rule lives) and `Test:` once each. `Test:` names a test file in backticks, optionally followed by a test name in backticks, or says exactly `no test yet`.
+
+- **When a phase adds an entry:** when it fixes a defect whose cause was a rule held in two places, or a rule nobody had written down. The fix moves the rule to one place, and the entry names that place and the test that pins it.
+- **`rules_touched`:** a phase record (`artifacts/phase-approval.json`, or the completion record) names the register ids its change touches, or `[]`. Builders report them; the reviewer checks each touched rule is kept.
+- **The check (phasekit's, not a project test):** at every landing, before the gate, the loop runs `scripts/phasekit-rules.py check`. A malformed entry, a duplicate id, a `Test:` naming a file or a test name that does not exist, or a `rules_touched` id the register lacks REFUSES the landing (`phase-verify-failed.json`, the breaker bounding it). `phasekit verify` reports the same RED, and `phasekit check` and `phasekit rules check` run the check on demand. An absent or empty register passes, and an absent `rules_touched` is accepted. Never delete a rule to silence the check: point it at the test that pins it now, or write `no test yet`.
 
 ## Drift detection gate
 Before starting a new implementation phase, the assigned builder must:
@@ -248,6 +278,11 @@ recording. Grade findings before writing the fix list.
   default, and the environments where the reviewer subagent is
   unavailable must say so in the approval artifact rather than skip
   silently.
+- **Every round answers the reuse and rules checks** ("DRY and reuse gate"):
+  does this behaviour already exist elsewhere in the repo, and does the
+  change keep every `docs/project/RULES.md` rule it touches. A NO without a
+  reason is a MAJOR finding. A per-iteration review reads one diff; these two
+  questions are how it sees past it.
 - **Non-convergence is a verdict, not a loop**: if two consecutive fix
   rounds have each introduced new MAJOR findings, do not run a third.
   Write `artifacts/phase-blocked.json` with reason `review-nonconvergence`
@@ -729,6 +764,8 @@ For phases that required a planning gate, include a `decision_memo` field refere
 ```
 
 This field is optional for phases that did not require a planning gate, and required for those that did.
+
+**`rules_touched` (v0.26.0, optional):** the `docs/project/RULES.md` ids the phase's change touches, e.g. `"rules_touched": ["RULE-1"]`, or `[]`. The loop refuses an id the register does not have ("Project rules register").
 
 **`final_phase` (v0.14.5, optional):** set `"final_phase": true` on the approval that closes the project's last phase. The loop then treats the boundary as final: if the session has not also written `artifacts/project-complete.json`, the loop **records the completion itself** from the approval (summary and `deferrals` carried, `recorded_by` naming the step) and lands it in the same sequence — so "approved but the completion was never recorded" cannot survive a kill (2026-09-08 06:22). Writing your own completion record alongside the approval is still the richer choice (walk the change-request's asks, name limitations); the flag guarantees the record exists either way. Without the flag, behavior is unchanged: the next turn writes the completion. A landed `final_phase` approval is honoured only while no commit since it landed has touched `project-complete.json`, so a project that completed and was then resumed is never re-recorded complete; the one shape this cannot tell apart is an operator re-landing the approval with *different* content after the resumption (that reads as a fresh final approval) — do not hand-edit a resumed project's approval to say `final_phase: true`.
 

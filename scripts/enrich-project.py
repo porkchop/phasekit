@@ -3997,6 +3997,8 @@ DOC_TEMPLATE_MAP = {
     "LEARNINGS": "templates/learnings.template.md",  # v0.4.7 cross-session learnings
     # v0.17.0: project-owned companion of the scaffold's docs/QUALITY_GATES.md
     "PROJECT_QUALITY_GATES": "templates/project-quality-gates.template.md",
+    # v0.26.0: the project rules register (scripts/phasekit-rules.py checks it)
+    "PROJECT_RULES": "templates/project-rules.template.md",
 }
 
 # Docs that exist in the scaffold but never install downstream (matches
@@ -4062,6 +4064,7 @@ ALWAYS_INSTALLED_FILE_PATHS = (
     "scripts/phasekit-log-fmt.sh",
     "scripts/phasekit-contracts.py",
     "scripts/phasekit-roadmap.py",
+    "scripts/phasekit-rules.py",
     "scripts/phasekit-surface.py",
     "scripts/phasekit-ui-check.mjs",
     ".devcontainer/devcontainer.json",

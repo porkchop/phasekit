@@ -46,6 +46,7 @@ LAYOUT_MODULES = (
     "test_learnings_budget",
     "test_loop_owns_commits", "test_meta_retired", "test_multiphase_invariance", "test_no_verdict_retry",
     "test_output_discipline", "test_post_completion", "test_project_tests", "test_require_verdict_hook", "test_roadmap_completion",
+    "test_rules_landing",
     "test_run_until_done_v060", "test_run_until_done_v066", "test_scaffold_lock",
     "test_scaffold_reads", "test_session_resume", "test_suite_tmpdir", "test_ui_landing",
     "test_verify_in_runner", "test_wrapup_nudge_hook",

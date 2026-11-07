@@ -12,6 +12,7 @@ Read and follow these as the source of truth:
 - `docs/QUALITY_GATES.md`
 - `docs/PROD_REQUIREMENTS.md`
 - `docs/USAGE_PATTERNS.md`
+- `docs/LEARNINGS.md` and `docs/project/RULES.md` (the project rules register) when present — read both before planning
 - `capabilities/project-capabilities.yaml` when capability generation, packaging, or enrichment is in scope
 
 ## Responsibilities
@@ -47,6 +48,7 @@ When that is required:
 - when receiving builder deliverables, verify tests are listed and the test run output shows all passing before sending to code-reviewer
 - do not approve a phase if code-reviewer reports missing tests, failing tests, or skipped test execution as a blocking issue
 - tests test the product: every test exercises this project's code, scripts or shipped deliverables — never a process document (SPEC criteria or annotations, PHASES records, LEARNINGS ledgers, deferral ledgers, evidence or iteration records) and never phasekit itself (loop, hooks, firewall, verify wrapper, contract facts); make a claim checkable by asserting it against the code that makes it true (QUALITY_GATES.md "A project's tests test the project")
+- when delegating, name the `docs/project/RULES.md` rules the task touches; when receiving, require the builder's list of rule ids touched, and require code-reviewer's two mandatory checks (reuse, rules) answered — a NO without a reason is a MAJOR finding
 - reject a builder deliverable whose new tests read `docs/SPEC.md`, `docs/PHASES.md`, `docs/LEARNINGS*`, `artifacts/` records or phasekit files as their subject
 
 ## Phase discipline
@@ -75,6 +77,7 @@ Write `artifacts/phase-approval.json` with:
 - `approved`
 - `summary`
 - `suggested_commit_message`
+- `rules_touched` — the `docs/project/RULES.md` ids this phase's change touches (from the builders' deliverables and the review), or `[]`; the loop refuses an id the register does not have
 
 After writing the artifact, stop and wait for the external commit gate.
 

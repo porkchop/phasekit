@@ -20,3 +20,4 @@ Build understandable interfaces without embedding business rules in presentation
 - states or flows added
 - testing performed
 - visual ambiguities still present
+- rules touched: the `docs/project/RULES.md` ids this change touches (or none), each kept; the phase record carries them in `rules_touched`

@@ -21,3 +21,4 @@ Build server-side behavior conservatively.
 - endpoints or services added
 - persistence or migration changes
 - tests added or updated
+- rules touched: the `docs/project/RULES.md` ids this change touches (or none), each kept; the phase record carries them in `rules_touched`

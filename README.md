@@ -39,7 +39,7 @@ phasekit init                   # "default" profile
 phasekit init python-uv         # or a named profile (python-uv, static-web, game-canvas, docs-only, game-project, ...)
 ```
 
-`phasekit init` runs `git init` if needed, writes `.phasekit-version` (this phasekit's release) and the project's own files — `docs/SPEC.md`, `docs/ARCHITECTURE.md`, `docs/PHASES.md`, `docs/PROD_REQUIREMENTS.md`, `docs/LEARNINGS.md`, `docs/CONVENTIONS.md` (stack profiles), `docs/project/QUALITY_GATES.md`, `.claude/CLAUDE.md`, `.claude/settings.json` (permissions only; the hooks come from the plugin), `AGENTS.md` and `scripts/phasekit-verify.sh` — and commits them in one commit. It never overwrites a file that already exists, so it works in an existing repository too. Options: `--pin TAG` (pin another release, v0.19.0 or later), `--no-commit`, `--no-plugin`.
+`phasekit init` runs `git init` if needed, writes `.phasekit-version` (this phasekit's release) and the project's own files — `docs/SPEC.md`, `docs/ARCHITECTURE.md`, `docs/PHASES.md`, `docs/PROD_REQUIREMENTS.md`, `docs/LEARNINGS.md`, `docs/CONVENTIONS.md` (stack profiles), `docs/project/QUALITY_GATES.md`, `docs/project/RULES.md` (the rules register, empty), `.claude/CLAUDE.md`, `.claude/settings.json` (permissions only; the hooks come from the plugin), `AGENTS.md` and `scripts/phasekit-verify.sh` — and commits them in one commit. It never overwrites a file that already exists, so it works in an existing repository too. Options: `--pin TAG` (pin another release, v0.19.0 or later), `--no-commit`, `--no-plugin`.
 
 Then fill in `docs/SPEC.md` and `docs/PHASES.md` (and the other docs as needed).
 

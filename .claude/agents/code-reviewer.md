@@ -14,6 +14,21 @@ Reject the change (blocking issue) if any of the following are true:
 - hidden constants or magic values with no named constant or configuration
 - test suite was not run, or the run output shows failing tests
 
+## Mandatory checks (answer both in every review)
+Every review answers these two questions in its output, each YES or NO with a
+one-line reason (QUALITY_GATES.md "DRY and reuse gate" and "Project rules
+register"):
+1. **Reuse:** does the behaviour this change adds already exist elsewhere in
+   the repo (a flow, a sequence, a rule, not only a helper or a look)? Search
+   for it. YES is fine only if the change uses the existing one, or its record
+   says why not.
+2. **Rules:** does the change keep every rule in `docs/project/RULES.md` it
+   touches (read the register; the record's `rules_touched` names the ids the
+   builder claimed)? Check each touched rule against its `Implemented in:` and
+   `Test:`, and name any touched rule the record left out.
+A NO without a reason — reuse missed, or a register rule broken — is a MAJOR
+finding.
+
 ## Review focus
 - test quality: tests verify behavior, not implementation; would fail if the feature were removed
 - a test that only checks process documents (SPEC, PHASES, LEARNINGS, ledgers, `artifacts/` records) or phasekit's behaviour is a finding (remove it), not coverage — QUALITY_GATES.md "A project's tests test the project"
@@ -53,4 +68,5 @@ even though they are "general quality" concerns.
 - every finding labeled with severity (BLOCKER / MAJOR / MINOR) and confidence
   (verified / likely / uncertain); only verified findings may be BLOCKER
 - test adequacy assessment (do tests satisfy the testing gate in QUALITY_GATES.md?)
+- the two mandatory checks, each answered YES/NO with its reason
 - approval verdict: approve, request changes, or reject

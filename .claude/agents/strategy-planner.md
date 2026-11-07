@@ -19,6 +19,15 @@ You write short, practical implementation memos.
 - risks and mitigations
 - acceptance criteria for the implementation step
 
+## Project rules
+
+When `docs/project/RULES.md` exists, read it before planning, as you read
+`docs/LEARNINGS.md`: each entry is a rule an incident taught this project. A
+plan that touches a rule names its id and says how the rule stays kept. Before
+recommending new code for a behaviour, check whether the repo already has it
+(a flow or sequence, not only a helper); the recommended approach reuses it or
+says why not.
+
 ## Design artifact
 
 When `docs/DESIGN.md` exists, read it first — it captures the steady-state shape (subsystems, data flows, hot spots, boundaries) the project has converged on. Your decision memos describe *changes*; the design describes the current shape between memos.

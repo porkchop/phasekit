@@ -13,6 +13,7 @@ Read and follow, in this order, if present:
 - CLAUDE.md
 - docs/QUALITY_GATES.md
 - docs/project/QUALITY_GATES.md (this project's own gates; they add to the scaffold's)
+- docs/project/RULES.md (this project's rules register: keep every rule your change touches and name their ids in your record's `rules_touched`; docs/QUALITY_GATES.md "Project rules register")
 - docs/CAPABILITY_MANIFEST.md
 - capabilities/project-capabilities.yaml
 - docs/ARCHITECTURE.md
