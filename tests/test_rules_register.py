@@ -202,12 +202,36 @@ class Format(unittest.TestCase):
         self.assertEqual(f, [f"{REG} line 6: RULE-1: duplicate id (first on line 1); ids are unique "
                              "and never reused — give this rule a new id"])
 
-    def test_a_level_two_heading_that_is_not_an_entry_is_a_finding(self):
-        for title in ("Notes", "rule-1 — lower case id", "RULE-1 no separator", "1RULE — digit first"):
+    def test_a_malformed_entry_heading_is_caught_by_its_fields(self):
+        """v0.27.0: a heading that is not an entry is a section, never a finding
+        by itself; the fields under it are (a malformed heading cannot hide its
+        rule)."""
+        for title in ("Notes", "RULE-1 no separator", "1RULE — digit first"):
             with self.subTest(title=title):
                 r, f = self._findings(f"## {title}\n")
+                self.assertEqual(r.returncode, 0, r.stdout)
+                body = ENTRY.split("\n", 1)[1]
+                r, f = self._findings(f"## {title}\n{body}")
                 self.assertEqual(r.returncode, 3)
-                self.assertIn("a level-2 heading that is not an entry", f[0])
+                self.assertEqual(len(f), 3, f)
+                self.assertEqual(f[0], f"{REG} line 2: a `Incident:` field outside an entry; is "
+                                       "the heading above it meant to be `## <ID> — <the rule in "
+                                       "one sentence>` (ID: capital letters, digits and hyphens, "
+                                       "starting with a letter)?")
+
+    def test_a_heading_that_reads_like_a_mistyped_entry_is_a_finding_alone(self):
+        """Review of v0.27.0: with no field bullets under it, a mistyped entry
+        heading would otherwise vanish silently (v0.26.0 caught it)."""
+        for title in ("RULE 2 — y", "rule-1 — lower case id", "R 2 – y"):
+            with self.subTest(title=title):
+                r, f = self._findings(f"## {title}\nIncident: prose, not a bullet\n")
+                self.assertEqual(r.returncode, 3, r.stdout)
+                self.assertIn("a heading that reads like an entry but is not one", f[0])
+        for title in ("Harvest (rules already learned)", "Placement rules (iteration 334)",
+                      "Notes — older rules"):
+            with self.subTest(title=title):
+                r, _ = self._findings(f"## {title}\n")
+                self.assertEqual(r.returncode, 0, r.stdout)
 
     def test_separators_and_bullets_the_format_allows(self):
         text = ENTRY.replace(" — ", " – ").replace("- Incident", "* Incident").replace(
@@ -261,6 +285,178 @@ class Format(unittest.TestCase):
     def test_usage_errors_exit_2(self):
         r = subprocess.run([sys.executable, str(TOOL)], capture_output=True, text=True)
         self.assertEqual(r.returncode, 2)
+
+
+# xmeo-v3's register (iteration 334) after its agreed rename: section headings,
+# `###` entries, bold field names, several tests per entry, extra bullets.
+XMEO_SHAPED = """# Rules register — demo
+
+Preamble prose: `Rule:` and `Modes:` bullets are this project's own.
+
+## Placement and board-source rules (iteration 334)
+
+### P1 — A press means the same thing on every page
+- **Rule:** one pure state machine decides what a press means.
+- **Incident:** bugs 1a and 1b (2026-11-07): wired inline in two pages.
+- **Implemented in:** `src/flow.ts` `placementFlow`
+- **Test:** `tests/flow.test.ts`; `tests/adapters.test.ts`; `tests/calls.test.ts`
+- **Modes:** windowed, continuous, board-halt
+
+### P2 — In a halt mode the board halts on the press that names the cell
+- **Rule:** the press starts the halt.
+- **Incident**: bug 1b (2026-11-07)
+- **Implemented in**: `src/flow.ts` `placementFlow`
+- **Test**: `tests/flow.test.ts` `AC570.2`; `tests/adapters.test.ts`
+#### Notes inside the entry
+- **Modes:** board-halt (a deeper heading does not end the entry)
+
+## Harvest (rules already learned)
+
+### H1 — Every signed path reads the follower, never a predicted board
+- **Rule:** a signed placement binds the follower's tick.
+- **Source:** `docs/design/RING_ADMISSION.md`
+- **Incident:** R134, phase 393
+- **Implemented in:** `src/authority.ts`
+- **Test:** no test yet
+"""
+
+
+class LooserStructure(unittest.TestCase):
+    """v0.27.0 (met halfway with xmeo-v3's first register): entries at level
+    2 or 3, other headings are sections, bold field names, `;`-separated
+    tests, other bullets free."""
+
+    def setUp(self):
+        self.t = _Tree(self)
+        for rel, text in (("tests/flow.test.ts", "it('AC570.2 halts on the press')\n"),
+                          ("tests/adapters.test.ts", ""), ("tests/calls.test.ts", "")):
+            (self.t.root / rel).write_text(text)
+
+    def _check(self, text):
+        self.t.register(text)
+        r = self.t.check("--json")
+        data = json.loads(r.stdout)
+        return r.returncode, data
+
+    def test_the_xmeo_shaped_register_passes(self):
+        rc, data = self._check(XMEO_SHAPED)
+        self.assertEqual((rc, data["findings"]), (0, []))
+        self.assertEqual([e["id"] for e in data["entries"]], ["P1", "P2", "H1"])
+
+    def test_xmeo_s_current_field_names_are_findings(self):
+        current = (XMEO_SHAPED.replace("**Implemented in:**", "**Function:**")
+                   .replace("**Implemented in**:", "**Function**:")
+                   .replace("**Test:**", "**Tests:**").replace("**Test**:", "**Tests**:")
+                   .replace("`tests/flow.test.ts` `AC570.2`", "`tests/flow.test.ts > AC570.2`"))
+        rc, data = self._check(current)
+        self.assertEqual(rc, 3)
+        for rid in ("P1", "P2", "H1"):
+            self.assertTrue(any(f.endswith(f"{rid}: missing `- Implemented in:`, `- Test:`")
+                                for f in data["findings"]), (rid, data["findings"]))
+        rc, data = self._check(XMEO_SHAPED.replace("`tests/flow.test.ts` `AC570.2`",
+                                                   "`tests/flow.test.ts > AC570.2`"))
+        self.assertEqual(rc, 3)
+        self.assertEqual(data["findings"], [f"{REG} line 18: P2: test file "
+                                            "`tests/flow.test.ts > AC570.2` does not exist"])
+
+    def test_a_v0_26_register_still_passes(self):
+        rc, data = self._check("# demo — project rules\n\n" + ENTRY.replace(
+            "`tests/board.test.ts` `ring and pieces share one board`", "no test yet") + "\n"
+            + ENTRY.replace("RULE-1", "RULE-2").replace(
+                "`tests/board.test.ts` `ring and pieces share one board`", "`tests/flow.test.ts`"))
+        self.assertEqual((rc, data["findings"]), (0, []))
+        self.assertEqual([e["id"] for e in data["entries"]], ["RULE-1", "RULE-2"])
+
+    def test_bold_field_forms(self):
+        for form in ("- **Test:** {v}", "- **Test**: {v}", "- __Test:__ {v}", "- **test:** {v}",
+                     "* **Test** : {v}"):
+            with self.subTest(form=form):
+                text = ENTRY.replace("- Test: `tests/board.test.ts` `ring and pieces share one "
+                                     "board`", form.format(v="`tests/flow.test.ts`"))
+                rc, data = self._check(text)
+                self.assertEqual((rc, data["findings"]), (0, []))
+
+    def test_each_test_item_is_checked_and_no_test_yet_is_whole_only(self):
+        base = "## RULE-1 — r\n- Incident: i\n- Implemented in: x\n- Test: {}\n"
+        rc, data = self._check(base.format("`tests/flow.test.ts` `AC570.2`; `tests/gone.ts`; "
+                                           "`tests/flow.test.ts` `renamed`"))
+        self.assertEqual(rc, 3)
+        self.assertEqual(data["findings"], [
+            f"{REG} line 4: RULE-1: test file `tests/gone.ts` does not exist",
+            f"{REG} line 4: RULE-1: test `renamed` is not in `tests/flow.test.ts`"])
+        # an item without a code span is prose beside the tests, as in v0.26.0
+        for prose in ("`tests/flow.test.ts`; no test yet", "`tests/flow.test.ts`; plain words",
+                      "`tests/flow.test.ts` `AC570.2` (covers the cart; checkout too)",
+                      "`tests/flow.test.ts`;"):
+            with self.subTest(prose=prose):
+                rc, data = self._check(base.format(prose))
+                self.assertEqual((rc, data["findings"]), (0, []))
+        rc, data = self._check(base.format("plain words; more words"))
+        self.assertEqual(rc, 3)
+        self.assertIn("each `Test:` item (items separated by `;`)", data["findings"][0])
+        (self.t.root / "tests" / "semi.test.ts").write_text("it('a; b')\n")
+        rc, data = self._check(base.format("`tests/semi.test.ts` `a; b`"))
+        self.assertEqual((rc, data["findings"]), (0, []), "a `;` inside a code span is not a split")
+
+    def test_other_bullets_are_ignored(self):
+        text = ENTRY + "- Rule: r\n- Modes: m\n- Source: s\n- Tests: `nowhere.ts`\n- Function: f\n"
+        rc, data = self._check(text)
+        self.assertEqual((rc, data["findings"]), (0, []))
+
+    def test_section_headings_and_where_an_entry_ends(self):
+        # a section heading at the entry's level or above ends it ...
+        for heading in ("## API notes", "### API notes", "# Part two"):
+            with self.subTest(heading=heading):
+                rc, data = self._check("### RULE-1 — r\n- Incident: i\n" + heading
+                                       + "\n- Implemented in: x\n- Test: no test yet\n")
+                self.assertEqual(rc, 3)
+                self.assertIn("RULE-1: missing `- Implemented in:`, `- Test:`",
+                              data["findings"][0])
+                if heading.startswith("# "):
+                    # a level-1 section, like the preamble, may describe the format
+                    self.assertEqual(len(data["findings"]), 1, data["findings"])
+                else:
+                    self.assertIn("a `Implemented in:` field outside an entry",
+                                  data["findings"][1])
+        # ... a deeper one sits inside it
+        rc, data = self._check("## RULE-1 — r\n- Incident: i\n### Details\n"
+                               "- Implemented in: x\n#### More\n- Test: no test yet\n")
+        self.assertEqual((rc, data["findings"]), (0, []))
+        # a level-4 heading of entry form is not an entry
+        rc, data = self._check("#### RULE-9 — too deep\n- Incident: i\n")
+        self.assertEqual(rc, 3)
+        self.assertEqual(data["entries"], [])
+
+
+class StillValidFromV0260(unittest.TestCase):
+    """Review of v0.27.0: registers v0.26.0 accepted stay accepted."""
+
+    def setUp(self):
+        self.t = _Tree(self)
+
+    def _rc(self, text):
+        self.t.register(text)
+        r = self.t.check()
+        return r.returncode, ("" if r.returncode == 0 else r.stdout)
+
+    def test_field_shaped_bullets_in_the_preamble_or_a_level_1_section(self):
+        doc = "Each entry has:\n- Incident: the date\n- Test: a test file\n\n"
+        for text in ("# demo rules\n\n" + doc + ENTRY,
+                     ENTRY + "\n# How to add an entry\n\n" + doc):
+            with self.subTest(text=text[:30]):
+                self.assertEqual(self._rc(text), (0, ""))
+
+    def test_an_entry_shaped_subheading_inside_a_level_2_entry_is_content(self):
+        self.assertEqual(self._rc(ENTRY + "### NOTE-1 — history of this rule\nplain text\n"),
+                         (0, ""))
+
+    def test_entries_keep_the_level_of_the_first(self):
+        text = ("### P1 — a\n- Incident: i\n- Implemented in: x\n- Test: no test yet\n"
+                "## P2 — b\n- Incident: i\n- Implemented in: x\n- Test: no test yet\n")
+        rc, out = self._rc(text)
+        self.assertEqual(rc, 3)
+        self.assertIn("P2: entries in this register are level-3 headings (the first is on line "
+                      "1); this one is level 2", out)
 
 
 class RulesTouched(unittest.TestCase):

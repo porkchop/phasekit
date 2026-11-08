@@ -27,28 +27,38 @@ notices nothing. Only what is written is judged.
 
 THE FORMAT (pinned in contracts/interface.json, convention `project-rules`)
 --------------------------------------------------------------------------
-Every level-2 heading outside fenced code and HTML comments is an entry:
+Outside fenced code and HTML comments, a level-2 or level-3 heading of the
+form `<ID> — <rule>` is an entry (v0.27.0: level 3 too, so entries can be
+grouped under section headings):
 
-    ## RULE-1 — Prices shown and prices charged come from one table
+    ## Pricing
+    ### RULE-1 — Prices shown and prices charged come from one table
     - Incident: 2026-11-07, the cart showed the old price (iteration 12)
-    - Implemented in: `src/pricing/table.ts` (`priceFor`)
-    - Test: `tests/pricing.test.ts` `cart and checkout read one table`
+    - **Implemented in:** `src/pricing/table.ts` (`priceFor`)
+    - Test: `tests/pricing.test.ts` `cart and checkout read one table`; `tests/cart.test.ts`
 
   * The id is capital letters, digits and hyphens, starting with a letter
     (`RULE-1`, `PLACEMENT-2`); ids are unique and never reused. The separator
     is an em dash, an en dash or a hyphen with a space each side; the rule is
     one sentence, non-empty.
+  * Any other heading is a SECTION heading, never a finding — except that it
+    ends the entry above it when it is not deeper than that entry's heading
+    (a deeper non-entry heading sits inside the entry). A level-1 heading
+    always ends it.
   * `Incident:`, `Implemented in:` and `Test:` are top-level bullets (`-`, `*`
-    or `+`, up to 3 spaces of indent; the names are case-insensitive), each
-    exactly once per entry with a non-empty value. Other lines in an entry are
-    free prose.
-  * `Test:` is either exactly `no test yet`, or a test file path from the
-    repository root in backticks, optionally followed by a test name in
-    backticks: the file must exist (a regular file inside the repository), and
-    the name, when given, must appear verbatim in it.
-  * A level-1 heading ends the current entry; level-3+ headings sit inside it.
-    A fence or HTML comment that never closes is a finding (it would hide every
-    entry after it).
+    or `+`, up to 3 spaces of indent; the names are case-insensitive and may
+    be bold: `- **Test:** …` or `- **Test**: …`), each exactly once per entry
+    with a non-empty value. The names are fixed (no aliases: `Tests:` or
+    `Function:` is just another bullet). Other bullets and lines in an entry
+    are free prose. A field bullet OUTSIDE an entry is a finding (a malformed
+    entry heading would otherwise hide its rule silently).
+  * `Test:` is either exactly `no test yet` (the whole value), or one or more
+    items separated by `;`, each a test file path from the repository root in
+    backticks, optionally followed by a test name in backticks: each file must
+    exist (a regular file inside the repository), and each name, when given,
+    must appear verbatim in its file.
+  * A fence or HTML comment that never closes is a finding (it would hide
+    every entry after it).
 
 A record's `rules_touched` (artifacts/phase-approval.json, or the completion
 record) is OPTIONAL: absent or null is accepted. When present it is an array of
@@ -98,7 +108,15 @@ FIELDS = ("incident", "implemented in", "test")
 ID_RE = r"[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*"
 HEADING_RE = re.compile(r"^ {0,3}(?P<hashes>#{1,6})(?:[ \t]+(?P<title>.*?))?(?:[ \t]+#+)?[ \t]*$")
 ENTRY_RE = re.compile(rf"^(?P<id>{ID_RE})[ \t]+(?:—|–|-)[ \t]+(?P<rule>\S.*)$")
-FIELD_RE = re.compile(r"^ {0,3}[-*+][ \t]+(?P<name>incident|implemented in|test)[ \t]*:"
+# A heading that is not an entry but reads like a mistyped one (`RULE 2 — x`,
+# `rule-1 — x`): a short leading token with a digit, then a dash separator.
+LOOKS_ENTRY_RE = re.compile(r"^(?P<tok>[A-Za-z][A-Za-z0-9]*(?:[ _-]+[A-Za-z0-9]+){0,2})"
+                            r"[ \t]+(?:—|–|-)[ \t]+\S")
+_FIELD_NAMES = r"incident|implemented[ \t]+in|test"
+# `- Name: v`, `- **Name:** v`, `- **Name**: v` (or __ for **); never `Tests:`.
+FIELD_RE = re.compile(r"^ {0,3}[-*+][ \t]+(?:"
+                      rf"(?P<b>\*\*|__)(?P<bname>{_FIELD_NAMES})(?:[ \t]*:(?P=b)|(?P=b)[ \t]*:)"
+                      rf"|(?P<name>{_FIELD_NAMES})[ \t]*:)"
                       r"[ \t]*(?P<value>.*?)[ \t]*$", re.IGNORECASE)
 FENCE_OPEN_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 FENCE_CLOSE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})[ \t]*$")
@@ -122,10 +140,11 @@ class RulesError(Exception):
 
 
 class Entry:
-    def __init__(self, rid: str, rule: str, line: int):
+    def __init__(self, rid: str, rule: str, line: int, level: int = 2):
         self.id = rid
         self.rule = rule
         self.line = line
+        self.level = level
         self.fields: dict[str, tuple[str, int]] = {}
 
     def as_json(self) -> dict:
@@ -150,6 +169,8 @@ def parse(text: str) -> tuple[list[Entry], list[tuple[int, str]]]:
     current: Entry | None = None
     fence: tuple[str, int, int] | None = None   # (char, length, opened at line)
     comment_at = 0
+    entry_level = 0          # fixed by the first entry heading: 2 or 3 for the whole file
+    section_level = 0        # level of the newest non-entry heading (0: the preamble)
     for line_no, line in enumerate(text.splitlines(), start=1):
         if fence is not None:
             cm = FENCE_CLOSE_RE.match(line)
@@ -172,28 +193,46 @@ def parse(text: str) -> tuple[list[Entry], list[tuple[int, str]]]:
         hm = HEADING_RE.match(line)
         if hm:
             level = len(hm.group("hashes"))
-            if level == 1:
-                current = None
-            elif level == 2:
-                title = (hm.group("title") or "").strip()
-                em = ENTRY_RE.match(title)
-                if em:
-                    current = Entry(em.group("id"), em.group("rule").strip(), line_no)
-                    entries.append(current)
-                else:
-                    current = None
-                    findings.append((line_no, "a level-2 heading that is not an entry: write "
-                                              "`## <ID> — <the rule in one sentence>` (ID: capital "
-                                              "letters, digits and hyphens, starting with a letter)"
-                                              f"; got {title[:80]!r}"))
-            continue
-        if current is None:
+            title = (hm.group("title") or "").strip()
+            em = ENTRY_RE.match(title) if level in (2, 3) else None
+            if em and entry_level and level != entry_level:
+                if level < entry_level:
+                    findings.append((line_no, f"{em.group('id')}: entries in this register are "
+                                              f"level-{entry_level} headings (the first is on "
+                                              f"line {entries[0].line}); this one is level "
+                                              f"{level}"))
+                em = None   # a deeper one is content of the entry above (as in v0.26.0)
+            if em:
+                entry_level = entry_level or level
+                current = Entry(em.group("id"), em.group("rule").strip(), line_no, level)
+                entries.append(current)
+                continue
+            if current is not None and level > current.level:
+                continue     # a deeper heading stays inside the entry
+            current = None   # a section heading not deeper than the entry ends it
+            section_level = level
+            lm = LOOKS_ENTRY_RE.match(title) if level in (2, 3) else None
+            if lm and any(c.isdigit() for c in lm.group("tok")):
+                findings.append((line_no, "a heading that reads like an entry but is not one: "
+                                          "write `## <ID> — <the rule in one sentence>` (ID: "
+                                          "capital letters, digits and hyphens, starting with "
+                                          f"a letter); got {title[:80]!r}"))
             continue
         fm = FIELD_RE.match(line)
+        if fm and current is None and section_level < 2:
+            continue     # the preamble or a level-1 section: prose about the format
+        if fm and current is None:
+            shown = re.sub(r"[ \t]+", " ", (fm.group("bname") or fm.group("name")))
+            findings.append((line_no, f"a `{shown}:` field outside an entry; is the heading above "
+                                      "it meant to be `## <ID> — <the rule in one sentence>` (ID: "
+                                      "capital letters, digits and hyphens, starting with a "
+                                      "letter)?"))
+            continue
         if fm:
-            name = re.sub(r"[ \t]+", " ", fm.group("name").lower())
+            written = fm.group("bname") or fm.group("name")
+            name = re.sub(r"[ \t]+", " ", written.lower())
             if name in current.fields:
-                findings.append((line_no, f"{current.id}: `{fm.group('name')}:` appears twice "
+                findings.append((line_no, f"{current.id}: `{written}:` appears twice "
                                           f"(first on line {current.fields[name][1]})"))
             else:
                 current.fields[name] = (fm.group("value"), line_no)
@@ -206,15 +245,43 @@ def parse(text: str) -> tuple[list[Entry], list[tuple[int, str]]]:
     return entries, findings
 
 
+def _is_no_test(value: str) -> bool:
+    return value.strip().rstrip(".").strip().strip("`").strip().lower() == NO_TEST
+
+
+def _split_items(value: str) -> list[str]:
+    """`Test:` items: the value split at `;` outside code spans."""
+    items, start = [], 0
+    spans = [(m.start(), m.end()) for m in CODE_SPAN_RE.finditer(value)]
+    for i, ch in enumerate(value):
+        if ch != ";" or any(a <= i < b for a, b in spans):
+            continue
+        items.append(value[start:i])
+        start = i + 1
+    items.append(value[start:])
+    return [it.strip() for it in items]
+
+
 def _test_findings(repo: Path, entry: Entry) -> list[tuple[int, str]]:
     value, line_no = entry.fields["test"]
-    if value.strip().rstrip(".").strip().strip("`").strip().lower() == NO_TEST:
+    if _is_no_test(value):
         return []
-    spans = _code_spans(value)
+    out: list[tuple[int, str]] = []
+    items = _split_items(value)
+    # An item with no code span is prose (`… (covers the cart; checkout too)`),
+    # not a test, unless no item names one: then the value says nothing checkable.
+    with_spans = [it for it in items if CODE_SPAN_RE.search(it)]
+    for item in with_spans or [value.strip()]:
+        out.extend(_item_findings(repo, entry, item, line_no))
+    return out
+
+
+def _item_findings(repo: Path, entry: Entry, item: str, line_no: int) -> list[tuple[int, str]]:
+    spans = _code_spans(item)
     if not spans:
-        return [(line_no, f"{entry.id}: `Test:` must be a test file in backticks (optionally "
-                          f"followed by a test name in backticks) or exactly `{NO_TEST}`; got "
-                          f"{value[:80]!r}")]
+        return [(line_no, f"{entry.id}: each `Test:` item (items separated by `;`) must be a test "
+                          "file in backticks, optionally followed by a test name in backticks; "
+                          f"or the whole value is exactly `{NO_TEST}`; got {item[:80]!r}")]
     rel = spans[0].strip()
     name = spans[1] if len(spans) > 1 else None
     if name is not None and not name.strip():

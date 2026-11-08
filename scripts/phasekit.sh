@@ -14,6 +14,15 @@
 #   phasekit roadmap next|done|init  the OPTIONAL docs/ROADMAP.md (see scripts/phasekit-roadmap.py)
 #   phasekit rules check|init     (v0.26.0) the project rules register docs/project/RULES.md
 #                                 (see scripts/phasekit-rules.py)
+#   phasekit tests [report] [--json] [--failures FILE] [--session-bound S] [--measure FILE]
+#                                 (v0.27.0) the test-suite hygiene measure: per-tier time vs
+#                                 budget, waiting and slowest files, never-failed files,
+#                                 criterion-named suites, evidence weight. A map, never a
+#                                 gate: a report exits 0 over budget or not
+#   phasekit tests measure [--timeout S] [--out FILE]
+#                                 run each test file the project's gate declares ALONE and
+#                                 record wall and CPU time (a supervisor's nightly run;
+#                                 see scripts/phasekit-tests.py)
 #   phasekit verify [--tier fast|full]  run THIS project's gate exactly as the loop's
 #                                 commit gate will; a green verdict is reused by it
 #   phasekit verify --in-runner [--tier auto|fast|full] [--json] [--timeout S]
@@ -429,6 +438,23 @@ elif d.get("invalid"):
     # act on the project, not the working directory, unless the caller named one
     if (( $# > 0 )) && [[ -n "$root" && " $* " != *" --repo"* ]]; then set -- "$@" --repo "$root"; fi
     exec "${PHASEKIT_PYTHON:-python3}" "$tool_dir/phasekit-rules.py" "$@"
+    ;;
+  tests)
+    # v0.27.0: the test-suite hygiene measure. Its own verb, not a `check`
+    # flag: `check` is a pass/fail drift check whose codes a supervisor reads
+    # as health, and a measure never fails. Run from the project's engine
+    # (pinned: its pin's, as `rules`; an engine older than v0.27.0 has no
+    # measure, so this CLI's own copy serves — it reads the project, never
+    # the engine), against the project root, not the working directory.
+    shift
+    root="$(require_project tests)"
+    tool_dir="$(rules_tool_dir "$root")"
+    if [[ ! -f "$tool_dir/phasekit-tests.py" ]]; then
+      echo "phasekit tests: note — this project's engine has no test-suite measure; using $SCRIPT_DIR/phasekit-tests.py" >&2
+      tool_dir="$SCRIPT_DIR"
+    fi
+    if [[ " $* " != *" --repo"* ]]; then set -- "$@" --repo "$root"; fi
+    exec "${PHASEKIT_PYTHON:-python3}" "$tool_dir/phasekit-tests.py" "$@"
     ;;
   roadmap)
     shift

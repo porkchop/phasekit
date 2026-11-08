@@ -78,6 +78,14 @@ fi
 # ============================================================================
 PHASEKIT_VERIFY_CONFIGURED=0
 
+# The test-suite hygiene measure (phasekit v0.27.0, `phasekit tests measure`)
+# reads two lines here as TEXT to run one test file alone; this gate never uses
+# them. phasekit never guesses a runner, so they start commented out: name YOUR
+# runner's one-file command and your test files, single-quoted, e.g.
+# PHASEKIT_TEST_FILE_CMD='npx vitest run {file}'
+# PHASEKIT_TEST_FILES='tests/**/*.test.ts'
+# docs/QUALITY_GATES.md "The hygiene measure".
+
 if [[ "$PHASEKIT_VERIFY_CONFIGURED" != "1" ]]; then
   echo "phasekit-verify.sh: STUB MODE — no checks configured." >&2
   echo "  Edit scripts/phasekit-verify.sh, enable real checks, set" >&2

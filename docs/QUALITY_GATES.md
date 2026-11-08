@@ -98,13 +98,29 @@ The rule is adopted, not enforced (a refusal is a stall). After the gate the loo
 
 A suite that only grows stops being run. These rules keep it fast and honest (foundry-meta `designs/DESIGN-test-suite-hygiene.md`, decided 2026-11-07). They are adopted, not enforced: phasekit refuses no landing over them, review holds them, and where a supervisor acts on one the rule says so.
 
-- **Budgets become work.** The per-commit tier stays within 60 s ("Verify budget" below); the full tier within 25 % of the session bound and under the in-session tool limit. A project never raises its own budget. phasekit measures the tiers and prints the advisory; a supervisor turns an over-budget tier into a delegated work request. phasekit itself never refuses a slow tier.
+- **Budgets become work.** The per-commit tier stays within 60 s ("Verify budget" below); the full tier within 25 % of the session bound and under the in-session tool limit. A project never raises its own budget. phasekit measures the tiers, prints the advisory and maps the suite (`phasekit tests`, below); a supervisor turns an over-budget tier into a delegated work request. phasekit itself never refuses a slow tier.
 - **Tests retire with their criterion.** When a criterion is superseded, the same phase removes its tests or folds them into the replacement's. The SPEC stays append-only; tests do not.
 - **The full tier reaches master.** Besides completion, a nightly full-tier run on master, outside any session, files a defect on red. That run is a supervisor's; phasekit runs the full tier only at completion and at the verification sprint.
 - **No snapshot numbers as bounds.** A bound derives from the parameters under test. Anything that depends on rules or a version states that version.
 - **Tree state is the loop's job, not a test's.** A test never judges the working tree itself (a stale build, a stale record, the tree's size). The gate rebuilds what it tests before testing it, and phasekit's landing checks own the records.
 - **Browser checks share the budget.** Each has a measured time, runs one at a time, and re-runs only when a file it depends on changed.
 - **Tests do not wait on the real clock.** Drive time-dependent code with a controllable clock; a real-time wait is only for a test whose subject is time itself, and that test keeps the wait as short as its subject allows. If the product has no clock seam, adding one is part of the budget work.
+
+#### The hygiene measure (v0.27.0)
+
+`phasekit tests` is the map budget work starts from. It is a measure, not a rule: the loop never runs it, it refuses no landing, and a report exits 0 whether the suite is over budget or not (the verdict is `over_budget` in its JSON). Two verbs:
+
+- **`phasekit tests [report] [--json]`** reads what already exists. *Tier time*: the per-commit and full tier's P90 from the loop's cost ledger (`artifacts/logs/cost-ledger.json`) against the budgets above: per-commit 60 s (`PHASEKIT_VERIFY_BUDGET_SECONDS` from the caller's environment, never from the project's gate), full 25 % of the session bound (`--session-bound`, else the ledger's newest session) capped at the 600 s in-session tool limit. *Waiting* and *slowest files*, from the newest per-file results (below): a file whose wall time is high and whose CPU share is low is waiting on a real clock, and is listed first; the slowest list says how few files make 50 % and 80 % of the time. *Never failed in the logged window*: only from a supervisor's failure history (`--failures FILE`); the window is never invented, and a test that never failed is ranked for review, never deleted for that alone. *Criterion-named suites*: test files whose name, or first describe/class, is led by a criterion, phase, iteration or backlog-item label (name tests for behaviour). *Evidence weight*: tracked bytes under `artifacts/`, images and other.
+- **`phasekit tests measure`** runs each test file ALONE, one at a time, and records its wall time and the CPU time of its whole process tree under `artifacts/logs/tests-measure/`. It is expensive: a supervisor's nightly run, never a session's. It runs the project's own tests, so it runs where the gate runs, in the runner image: on a host without a container it refuses (exit 6) unless `--on-host` says that host is the right place on purpose (a suite can act on its host). phasekit never guesses a runner; the project declares it once, in its own gate `scripts/phasekit-verify.sh`, as two literal lines phasekit reads as text (the gate itself never needs them):
+
+  ```bash
+  PHASEKIT_TEST_FILE_CMD='npx vitest run {file}'   # {file} bare: phasekit quotes it
+  PHASEKIT_TEST_FILES='tests/**/*.test.ts'         # globs over tracked files
+  ```
+
+  The python-uv profile seeds `uv run pytest -q {file}`; the other profiles seed the lines commented out. With nothing declared, `measure` says so and exits 3.
+
+How to read it: start from the waiting list (a clock seam usually buys the most), then the few files that make half the time, and keep every failure the suite caught in the logged window. phasekit does not decide what "fast" means in a project's domain: the waiting thresholds are flags (`--wait-min-wall`, `--wait-max-cpu-share`) and the per-file numbers are raw. The JSON is the contract a supervisor files over-budget rows from (`contracts/interface.json` `facts.tests_measure`).
 
 ## DRY and reuse gate
 - business rules and validation logic must exist in exactly one place
@@ -124,7 +140,7 @@ A suite that only grows stops being run. These rules keep it fast and honest (fo
 - Test: `tests/pricing.test.ts` `cart and checkout read one table`
 ```
 
-Every level-2 heading is an entry: an id (capital letters, digits and hyphens, unique, never reused), the rule in one sentence, and `Incident:`, `Implemented in:` (the ONE place the rule lives) and `Test:` once each. `Test:` names a test file in backticks, optionally followed by a test name in backticks, or says exactly `no test yet`.
+A level-2 or level-3 heading of the form `<ID> — <rule>` is an entry: an id (capital letters, digits and hyphens, unique, never reused), the rule in one sentence, and `Incident:`, `Implemented in:` (the ONE place the rule lives) and `Test:` once each. `Test:` names one or more test files in backticks, each optionally followed by a test name in backticks, separated by `;` — or says exactly `no test yet`. v0.27.0 (met halfway with the first real register): any other heading is a section, so entries can be grouped (`## Placement` then `### P1 — …`); a section heading not deeper than an entry's heading ends it, a deeper one sits inside it; field names may be bold (`- **Test:** …`) but are fixed (`Tests:`, `Function:` are other bullets, which are free prose); the first entry fixes the entry level for the file (an entry-shaped heading deeper than that is content of the entry above; a shallower one is a finding); a field bullet outside an entry, under a level-2 or deeper heading, is a finding, and so is a level-2/3 heading that reads like a mistyped entry (`RULE 2 — …`), so a malformed entry heading never hides its rule (the preamble and level-1 sections may show the format freely); a `Test:` item without a code span is prose beside the tests. A v0.26.0 register (every entry at level 2) reads the same.
 
 - **When a phase adds an entry:** when it fixes a defect whose cause was a rule held in two places, or a rule nobody had written down. The fix moves the rule to one place, and the entry names that place and the test that pins it.
 - **`rules_touched`:** a phase record (`artifacts/phase-approval.json`, or the completion record) names the register ids its change touches, or `[]`. Builders report them; the reviewer checks each touched rule is kept.

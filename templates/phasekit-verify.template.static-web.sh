@@ -54,6 +54,14 @@ fi
 # Sentinel consumed by phasekit tooling: this profile seeds a real gate.
 PHASEKIT_VERIFY_CONFIGURED=1
 
+# The test-suite hygiene measure (phasekit v0.27.0, `phasekit tests measure`)
+# reads two lines here as TEXT to run one test file alone; this gate never uses
+# them. phasekit never guesses a runner, so they start commented out: name YOUR
+# runner's one-file command and your test files, single-quoted, e.g.
+# PHASEKIT_TEST_FILE_CMD='node --test {file}'
+# PHASEKIT_TEST_FILES='test/**/*.test.js'
+# docs/QUALITY_GATES.md "The hygiene measure".
+
 run() {
   echo "==> $*"
   "$@"

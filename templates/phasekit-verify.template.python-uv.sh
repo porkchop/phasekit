@@ -81,6 +81,13 @@ fi
 # Sentinel consumed by phasekit tooling: this profile seeds a real gate.
 PHASEKIT_VERIFY_CONFIGURED=1
 
+# The test-suite hygiene measure (phasekit v0.27.0, `phasekit tests measure`)
+# reads these two lines as TEXT to run one test file alone; this gate never uses
+# them. Keep them literal (single-quoted). docs/QUALITY_GATES.md "The hygiene
+# measure".
+PHASEKIT_TEST_FILE_CMD='uv run pytest -q {file}'
+PHASEKIT_TEST_FILES='tests/**/test_*.py'
+
 if [[ -n "$ARG_ERROR" ]]; then
   echo "phasekit-verify.sh: $ARG_ERROR" >&2
   exit 2

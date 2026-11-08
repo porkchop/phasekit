@@ -455,6 +455,18 @@ scripts:
     # loop runs `check` at every landing; `phasekit check` and `phasekit rules
     # check` run it on demand. Absent or empty register: passes. Stdlib only.
 
+  phasekit-tests:
+    path: scripts/phasekit-tests.py
+    required: false
+    ownership: scaffold
+    # v0.27.0 the test-suite hygiene measure (`phasekit tests`): `report`
+    # (per-tier time from the cost ledger against the budgets, the slowest and
+    # the waiting files from the newest per-file results, never-failed files
+    # from a supervisor's failure history, criterion-named suites, evidence
+    # weight; --json is facts.tests_measure) and `measure` (each declared test
+    # file run alone — a supervisor's nightly run). A measure, never a gate;
+    # imports phasekit-surface.py beside it. Stdlib only.
+
   generate-skill:
     path: scripts/generate-skill.py
     required: true

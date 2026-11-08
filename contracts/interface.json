@@ -124,10 +124,10 @@
     {
       "name": "PHASEKIT_VERIFY_BUDGET_SECONDS",
       "kind": "consumed",
-      "read_by": ["scripts/run-until-done.sh"],
+      "read_by": ["scripts/run-until-done.sh", "scripts/phasekit-tests.py"],
       "default": "60",
       "container_forwarded": false,
-      "semantics": "STANDALONE only since v0.18.0 (no PHASEKIT_SESSION_DEADLINE): seconds above which one verify run counts as over budget; after two such runs the loop prints a one-time fail-open advisory suggesting a fast tier. Under a session bound the advisory is measured instead — once per session when the full tier's P90 in the cost ledger exceeds 12.5% of the bound. Non-numeric values fall back to the default."
+      "semantics": "STANDALONE only since v0.18.0 (no PHASEKIT_SESSION_DEADLINE): seconds above which one verify run counts as over budget; after two such runs the loop prints a one-time fail-open advisory suggesting a fast tier. Under a session bound the advisory is measured instead — once per session when the full tier's P90 in the cost ledger exceeds 12.5% of the bound. Non-numeric values fall back to the default. v0.27.0: also the per-commit budget `phasekit tests` reports against (facts.tests_measure), read from the invoker's environment, never from the project's gate."
     },
     {
       "name": "VERIFY_SKIP",
@@ -517,6 +517,22 @@
       "semantics": "NOT read from the environment: a sentinel LINE inside the project-owned scripts/phasekit-verify.sh. The seeded stub carries PHASEKIT_VERIFY_CONFIGURED=0; a configured gate flips it to 1. The loop greps for it to decide light-mode eligibility, and enrich-project.py uses it to know the stub may be replaced by a stack template on upgrade."
     },
     {
+      "name": "PHASEKIT_TEST_FILE_CMD",
+      "kind": "file-sentinel",
+      "read_by": ["scripts/phasekit-tests.py"],
+      "default": "n/a — not an environment variable",
+      "container_forwarded": false,
+      "semantics": "v0.27.0. NOT read from the environment: a LINE inside the project-owned scripts/phasekit-verify.sh, `PHASEKIT_TEST_FILE_CMD='<command with {file}>'`, read as text by `phasekit tests measure` (never sourced or evaluated; the last such line wins) — the project's one declaration of how to run ONE test file. `{file}` is replaced by the file's repository-relative path, shell-quoted, and the command runs under `bash -c` from the project root. The value must be a literal (single-quoted, double-quoted without $ ` \\, or one bare word). The python-uv profile's gate seeds `uv run pytest -q {file}`; the other profiles carry it commented out, since phasekit never guesses a runner. See facts.tests_measure."
+    },
+    {
+      "name": "PHASEKIT_TEST_FILES",
+      "kind": "file-sentinel",
+      "read_by": ["scripts/phasekit-tests.py"],
+      "default": "n/a — not an environment variable",
+      "container_forwarded": false,
+      "semantics": "v0.27.0. NOT read from the environment: a LINE inside the project-owned scripts/phasekit-verify.sh, `PHASEKIT_TEST_FILES='<glob> [<glob>…]'`, read as text by `phasekit tests` — the test files `measure` runs and the report's static sections judge, as space-separated globs over tracked files (`*` `?` within a segment, `**/` across directories, `[…]`, `{a,b}`). Same literal rule as PHASEKIT_TEST_FILE_CMD. Without it the report's static sections use phasekit's own test-file selection (scripts/phasekit-surface.py) and `measure` refuses (exit 3). See facts.tests_measure."
+    },
+    {
       "name": "PHASEKIT_CHANNEL_DEFAULT",
       "kind": "internal-constant",
       "set_by": ["scripts/phasekit-channel.sh"],
@@ -818,14 +834,14 @@
     {
       "name": "logs",
       "path": "artifacts/logs/",
-      "writers": ["scripts/run-phase.sh", "scripts/phasekit-ui-check.mjs"],
+      "writers": ["scripts/run-phase.sh", "scripts/phasekit-ui-check.mjs", "scripts/phasekit-tests.py"],
       "consumers": ["operator"],
       "lifecycle": "internal — never committed (the loop unstages artifacts/logs on every commit path) and excluded from git status",
       "verdict": false,
       "transient_signal": false,
       "hidden": false,
       "internal": true,
-      "when": "v0.23.0: ui-check/<stamp>/ holds `phasekit ui-check` evidence (report.json, every screenshot, diff and replaced baseline, and the sha256 of every file the browser fetched). claude-iter-N[-retryM].jsonl (raw stream-json + stderr) and .log (rendered via phasekit-log-fmt.sh) per claude invocation. v0.18.0: also cost-ledger.json (the per-project cost model: the last 20 samples per measure — g_full, g_fast, w, m, r, pass — and the last 20 sessions with bound, lead, take-control, at_cap, heavy, exit yielded|took-control|killed; persists across sessions, read by the loop only — a supervisor reads the `phasekit-cost:` line), .deadline-yield (written when the watchdog takes control of a turn; the loop reads it; cleared at loop start), .loop-env (the loop's environment as names and truncated value hashes, never values, for `phasekit verify`'s reuse check; removed at exit), .carried-completion (the carry marker of a completion record whose landing was refused; v0.18.1: its content is the carried record's blob, so a commit that sweeps it in unchanged claims nothing), claude.pid (\"<pid> <role>\" of the model turn in flight, written by run-phase.sh and removed when the turn ends — the deadline watchdog's take-control target), v0.18.1: .completion-yield (written when the completion turn guard saw a commit land artifacts/project-complete.json during a turn on a clean tree and ended that turn; the loop reads it; cleared at loop start), .completion-guard-start (touched when a turn's guard starts; the freshness reference for .completion-yield), completion-guard.log (the guard's own log, one per project), post-completion/<stamp>/ (the bytes of paths written after the completion commit that the loop restored: tracked.patch and untracked/ — never committed), the per-subagent nudge markers and repeat clocks (.wrapup-nudge-*), and lock/tmp files of the loop's records.",
+      "when": "v0.23.0: ui-check/<stamp>/ holds `phasekit ui-check` evidence (report.json, every screenshot, diff and replaced baseline, and the sha256 of every file the browser fetched). claude-iter-N[-retryM].jsonl (raw stream-json + stderr) and .log (rendered via phasekit-log-fmt.sh) per claude invocation. v0.18.0: also cost-ledger.json (the per-project cost model: the last 20 samples per measure — g_full, g_fast, w, m, r, pass — and the last 20 sessions with bound, lead, take-control, at_cap, heavy, exit yielded|took-control|killed; persists across sessions, read by the loop only — a supervisor reads the `phasekit-cost:` line), .deadline-yield (written when the watchdog takes control of a turn; the loop reads it; cleared at loop start), .loop-env (the loop's environment as names and truncated value hashes, never values, for `phasekit verify`'s reuse check; removed at exit), .carried-completion (the carry marker of a completion record whose landing was refused; v0.18.1: its content is the carried record's blob, so a commit that sweeps it in unchanged claims nothing), claude.pid (\"<pid> <role>\" of the model turn in flight, written by run-phase.sh and removed when the turn ends — the deadline watchdog's take-control target), v0.18.1: .completion-yield (written when the completion turn guard saw a commit land artifacts/project-complete.json during a turn on a clean tree and ended that turn; the loop reads it; cleared at loop start), .completion-guard-start (touched when a turn's guard starts; the freshness reference for .completion-yield), completion-guard.log (the guard's own log, one per project), post-completion/<stamp>/ (the bytes of paths written after the completion commit that the loop restored: tracked.patch and untracked/ — never committed), the per-subagent nudge markers and repeat clocks (.wrapup-nudge-*), and lock/tmp files of the loop's records. v0.27.0: tests-measure/<UTC stamp>.json, the per-file results `phasekit tests measure` writes (the newest 10 kept; read by `phasekit tests`; facts.tests_measure.results_file). `phasekit tests` also READS cost-ledger.json (its g_fast/g_full samples and the newest session's bound_s), never writes it.",
       "keys": []
     },
     {"name": "design-review", "path": "artifacts/design-review/<iteration>-<phase>.json", "writers": ["session"], "consumers": ["supervisor", "planner"], "lifecycle": "durable — tracked and committed with the phase that ran the review; small (findings only: the screenshots it judged stay under the ignored artifacts/logs/ui-check/ and are named by sha256)", "verdict": false, "transient_signal": false, "hidden": false, "when": "v0.23.0. Written by the design-reviewer agent on a phase that touches UI (its planned or changed paths overlap `ui_paths` in docs/project/ui-pages.json) when docs/project/DESIGN_SYSTEM.md exists: {schema 1, iteration, phase, pages [{id, viewport, screenshot_sha256}], findings [{severity MAJOR|MINOR|NOTE, page, viewport, what, rule, suggestion}], verdict approve|changes-suggested}. Advisory: never a gate verdict; a MAJOR finding the phase does not fix is carried in the phase's `deferrals`. v0.24.0: a UI-touching landing without it prints one `ADVISORY design-review:` line and records `ui_landing.design_review.status` = missing (see the visual-changes convention); never a refusal.", "keys": ["schema", "iteration", "phase", "pages", "findings", "verdict"]},
@@ -1026,7 +1042,7 @@
       "marker": "docs/project/RULES.md",
       "declared_in": ["docs/QUALITY_GATES.md", "CONTINUE_PROMPT.txt", "scripts/phasekit-rules.py", "scripts/run-until-done.sh", ".claude/agents/code-reviewer.md", ".claude/agents/strategy-planner.md", ".claude/agents/project-lead.md"],
       "consumers": ["session", "supervisor", "scripts/run-until-done.sh"],
-      "semantics": "v0.26.0 (foundry-meta designs/DESIGN-test-suite-hygiene.md §8.3). An OPTIONAL, PROJECT-OWNED rules register `docs/project/RULES.md` (bootstrap-frozen: seeded once from templates/project-rules.template.md with its format and no entries, never overwritten; `phasekit rules init` seeds it where it is absent, e.g. a pinned project). Every level-2 heading outside fenced code blocks (CommonMark fence rules) and HTML comments is an ENTRY: `## <ID> — <the rule in one sentence>` (ID = `[A-Z][A-Z0-9]*(-[A-Z0-9]+)*`; the separator an em dash, an en dash or a hyphen with whitespace each side; the rule non-empty), followed by the top-level bullets (`-`, `*` or `+`, up to 3 spaces of indent; names case-insensitive) `- Incident: …`, `- Implemented in: …` and `- Test: …`, each exactly once with a non-empty value; other lines in an entry are free prose, a level-1 heading ends the entry, level-3+ headings sit inside it; a leading UTF-8 BOM is tolerated. `Test:` is exactly `no test yet` (case-insensitive; backticks and a final period tolerated) or a test file path from the repository root in backticks, optionally followed by a test name in backticks; the FIRST code span is the path and the second the name, later text is free. Ids are unique and never reused. `scripts/phasekit-rules.py check [--repo DIR] [--record FILE]... [--json]` is the one checker; FINDINGS (exit 3, one line each on stdout, `--json` {schema 1, file, absent, entries [{id, rule, line, test}], findings [<line>]}): a level-2 heading that is not an entry, a missing, empty or repeated field, a duplicate id, a Test that is neither form, a test path that is absolute, holds `..`, resolves outside the repository, does not exist or is not a regular file, a test name not found verbatim in that file, a fence or HTML comment that never closes; and, per --record, a `rules_touched` present and not null that is not an array, an item that is not a non-empty string, or an id (trimmed) that is not an entry heading of the register (an entry with other findings still counts as having its id; no register = no ids). Absent register, or one with no entries: no findings. `rules_touched` (OPTIONAL in artifacts/phase-approval.json and artifacts/project-complete.json; absent or null = accepted, so a session that predates it is not refused) = the register ids this phase's change touches, or []. The LOOP runs `check` with each record the landing carries (a never-landed approval; a never-landed completion record that rides) at EVERY landing of a verdict, after the roadmap check and before the gate; exit 3 REFUSES the landing through phase-verify-failed.json (label `project rules register (docs/project/RULES.md)`, `commit_refusal`, the breaker bounding it); `phasekit verify` reports the same tree RED without running the gate, and a wrap-up keeps the verdicts out and spends no second breaker attempt on an unchanged refusal. Silent, never a refusal, when the register is absent and no record names `rules_touched` (not even run); a missing checker or any other exit is a WARN, never a refusal. `phasekit check` (both layouts) runs the same check after the layout's own (exit 8 on findings when that check was otherwise clean) and `phasekit rules check|init` runs the tool. It is phasekit's check, never a project test (the project-tests convention). Agents: code-reviewer and every fresh-context review round answer two checks — does this behaviour already exist elsewhere in the repo (reused, or the record says why not), and does the change keep every register rule it touches; a NO without a reason is a MAJOR finding. strategy-planner and project-lead read the register before planning; builders report the ids they touched and the record carries them in `rules_touched`."
+      "semantics": "v0.26.0 (foundry-meta designs/DESIGN-test-suite-hygiene.md §8.3). An OPTIONAL, PROJECT-OWNED rules register `docs/project/RULES.md` (bootstrap-frozen: seeded once from templates/project-rules.template.md with its format and no entries, never overwritten; `phasekit rules init` seeds it where it is absent, e.g. a pinned project). Outside fenced code blocks (CommonMark fence rules) and HTML comments, a level-2 or level-3 heading (level 3 since v0.27.0) of the form `<ID> — <the rule in one sentence>` is an ENTRY (ID = `[A-Z][A-Z0-9]*(-[A-Z0-9]+)*`; the separator an em dash, an en dash or a hyphen with whitespace each side; the rule non-empty), followed by the top-level bullets (`-`, `*` or `+`, up to 3 spaces of indent; names case-insensitive; v0.27.0: the name may be bold, `- **Test:** …` or `- **Test**: …`, with ** or __) `- Incident: …`, `- Implemented in: …` and `- Test: …`, each exactly once with a non-empty value. The names are fixed — no aliases (`Tests:`, `Function:` are other bullets); other bullets and lines in an entry are free prose. v0.27.0: every other heading is a SECTION heading, never a finding; a level-1 heading, and any non-entry heading not deeper than the current entry's heading, ends the entry; a deeper non-entry heading sits inside it. The FIRST entry fixes the entry level for the file: an entry-shaped heading deeper than it is content of the entry above (as in v0.26.0), a shallower one is a finding. A field bullet outside any entry whose nearest heading is level 2 or deeper is a finding (`a `<Field>:` field outside an entry; is the heading above it meant to be `## <ID> — …`?`); in the preamble or a level-1 section it is prose. A level-2/3 non-entry heading whose title opens with a short token containing a digit and then a dash separator (`RULE 2 — …`, `rule-1 — …`) is a finding (`a heading that reads like an entry but is not one`). A leading UTF-8 BOM is tolerated. `Test:` is exactly `no test yet` as the WHOLE value (case-insensitive; backticks and a final period tolerated), or one or more ITEMS separated by `;` outside code spans (v0.27.0), each a test file path from the repository root in backticks, optionally followed by a test name in backticks; in each item the FIRST code span is the path and the second the name, later text is free; an item with no code span is prose and is not checked, unless no item has one (then the value is a finding). Ids are unique and never reused. `scripts/phasekit-rules.py check [--repo DIR] [--record FILE]... [--json]` is the one checker; FINDINGS (exit 3, one line each on stdout, `--json` {schema 1, file, absent, entries [{id, rule, line, test}], findings [<line>]}): a field bullet outside an entry (v0.27.0; before it, a level-2 heading that was not an entry), a missing, empty or repeated field, a duplicate id, a Test item that is neither form, a test path that is absolute, holds `..`, resolves outside the repository, does not exist or is not a regular file, a test name not found verbatim in that file, a fence or HTML comment that never closes; and, per --record, a `rules_touched` present and not null that is not an array, an item that is not a non-empty string, or an id (trimmed) that is not an entry heading of the register (an entry with other findings still counts as having its id; no register = no ids). Absent register, or one with no entries: no findings. `rules_touched` (OPTIONAL in artifacts/phase-approval.json and artifacts/project-complete.json; absent or null = accepted, so a session that predates it is not refused) = the register ids this phase's change touches, or []. The LOOP runs `check` with each record the landing carries (a never-landed approval; a never-landed completion record that rides) at EVERY landing of a verdict, after the roadmap check and before the gate; exit 3 REFUSES the landing through phase-verify-failed.json (label `project rules register (docs/project/RULES.md)`, `commit_refusal`, the breaker bounding it); `phasekit verify` reports the same tree RED without running the gate, and a wrap-up keeps the verdicts out and spends no second breaker attempt on an unchanged refusal. Silent, never a refusal, when the register is absent and no record names `rules_touched` (not even run); a missing checker or any other exit is a WARN, never a refusal. `phasekit check` (both layouts) runs the same check after the layout's own (exit 8 on findings when that check was otherwise clean) and `phasekit rules check|init` runs the tool. It is phasekit's check, never a project test (the project-tests convention). Agents: code-reviewer and every fresh-context review round answer two checks — does this behaviour already exist elsewhere in the repo (reused, or the record says why not), and does the change keep every register rule it touches; a NO without a reason is a MAJOR finding. strategy-planner and project-lead read the register before planning; builders report the ids they touched and the record carries them in `rules_touched`."
     },
     {
       "name": "loop-commit-trailers",
@@ -1523,6 +1539,62 @@
         "tests/test_land_in_runner.py::TheSurfaceIsDeclared"
       ]
     },
+    "tests_measure": {
+      "summary": "v0.27.0 (foundry-meta designs/DESIGN-test-suite-hygiene.md rule 10, §8.2, §8.4). `phasekit tests`: the test-suite hygiene MEASURE — the map a budget row (D1: a supervisor files a delegated row when a tier is over budget) starts from. A measure, never a rule: it never refuses a landing, never turns a gate red, is never run by the loop, and writes nothing but `measure`'s results file. Two verbs. `report` (the default) reads only what already exists: the loop's cost ledger, the newest results file, the tracked tree and, when given, the supervisor's failure history. `measure` runs each test file the project's gate declares ALONE, one at a time, and records its wall time and the CPU time of its whole child tree (os.wait4 rusage of the `bash -c` child) — expensive, a supervisor's nightly run (design D3), never a session's. Served by scripts/phasekit-tests.py from the project's engine (pinned: the pin's engine; an engine without it: the CLI's own copy, with a note), always against the project root.",
+      "cli": "phasekit tests [report] [--json] [--measure FILE] [--failures FILE] [--session-bound S] [--top N] [--wait-min-wall S] [--wait-max-cpu-share F] | phasekit tests measure [--timeout S] [--out FILE] [--on-host]",
+      "declaration": "The project's ONE declaration, in its own gate scripts/phasekit-verify.sh, read as text: `PHASEKIT_TEST_FILE_CMD='<command with {file}>'` and `PHASEKIT_TEST_FILES='<glob> …'` (env entries of kind file-sentinel). {file} is written bare: phasekit shell-quotes the file name (a name led by `-` is passed as ./name), and a {file} inside quotes is refused as a declaration problem. Nothing declared: `measure` says so and exits 3; it never guesses a runner.",
+      "budgets": {
+        "per_commit": "PHASEKIT_VERIFY_BUDGET_SECONDS from the invoker's environment, else 60 s (the loop's ceiling) — never from the project's gate",
+        "full": "25% of the session bound (--session-bound, else the newest cost-ledger session's bound_s), capped at the 600 s in-session tool limit; the tool limit alone when no bound is known",
+        "measured": "the nearest-rank P90 of the cost ledger's samples (g_fast per-commit, g_full full), floored, as the loop takes it; over_budget = P90 > budget"
+      },
+      "schema": "phasekit-tests-report/1",
+      "json_keys": [
+        "schema",
+        "project",
+        "generated_at",
+        "head",
+        "tiers",
+        "measure",
+        "waiting",
+        "slowest",
+        "never_failed",
+        "criterion_named",
+        "evidence"
+      ],
+      "sections": {
+        "tiers": "{source, available, reason, session_bound_s, session_bound_from, per_commit, full}; per tier {measure, samples, budget_s, budget_basis, p90_s, median_s, last_s, over_budget, over_by_s} — the measured fields and over_budget are null with no samples",
+        "measure": "{available, reason} when there is no results file; else {available: true, file, measured_at, head, dirty, command, files, total_wall_s, did_not_pass: [file], notes}",
+        "waiting": "{available, min_wall_s, max_cpu_share, files: [{file, wall_s, cpu_s, cpu_share, idle_s, timed_out}]} — files run alone for at least min_wall_s whose CPU is at most max_cpu_share of their wall time (defaults 2 s, 0.5), most idle (wall - cpu) first",
+        "slowest": "{available, of_files, total_wall_s, files_for_50pct, files_for_80pct, files: [{file, wall_s, share}]} — the top N (--top, default 10) by wall time; the 50/80 counts are the fewest files whose summed solo time reaches that share",
+        "never_failed": "{available: false, reason} without --failures; else {available: true, source, window {from, to}, gate_runs, test_files, failed_files, failed_not_current: [file], count, share, files: [file]} — a ranking for review, never by itself a reason to delete a test",
+        "criterion_named": "{pattern, test_files, basis, count, files: [{file, by: name|describe|class, label}]} — the file's name (minus test_/.test/.spec and the extension), else its first describe(...) title (JS/TS) or first class (Python, minus Test/Tests), led by an AC / phase / iteration / roadmap label (`pattern`)",
+        "evidence": "{dir: \"artifacts/\", files, bytes, images {files, bytes}, other {files, bytes}, largest: [{file, bytes}]} — tracked files only (git's index), sizes from git"
+      },
+      "results_file": "artifacts/logs/tests-measure/<UTC stamp>.json (newest 10 kept) or --out FILE: {schema: 1, kind: \"phasekit-tests-measure\", measured_at, head, dirty, source, command, globs, timeout_s, cpus, total_wall_s, files: [{file, wall_s, cpu_s, exit_code (null when timed out), timed_out, tail}]}",
+      "failures_file": "--failures FILE, written by the supervisor from its session logs: {schema: 1, window: {from, to} (non-empty strings), gate_runs (integer >= 0), failed_files: {\"<repository-relative test file>\": <failures, integer >= 1>}}; anything else is exit 5",
+      "exit_codes": {
+        "0": "`report`: printed, over budget or not (the budget verdict is tiers.*.over_budget, never an exit code); `measure`: every declared file ran and the results file was written (a failing or timed-out file is a result)",
+        "2": "usage (argparse); the CLI: not inside a phasekit project",
+        "3": "`measure`: no runner declared (no gate, a missing or non-literal PHASEKIT_TEST_FILE_CMD / PHASEKIT_TEST_FILES, no {file}); nothing ran",
+        "4": "`measure`: the declared globs match no tracked file; nothing ran",
+        "5": "could not complete: not in a git repository, a --measure / --failures file unreadable or not its format, a results file that cannot be written, interrupted (SIGINT/SIGTERM: the running file's process group is killed, nothing written), phasekit-surface.py missing, an internal error",
+        "6": "`measure`: not inside a container (/.dockerenv or /run/.containerenv) and no --on-host; nothing ran (a suite can act on its host: it belongs where the gate runs, in the runner image)"
+      },
+      "proven_by": [
+        "tests/test_tests_measure.py::Declaration",
+        "tests/test_tests_measure.py::Measure",
+        "tests/test_tests_measure.py::Tiers",
+        "tests/test_tests_measure.py::PerFile",
+        "tests/test_tests_measure.py::CriterionNamed",
+        "tests/test_tests_measure.py::NeverFailed",
+        "tests/test_tests_measure.py::Evidence",
+        "tests/test_tests_measure.py::Cli",
+        "tests/test_tests_measure.py::PinnedEngine",
+        "tests/test_tests_measure.py::PinnedStore",
+        "tests/test_tests_measure.py::TheSurfaceIsDeclared"
+      ]
+    },
     "verify_breaker": {
       "summary": "The pre-commit verify breaker's phase-blocked.json `reason` when the gate failed its attempts.",
       "reason": "pre-commit verify failed repeatedly",
@@ -1619,6 +1691,17 @@
       },
       "passthrough": null
     },
+    "scripts/phasekit-tests.py": {
+      "codes": {
+        "0": "`report`: printed, over budget or not (the budget verdict is tiers.*.over_budget, never an exit code); `measure`: every declared file ran and the results file was written (a failing or timed-out file is a result)",
+        "2": "usage error (argparse): an unknown subcommand or flag, a value that is not a positive number",
+        "3": "`measure`: no runner declared (no gate, a missing or non-literal PHASEKIT_TEST_FILE_CMD / PHASEKIT_TEST_FILES, no {file}); nothing ran",
+        "4": "`measure`: the declared globs match no tracked file; nothing ran",
+        "5": "could not complete: not in a git repository, a --measure / --failures file unreadable or not its format, a results file that cannot be written, interrupted (SIGINT/SIGTERM: the running file's process group is killed, nothing written), phasekit-surface.py missing, an internal error",
+        "6": "`measure`: not inside a container (/.dockerenv or /run/.containerenv) and no --on-host; nothing ran (a suite can act on its host: it belongs where the gate runs, in the runner image)"
+      },
+      "passthrough": null
+    },
     "scripts/phasekit-ui-check.mjs": {
       "codes": {
         "0": "GREEN: no RED rule on any page view (advisories may be printed), or not configured (no docs/project/ui-pages.json: nothing to check), or `init` seeded/kept the companion files",
@@ -1655,7 +1738,7 @@
         "1": "usage or I/O failure (missing target, unreadable manifest, non-canonical checkout for channel/self-update); v0.18.0 `verify`: the project's gate is RED; `scope`: nothing to answer (no base, no evidence and no commit for the phase)",
         "2": "lock contention — another enrich-project.py holds the target's lock; v0.18.0 `verify`/`scope`: usage error, not run inside a phasekit project, or `verify --tier` naming the tier that does not run now; v0.18.1 `verify`: not run — git's index is locked (the message names the index.lock path, its age and what to do; nothing was staged or run, the lock is never removed by it)",
         "3": "drift detected by the check verb (DRIFT / MISSING / TEMPLATE DRIFT); v0.18.0 `verify`: skipped — the tier's measured P90 is longer than a tool call may run (the commit gate runs it)",
-        "8": "v0.26.0, `check` only: the layout's own check was clean (0) but the project rules register has findings (scripts/phasekit-rules.py check exit 3, printed above a `RULES:` line); a non-zero code of the layout's check wins and the findings are still printed. A missing register is clean; a checker that is missing or cannot complete is a note, never a code. `rules check|init` (v0.26.0) execs scripts/phasekit-rules.py (its codes)"
+        "8": "v0.26.0, `check` only: the layout's own check was clean (0) but the project rules register has findings (scripts/phasekit-rules.py check exit 3, printed above a `RULES:` line); a non-zero code of the layout's check wins and the findings are still printed. A missing register is clean; a checker that is missing or cannot complete is a note, never a code. `rules check|init` (v0.26.0) execs scripts/phasekit-rules.py (its codes); `tests` (v0.27.0) execs scripts/phasekit-tests.py (its codes), exiting 2 itself outside a phasekit project"
       },
       "passthrough": "The CLI execs scripts/enrich-project.py, so these are the engine's codes; a missing PHASEKIT_PYTHON interpreter surfaces as the shell's 126/127. v0.19.0: in a PINNED project (.phasekit-version, no vendored loop) `check`, `upgrade`, `init`, `migrate`, `engines`, `plugin`, `docs` exec scripts/phasekit-pin.py (its codes below), and `verify`/`scope`/`loop`/`run`/`container`/`contracts` exec the pinned engine's own scripts after resolving it (6 when the pin is not installed and was not fetched). v0.20.0: `verify --in-runner` (either layout) execs scripts/phasekit-pin.py verify-runner — its codes (facts.verify_in_runner.exit_codes)."
     },

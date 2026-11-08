@@ -113,6 +113,7 @@ phasekit verify --in-runner --tier fast --json   # MEASURE the gate in the runne
 phasekit land --in-runner --json                 # LAND a stranded verdict artifact: the loop's recovery-only pass in the runner image
 phasekit scope [--phase P]       # what this iteration (or one phase) changed, from its base and evidence
 phasekit facts [--json]          # the facts phasekit declares for downstream tests
+phasekit tests [--json]          # test-suite hygiene: tier time vs budget, waiting/slowest files, criterion-named suites (`tests measure`: per-file runs, nightly)
 phasekit contracts check|refresh|status   # the cross-project contracts checker
 phasekit engines install|list|path [TAG]  # the engine store
 phasekit plugin install|status   # the Claude Code plugin

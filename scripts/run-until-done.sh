@@ -3683,9 +3683,9 @@ record_rules_register_refusal() {
   fi
   record_commit_refusal "$label" "$lines
 docs/project/RULES.md is this project's rules register (docs/QUALITY_GATES.md \"Project rules register\"), and the landing keeps it honest. Fix each line above:
-  - a malformed entry: write it as \`## <ID> — <the rule in one sentence>\` followed by the bullets \`- Incident:\`, \`- Implemented in:\` and \`- Test:\`, each once (every level-2 heading in the file is an entry);
+  - a malformed entry: write it as \`## <ID> — <the rule in one sentence>\` (or \`###\` under a section heading) followed by the bullets \`- Incident:\`, \`- Implemented in:\` and \`- Test:\`, each once (a level-2 or level-3 heading of that form is an entry; any other heading is a section); a field outside an entry means the heading above it is not of that form;
   - a duplicate id: give the newer rule a new id (ids are never reused);
-  - a Test naming a file or test that does not exist: name the test that pins the rule now (\`path/to/test-file\` in backticks, optionally its test name in backticks), or write \`no test yet\` — never delete the rule to silence this;
+  - a Test naming a file or test that does not exist: name the tests that pin the rule now (\`path/to/test-file\` in backticks, optionally its test name in backticks; several separated by \`;\`), or write \`no test yet\` — never delete the rule to silence this;
   - a rules_touched id the register does not have: add the rule to docs/project/RULES.md, or correct the id in your record.
 \`phasekit rules check\` runs the same check. THEN RE-WRITE THE RECORD YOU WROTE (same content is fine): the loop lands only a verdict written after this refusal. End your turn — the loop retries the landing."
 }
