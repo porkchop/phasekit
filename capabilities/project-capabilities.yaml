@@ -373,6 +373,11 @@ hooks:
     # between iterations, so one long turn sails past it and is killed with
     # uncommitted work. Fires once per iteration, only while the sentinel
     # exists, inert outside the loop, fail-open, never blocks a tool.
+    # v0.28.0: while NO sentinel exists it is the session clock — after a
+    # tool call, as PostToolUse additionalContext (exit 0), T-minus to the
+    # deadline and the take-control point, at the first call of an iteration
+    # then every 300 s (60 s in the last 15 min), per agent; only when the
+    # loop set PHASEKIT_SESSION_DEADLINE.
 
   compact-reanchor:
     path: .claude/hooks/compact-reanchor.sh

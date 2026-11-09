@@ -13,7 +13,12 @@ FROM node:20
 ARG TZ
 ENV TZ="$TZ"
 
-ARG CLAUDE_CODE_VERSION=latest
+# v0.28.0: PINNED, not `latest` — the runner image is rebuilt weekly, and a
+# CLI that floats under the fleet changes the harness contract unobserved
+# (2.1.319 added CLAUDE_EFFORT to every Bash tool call and silently defeated
+# the verify memo for weeks; foundry-meta REVIEW-2026-11-08 §3.1). A bump is
+# a phasekit release: change this line, rebuild, run the suite in the image.
+ARG CLAUDE_CODE_VERSION=2.1.319
 
 # Install basic development tools and iptables/ipset for firewall
 RUN apt-get update && apt-get install -y --no-install-recommends \

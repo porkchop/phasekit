@@ -25,6 +25,28 @@ fi
 
 PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
 
+# v0.28.0 (the model's clock): the session prompt ENDS with the time — the
+# deadline in UTC and as T-minus seconds, and the take-control point — so the
+# first words the model reads carry what the PostToolUse clock
+# (.claude/hooks/wrapup-nudge.sh) then keeps current. Appended, never
+# prepended: the prompt's prefix stays byte-stable for the cache. Inert
+# without a deadline (an interactive or standalone run is never timed).
+if [[ "${PHASEKIT_SESSION_DEADLINE:-}" =~ ^[0-9]+$ ]]; then
+  _clk_rem=$(( PHASEKIT_SESSION_DEADLINE - $(date +%s) ))
+  _clk_at="$(date -u -d "@$PHASEKIT_SESSION_DEADLINE" +%H:%M:%S 2>/dev/null || echo "?")"
+  if (( _clk_rem > 0 )); then
+    _clk_line="Session clock: this session's deadline is ${_clk_at} UTC, T-${_clk_rem}s ($(( (_clk_rem + 30) / 60 )) min) from now."
+  else
+    _clk_line="Session clock: this session's deadline (${_clk_at} UTC) has already passed; land what is verified and end the turn."
+  fi
+  if (( _clk_rem > 0 )) && [[ "${PHASEKIT_TAKE_CONTROL_SECONDS:-}" =~ ^[0-9]+$ && "${PHASEKIT_TAKE_CONTROL_SECONDS}" -gt 0 ]]; then
+    _clk_line="$_clk_line The loop takes control of the turn at T-${PHASEKIT_TAKE_CONTROL_SECONDS}s and lands only what is verified by then (verdict written, \`phasekit verify\` green, turn ended); work still in flight at that point is lost. Size the work to the time; the clock is repeated after tool calls."
+  fi
+  PROMPT_CONTENT="${PROMPT_CONTENT}
+
+${_clk_line}"
+fi
+
 cd "$ROOT_DIR"
 
 # Per-iteration log capture. PHASEKIT_ITER is set by run-until-done.sh; when

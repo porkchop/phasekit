@@ -36,10 +36,10 @@
     {
       "name": "PHASEKIT_SESSION_DEADLINE",
       "kind": "consumed",
-      "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh"],
+      "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh", "scripts/run-phase.sh", ".claude/hooks/wrapup-nudge.sh"],
       "default": "unset — deadline pacing disabled",
       "container_forwarded": true,
-      "semantics": "Epoch seconds of the supervisor's hard kill (the supervisor computes it as start + its MAX_MINUTES); the loop refuses to start an iteration it cannot finish before it and wraps up instead. Non-numeric values are warned about and ignored."
+      "semantics": "Epoch seconds of the supervisor's hard kill (the supervisor computes it as start + its MAX_MINUTES); the loop refuses to start an iteration it cannot finish before it and wraps up instead. Non-numeric values are warned about and ignored. v0.28.0 (the model's clock): when set and numeric, scripts/run-phase.sh ends every session prompt with a `Session clock:` line (the deadline as HH:MM:SS UTC and T-<s>s, and the take-control point from PHASEKIT_TAKE_CONTROL_SECONDS), and the wrapup-nudge hook, after a tool call while no wrap-up sentinel exists, hands the model `[phasekit clock] T-<s>s …` as PostToolUse additionalContext (exit 0, never an error): at the first tool call of each iteration (the loop clears artifacts/logs/.clock-last.* at iteration start), then every 300 s per agent, every 60 s inside the last 900 s. Unset = no clock anywhere."
     },
     {
       "name": "PHASEKIT_WRAPUP_SENTINEL",
@@ -52,7 +52,7 @@
     {
       "name": "PHASEKIT_ITERATION_MODE",
       "kind": "consumed",
-      "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh"],
+      "read_by": ["scripts/run-until-done.sh", "scripts/container-setup.sh", ".claude/hooks/wrapup-nudge.sh"],
       "default": "standard",
       "container_forwarded": true,
       "semantics": "standard | light. light is the reduced-ceremony loop for small triaged tasks (caps 2/2, no strategy-planner/red-team, escalate-not-grind); it silently downgrades to standard when the verify gate is absent or still the stub."
@@ -466,6 +466,24 @@
       "semantics": "Path of the loop's iteration-start marker file (a mktemp path, touched before every claude invocation); the Stop hook only counts verdict artifacts newer than it."
     },
     {
+      "name": "PHASEKIT_TAKE_CONTROL_SECONDS",
+      "kind": "both",
+      "read_by": ["scripts/run-phase.sh", ".claude/hooks/wrapup-nudge.sh"],
+      "set_by": ["scripts/run-until-done.sh"],
+      "default": "unset — the clock names no take-control point",
+      "container_forwarded": false,
+      "semantics": "v0.28.0 (the model's clock). Seconds before PHASEKIT_SESSION_DEADLINE at which the deadline watchdog ends a model turn that has not yielded (T_y, the `take control at T-<Ty>s` of the armed line), exported by the loop when it arms the watchdog — before its environment snapshot, so a model's `phasekit verify` sees no difference — for the session prompt's `Session clock:` line and the hook's `[phasekit clock]` context. Not honoured from the outer environment: the loop assigns it; 0 or non-numeric = not named."
+    },
+    {
+      "name": "PHASEKIT_BUILDER_TAKE_CONTROL_SECONDS",
+      "kind": "both",
+      "read_by": [".claude/hooks/wrapup-nudge.sh"],
+      "set_by": ["scripts/run-until-done.sh"],
+      "default": "0 — no earlier build-turn point",
+      "container_forwarded": false,
+      "semantics": "v0.28.0. The light-mode BUILD turn's earlier take-control point (T-<Tb>s of the armed line, 0 outside light mode), exported beside PHASEKIT_TAKE_CONTROL_SECONDS; the hook names it only when PHASEKIT_ITERATION_MODE is light."
+    },
+    {
       "name": "PHASEKIT_ENV_KEY",
       "kind": "exported",
       "read_by": ["scripts/run-until-done.sh"],
@@ -841,7 +859,7 @@
       "transient_signal": false,
       "hidden": false,
       "internal": true,
-      "when": "v0.23.0: ui-check/<stamp>/ holds `phasekit ui-check` evidence (report.json, every screenshot, diff and replaced baseline, and the sha256 of every file the browser fetched). claude-iter-N[-retryM].jsonl (raw stream-json + stderr) and .log (rendered via phasekit-log-fmt.sh) per claude invocation. v0.18.0: also cost-ledger.json (the per-project cost model: the last 20 samples per measure — g_full, g_fast, w, m, r, pass — and the last 20 sessions with bound, lead, take-control, at_cap, heavy, exit yielded|took-control|killed; persists across sessions, read by the loop only — a supervisor reads the `phasekit-cost:` line), .deadline-yield (written when the watchdog takes control of a turn; the loop reads it; cleared at loop start), .loop-env (the loop's environment as names and truncated value hashes, never values, for `phasekit verify`'s reuse check; removed at exit), .carried-completion (the carry marker of a completion record whose landing was refused; v0.18.1: its content is the carried record's blob, so a commit that sweeps it in unchanged claims nothing), claude.pid (\"<pid> <role>\" of the model turn in flight, written by run-phase.sh and removed when the turn ends — the deadline watchdog's take-control target), v0.18.1: .completion-yield (written when the completion turn guard saw a commit land artifacts/project-complete.json during a turn on a clean tree and ended that turn; the loop reads it; cleared at loop start), .completion-guard-start (touched when a turn's guard starts; the freshness reference for .completion-yield), completion-guard.log (the guard's own log, one per project), post-completion/<stamp>/ (the bytes of paths written after the completion commit that the loop restored: tracked.patch and untracked/ — never committed), the per-subagent nudge markers and repeat clocks (.wrapup-nudge-*), and lock/tmp files of the loop's records. v0.27.0: tests-measure/<UTC stamp>.json, the per-file results `phasekit tests measure` writes (the newest 10 kept; read by `phasekit tests`; facts.tests_measure.results_file). `phasekit tests` also READS cost-ledger.json (its g_fast/g_full samples and the newest session's bound_s), never writes it.",
+      "when": "v0.23.0: ui-check/<stamp>/ holds `phasekit ui-check` evidence (report.json, every screenshot, diff and replaced baseline, and the sha256 of every file the browser fetched). claude-iter-N[-retryM].jsonl (raw stream-json + stderr) and .log (rendered via phasekit-log-fmt.sh) per claude invocation. v0.18.0: also cost-ledger.json (the per-project cost model: the last 20 samples per measure — g_full, g_fast, w, m, r, pass — and the last 20 sessions with bound, lead, take-control, at_cap, heavy, exit yielded|took-control|killed; persists across sessions, read by the loop only — a supervisor reads the `phasekit-cost:` line), .deadline-yield (written when the watchdog takes control of a turn; the loop reads it; cleared at loop start), .loop-env (the loop's environment as names and truncated value hashes, never values, for `phasekit verify`'s reuse check; removed at exit), .carried-completion (the carry marker of a completion record whose landing was refused; v0.18.1: its content is the carried record's blob, so a commit that sweeps it in unchanged claims nothing), claude.pid (\"<pid> <role>\" of the model turn in flight, written by run-phase.sh and removed when the turn ends — the deadline watchdog's take-control target), v0.18.1: .completion-yield (written when the completion turn guard saw a commit land artifacts/project-complete.json during a turn on a clean tree and ended that turn; the loop reads it; cleared at loop start), .completion-guard-start (touched when a turn's guard starts; the freshness reference for .completion-yield), completion-guard.log (the guard's own log, one per project), post-completion/<stamp>/ (the bytes of paths written after the completion commit that the loop restored: tracked.patch and untracked/ — never committed), the per-subagent nudge markers and repeat clocks (.wrapup-nudge-*), and lock/tmp files of the loop's records. v0.28.0: .clock-last.<main|agent id> (the session clock's per-agent cadence markers; cleared at iteration start) and .memo-model-runs (one line per model `phasekit verify` this session, `reusable` or `shown <names>`; removed at loop start, read at exit for the `phasekit-memo:` line). v0.27.0: tests-measure/<UTC stamp>.json, the per-file results `phasekit tests measure` writes (the newest 10 kept; read by `phasekit tests`; facts.tests_measure.results_file). `phasekit tests` also READS cost-ledger.json (its g_fast/g_full samples and the newest session's bound_s), never writes it.",
       "keys": []
     },
     {"name": "design-review", "path": "artifacts/design-review/<iteration>-<phase>.json", "writers": ["session"], "consumers": ["supervisor", "planner"], "lifecycle": "durable — tracked and committed with the phase that ran the review; small (findings only: the screenshots it judged stay under the ignored artifacts/logs/ui-check/ and are named by sha256)", "verdict": false, "transient_signal": false, "hidden": false, "when": "v0.23.0. Written by the design-reviewer agent on a phase that touches UI (its planned or changed paths overlap `ui_paths` in docs/project/ui-pages.json) when docs/project/DESIGN_SYSTEM.md exists: {schema 1, iteration, phase, pages [{id, viewport, screenshot_sha256}], findings [{severity MAJOR|MINOR|NOTE, page, viewport, what, rule, suggestion}], verdict approve|changes-suggested}. Advisory: never a gate verdict; a MAJOR finding the phase does not fix is carried in the phase's `deferrals`. v0.24.0: a UI-touching landing without it prints one `ADVISORY design-review:` line and records `ui_landing.design_review.status` = missing (see the visual-changes convention); never a refusal.", "keys": ["schema", "iteration", "phase", "pages", "findings", "verdict"]},
@@ -1114,7 +1132,7 @@
       "marker": "phasekit-cost:",
       "declared_in": ["scripts/run-until-done.sh", "docs/EXECUTION_MODES.md"],
       "consumers": ["supervisor"],
-      "semantics": "v0.18.0. Lines the loop prints to its stdout (the supervisor's session log) — the single source of the session-efficiency numbers; a supervisor never computes them a second time. (1) At arm: `deadline watchdog: armed — sentinel at T-<L>s, last-resort commit at T-<LR>s (span <S>s), take control at T-<Ty>s[ (build turn T-<Tb>s)]` — the lead in force; a supervisor arms no lead of its own. (2) `phasekit-cost: <one-line JSON>` {schema: 1, mode, bound_s, lead_s, take_control_s, lead_uncapped_s, lead_cap_s, at_cap, heavy, heavy_in_previous_4, p90_s: {g_full, g_fast, w, m, r, pass} (null = no sample; the lead then used a prior), samples: {measure: count}}. `heavy` = the full tier's measured P90 over 12.5% of the bound, or the uncapped lead over the cap (only once the full tier has a sample) — the fork-F4 fact; the supervisor's threshold is 2 of the last 5 sessions (heavy_in_previous_4 + this one). (3) `deadline watchdog: took control — …` when the watchdog ended a model turn at the take-control point (the watchdog's own log says `took control at T-<Ty>s`)."
+      "semantics": "v0.18.0. Lines the loop prints to its stdout (the supervisor's session log) — the single source of the session-efficiency numbers; a supervisor never computes them a second time. (1) At arm: `deadline watchdog: armed — sentinel at T-<L>s, last-resort commit at T-<LR>s (span <S>s), take control at T-<Ty>s[ (build turn T-<Tb>s)]` — the lead in force; a supervisor arms no lead of its own. (2) `phasekit-cost: <one-line JSON>` {schema: 1, mode, bound_s, lead_s, take_control_s, lead_uncapped_s, lead_cap_s, at_cap, heavy, heavy_in_previous_4, p90_s: {g_full, g_fast, w, m, r, pass} (null = no sample; the lead then used a prior), samples: {measure: count}}. `heavy` = the full tier's measured P90 over 12.5% of the bound, or the uncapped lead over the cap (only once the full tier has a sample) — the fork-F4 fact; the supervisor's threshold is 2 of the last 5 sessions (heavy_in_previous_4 + this one). (3) `deadline watchdog: took control — …` when the watchdog ended a model turn at the take-control point (the watchdog's own log says `took control at T-<Ty>s`). (4) v0.28.0, at exit: `phasekit-memo: <one-line JSON>` {schema: 1, loop_hits, loop_misses, model_runs, model_reusable, model_shown_vars: [<names>]} — the verify memo's facts for the session: loop gate runs that reused a memo vs ran, the model's `phasekit verify` runs, how many of those were memoisable, and the environment NAMES (never values) that made the others not; printed only when any count is non-zero, and kept as `memo` on the session's cost-ledger sample. The audit's hit rate = loop_hits / (loop_hits + loop_misses)."
     }
   ],
   "facts": {

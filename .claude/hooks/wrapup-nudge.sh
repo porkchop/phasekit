@@ -29,8 +29,12 @@
 # Load-bearing properties, in the require-verdict.sh mold:
 #
 #   (a) CHEAP ON THE HAPPY PATH. Two env tests and one -f test per tool call,
-#       nothing else, no file created. The sentinel exists for at most the
-#       last few minutes of a session.
+#       nothing else, no file created, when nothing can be said: no sentinel
+#       and no deadline (an interactive session), or a PreToolUse call with
+#       no sentinel (the clock never speaks before a tool). The payload is
+#       parsed (jq) only past those tests. The sentinel exists for at most
+#       the last few minutes of a session; the clock (v0.28.0) speaks on a
+#       cadence and costs one stat per PostToolUse call between ticks.
 #
 #   (b) ONCE PER ITERATION, PER AGENT (v0.18.0). The first nudge writes a
 #       marker; while the marker is fresh (newer than the loop's own
@@ -82,8 +86,14 @@ _payload="$(cat 2>/dev/null)" || _payload=""
 # variable the loop honours (contracts/interface.json: PHASEKIT_WRAPUP_SENTINEL).
 _sentinel="${PHASEKIT_WRAPUP_SENTINEL:-$PHASEKIT_ARTIFACTS_DIR/wrapup-requested}"
 
-# --- the happy path: no wrap-up requested -----------------------------------
-[[ -f "$_sentinel" ]] || exit 0
+# --- the happy path: nothing to say ------------------------------------------
+# No sentinel and no deadline: an interactive session, never nagged, never
+# timed. No sentinel on a PreToolUse call: the clock only speaks after a tool
+# (property (a): the payload is not even parsed here).
+if [[ ! -f "$_sentinel" ]]; then
+  [[ "${PHASEKIT_SESSION_DEADLINE:-}" =~ ^[0-9]+$ ]] || exit 0
+  [[ "$_payload" == *PostToolUse* ]] || exit 0
+fi
 
 # --- who is asking ------------------------------------------------------------
 # A subagent's calls carry agent_id; the main agent's carry none. Anything
@@ -95,6 +105,50 @@ if command -v jq >/dev/null 2>&1 && [[ -n "$_payload" ]]; then
   _agent="$(jq -r '.agent_id // empty' <<<"$_payload" 2>/dev/null | tr -cd 'A-Za-z0-9_.-' | cut -c1-64)" || _agent=""
   _event="$(jq -r '.hook_event_name // empty' <<<"$_payload" 2>/dev/null)" || _event=""
 fi
+
+# --- no wrap-up requested: the session clock (v0.28.0) ----------------------
+# The model has no clock of its own — in 4 of 7 sampled take-controls its last
+# act was tailing the watchdog log (foundry-meta REVIEW-2026-11-08 §3.2). So
+# after a tool call (never before one: PreToolUse cannot carry context) say
+# the time: at the first call of an iteration (the loop clears the cadence
+# marker at iteration start), then every 300 s, every 60 s inside the last
+# 15 minutes. Exit 0 with hookSpecificOutput.additionalContext — context the
+# harness hands the model, never an error, never a refusal. Inert without a
+# deadline: an interactive session is never told the time. Fail-open: a
+# marker that cannot be written means silence, not a line per tool call.
+if [[ ! -f "$_sentinel" ]]; then
+  [[ "$_event" == "PostToolUse" ]] || exit 0
+  _deadline="${PHASEKIT_SESSION_DEADLINE:-}"
+  [[ "$_deadline" =~ ^[0-9]+$ ]] || exit 0
+  _now="$(date +%s)"
+  _rem=$(( _deadline - _now ))
+  _clock="$PHASEKIT_ARTIFACTS_DIR/logs/.clock-last.${_agent:-main}"
+  _every=300
+  (( _rem <= 900 )) && _every=60
+  if [[ -f "$_clock" ]]; then
+    _then="$(stat -c %Y "$_clock" 2>/dev/null || echo 0)"
+    [[ "$_then" =~ ^[0-9]+$ ]] || _then=0
+    (( _now - _then >= _every )) || exit 0
+  fi
+  mkdir -p "$(dirname "$_clock")" 2>/dev/null || true
+  touch "$_clock" 2>/dev/null || exit 0
+  _ty="${PHASEKIT_TAKE_CONTROL_SECONDS:-}";         [[ "$_ty" =~ ^[0-9]+$ && "$_ty" -gt 0 ]] || _ty=""
+  _tb="${PHASEKIT_BUILDER_TAKE_CONTROL_SECONDS:-}"; [[ "$_tb" =~ ^[0-9]+$ && "$_tb" -gt 0 ]] || _tb=""
+  if (( _rem <= 0 )); then
+    _msg="[phasekit clock] This session's deadline has passed; the loop is ending the turn. Change nothing more."
+  else
+    _msg="[phasekit clock] T-${_rem}s ($(( (_rem + 30) / 60 )) min) to this session's deadline."
+    if [[ -n "$_ty" ]]; then
+      _msg="$_msg The loop takes control of the turn at T-${_ty}s"
+      if [[ -n "$_tb" && "${PHASEKIT_ITERATION_MODE:-}" == light ]]; then _msg="$_msg (a light-mode build turn: at T-${_tb}s)"; fi
+      _msg="$_msg and lands only what is verified by then — verdict written, \`phasekit verify\` green, turn ended. Size the remaining work to the time."
+    fi
+  fi
+  command -v jq >/dev/null 2>&1 || exit 0
+  jq -cn --arg m "$_msg" '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $m}}' 2>/dev/null || true
+  exit 0
+fi
+
 if [[ -z "$_agent" ]]; then
   _marker="$PHASEKIT_ARTIFACTS_DIR/.wrapup-nudge-sent"
   _last="$PHASEKIT_ARTIFACTS_DIR/logs/.wrapup-nudge-last.main"

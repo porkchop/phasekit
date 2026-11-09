@@ -55,6 +55,12 @@ class HookFixture(unittest.TestCase):
         env.update({
             "PHASEKIT_ARTIFACTS_DIR": str(self.artifacts),
             "PHASEKIT_ITER_MARKER": str(self.iter_marker),
+            # v0.28.0: no clock unless a test sets a deadline (the suite may
+            # itself run inside a timed phasekit session).
+            "PHASEKIT_SESSION_DEADLINE": None,
+            "PHASEKIT_TAKE_CONTROL_SECONDS": None,
+            "PHASEKIT_BUILDER_TAKE_CONTROL_SECONDS": None,
+            "PHASEKIT_ITERATION_MODE": None,
         })
         env.update(overrides)
         for key, value in list(env.items()):
@@ -197,6 +203,108 @@ class HookFixture(unittest.TestCase):
         self.addCleanup(self.artifacts.chmod, 0o755)
         result = self.run_hook()
         self.assertEqual(result.returncode, QUIET)
+
+
+class SessionClock(HookFixture):
+    """v0.28.0: with no sentinel, the hook tells the model the time after a
+    tool call — as PostToolUse additionalContext (exit 0, never an error), at
+    the first call of an iteration, then every 300 s (60 s inside the last
+    15 minutes), per agent. Inert without a deadline; the nudge wins."""
+
+    POST = {"hook_event_name": "PostToolUse", "tool_name": "Bash"}
+
+    def clock(self, remaining=1800, payload=None, **overrides):
+        overrides.setdefault("PHASEKIT_SESSION_DEADLINE", str(int(time.time()) + remaining))
+        return self.run_payload(payload or self.POST, **overrides)
+
+    @staticmethod
+    def context(result):
+        if not result.stdout.strip():
+            return ""
+        out = json.loads(result.stdout)
+        return out["hookSpecificOutput"]["additionalContext"]
+
+    def test_no_deadline_means_no_clock(self):
+        result = self.run_payload(self.POST)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (QUIET, "", ""))
+
+    def test_the_first_tool_call_hears_the_time_as_context_not_as_an_error(self):
+        result = self.clock()
+        self.assertEqual(result.returncode, QUIET)
+        self.assertEqual(result.stderr, "")
+        out = json.loads(result.stdout)
+        self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "PostToolUse")
+        self.assertRegex(self.context(result), r"\[phasekit clock\] T-\d+s \(\d+ min\)")
+        self.assertTrue((self.artifacts / "logs" / ".clock-last.main").exists())
+
+    def test_the_take_control_point_is_named_when_the_loop_exported_it(self):
+        result = self.clock(PHASEKIT_TAKE_CONTROL_SECONDS="420")
+        self.assertIn("T-420s", self.context(result))
+        self.assertIn("`phasekit verify`", self.context(result))
+        self.assertNotIn("build turn", self.context(result))
+        self.assertNotIn("T-0s", self.context(self.clock(PHASEKIT_TAKE_CONTROL_SECONDS="0")))
+
+    def test_light_mode_names_the_build_turns_earlier_point(self):
+        result = self.clock(PHASEKIT_TAKE_CONTROL_SECONDS="420",
+                            PHASEKIT_BUILDER_TAKE_CONTROL_SECONDS="700",
+                            PHASEKIT_ITERATION_MODE="light")
+        self.assertIn("T-700s", self.context(result))
+        standard = self.clock(PHASEKIT_TAKE_CONTROL_SECONDS="420",
+                              PHASEKIT_BUILDER_TAKE_CONTROL_SECONDS="700")
+        self.assertNotIn("T-700s", self.context(standard))
+
+    def test_every_five_minutes_then_every_minute_near_the_end(self):
+        self.assertTrue(self.context(self.clock()))
+        self.assertEqual(self.clock().stdout, "", "a second call right after is silent")
+        last = self.artifacts / "logs" / ".clock-last.main"
+        past = time.time() - 200
+        os.utime(last, (past, past))
+        self.assertEqual(self.clock().stdout, "", "200 s is inside the 300 s cadence")
+        past = time.time() - 301
+        os.utime(last, (past, past))
+        self.assertTrue(self.context(self.clock()), "301 s later the clock speaks again")
+        past = time.time() - 61
+        os.utime(last, (past, past))
+        self.assertEqual(self.clock(remaining=1800).stdout, "",
+                         "61 s is still quiet with 30 min left")
+        self.assertTrue(self.context(self.clock(remaining=600)),
+                        "61 s is a tick inside the last 15 min")
+
+    def test_pre_tool_use_never_carries_the_clock(self):
+        result = self.clock(payload={"hook_event_name": "PreToolUse", "tool_name": "Bash"})
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (QUIET, "", ""))
+        self.assertFalse((self.artifacts / "logs" / ".clock-last.main").exists())
+
+    def test_a_subagent_keeps_its_own_cadence(self):
+        sub = dict(self.POST, agent_id="a792fdc7043f0daaf")
+        self.assertTrue(self.context(self.clock(payload=sub)))
+        self.assertTrue((self.artifacts / "logs" / ".clock-last.a792fdc7043f0daaf").exists())
+        self.assertTrue(self.context(self.clock()), "the main agent's first call still hears it")
+
+    def test_a_passed_deadline_says_so(self):
+        self.assertIn("deadline has passed", self.context(self.clock(remaining=-5)))
+
+    def test_the_wrap_up_nudge_wins_over_the_clock(self):
+        self.sentinel.touch()
+        result = self.clock()
+        self.assertEqual(result.returncode, NUDGE)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("phase-update.json", result.stderr)
+
+    def test_the_loop_clears_the_cadence_markers_at_iteration_start(self):
+        self.assertIn('rm -f "$ARTIFACTS_DIR"/logs/.clock-last.*', LOOP_SCRIPT.read_text())
+
+    def test_the_loop_exports_the_take_control_point_before_its_env_snapshot(self):
+        # The export lives in arm_deadline_watchdog; what matters is that the
+        # loop CALLS it before it snapshots its environment (a later export
+        # would make every model `phasekit verify` non-reusable).
+        text = LOOP_SCRIPT.read_text()
+        arm_body = text[text.index("arm_deadline_watchdog() {"):]
+        arm_body = arm_body[:arm_body.index("\n}\n")]
+        self.assertIn('export PHASEKIT_TAKE_CONTROL_SECONDS="$ty"', arm_body)
+        tail = text[text.index("\ntrap run_until_done_exit_trap EXIT"):]
+        self.assertLess(tail.index('arm_deadline_watchdog "$SESSION_DEADLINE"'),
+                        tail.index('\nwrite_loop_env_snapshot || true'))
 
 
 class RegistrationSync(unittest.TestCase):

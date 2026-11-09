@@ -372,6 +372,9 @@ cleanup_artifacts() {
   rm -f "$ARTIFACTS_DIR/.wrapup-nudge-sent"
   # v0.18.0: the per-subagent markers and the repeat clocks, same lifecycle.
   rm -f "$ARTIFACTS_DIR"/logs/.wrapup-nudge-* 2>/dev/null || true
+  # v0.28.0: the session clock's cadence markers too — the first tool call of
+  # every iteration tells the model the time.
+  rm -f "$ARTIFACTS_DIR"/logs/.clock-last.* 2>/dev/null || true
   # The wrap-up-in-progress marker (v0.13.1) is only ever written at session
   # end; one surviving into an iteration start belongs to a previous session
   # and would silently stand the deadline watchdog down for this whole one.
@@ -1076,6 +1079,7 @@ run_verify_gate() {
     memo_tier="$(verify_memo_tier)"
     if [[ -n "$memo_tree" ]] && verify_memo_hit "$memo_tree" "$memo_tier" "$label" "$cmd"; then
       echo "Pre-commit verify: $label — reusing the green verdict recorded for this exact tree (${memo_tree:0:12}, $(boundary_get '.verify_memo.tier // "?"') tier, passed $(boundary_get '.verify_memo.passed_at // "?"')); not re-run (v0.14.5 verify memo)."
+      if [[ "${VERIFY_INVOKER:-loop}" != model ]]; then MEMO_LOOP_HITS=$(( ${MEMO_LOOP_HITS:-0} + 1 )); fi   # v0.28.0: the phasekit-memo: line
       _clear_verify_failed
       return 0
     fi
@@ -1106,6 +1110,10 @@ run_verify_gate() {
   fi
 
   echo "Pre-commit verify: $label"
+  # v0.28.0: a loop gate that runs is a memo MISS (the hit returned above);
+  # the session's exit line reports hits and misses so a silent miss class
+  # (the CLAUDE_EFFORT one) can never again go unmeasured.
+  if [[ "${VERIFY_INVOKER:-loop}" != model ]]; then MEMO_LOOP_MISSES=$(( ${MEMO_LOOP_MISSES:-0} + 1 )); fi
   local log
   log="$(mktemp)"
   local verify_status=0
@@ -5014,6 +5022,16 @@ phasekit_verify() {
   fi
   local vrc=0
   run_verify_gate || vrc=$?
+  # v0.28.0: one line per model run for the session's phasekit-memo: line —
+  # `reusable` or `shown <the differing names>` (never values). Best-effort;
+  # the loop removes the file at its start and reads it at its exit.
+  if [[ "$MODEL_ENV_REUSABLE" == 1 ]]; then
+    echo "reusable" >> "$ARTIFACTS_DIR/logs/.memo-model-runs" 2>/dev/null || true
+  elif [[ "$envdiff" == \(* ]]; then
+    echo "shown" >> "$ARTIFACTS_DIR/logs/.memo-model-runs" 2>/dev/null || true   # "(no loop snapshot)" is not a name
+  else
+    echo "shown $envdiff" >> "$ARTIFACTS_DIR/logs/.memo-model-runs" 2>/dev/null || true
+  fi
   # The verdict artifacts go back to unstaged (the memo already holds the
   # tree; the commit re-stages the same bytes): a record the model deletes
   # after this call can never be left `AD` (review round 2).
@@ -5060,6 +5078,11 @@ model_env_differences() {
   # NoDefaultCurrentDirectoryInExePath added; TZ removed; SHLVL changed) and
   # what the loop sets per invocation. Prints "(no loop snapshot)" when there
   # is nothing to compare with.
+  # v0.28.0 (foundry-meta REVIEW-2026-11-08 §3.1): the harness's OWN names
+  # are ignored by PREFIX — claude 2.1.319 added CLAUDE_EFFORT to every Bash
+  # tool call, the list above did not know it, and for weeks not one model
+  # verdict was memoised (358 loop gate runs in a week, one memo reused).
+  # Anything the harness names CLAUDE_* is the harness's, never the gate's.
   local snap="$ARTIFACTS_DIR/logs/.loop-env"
   if [[ ! -s "$snap" ]]; then echo "(no loop snapshot)"; return 0; fi
   python3 - "$snap" <<'ENV_PY' 2>/dev/null || echo "(comparison unavailable)"
@@ -5069,7 +5092,7 @@ IGNORE = {"PWD", "OLDPWD", "SHLVL", "_", "TZ", "CLAUDE_MODE", "PHASEKIT_ITER", "
           "ANTHROPIC_MODEL", "AI_AGENT", "CLAUDECODE", "CLAUDE_PID", "COREPACK_ENABLE_AUTO_PIN",
           "GIT_EDITOR", "NoDefaultCurrentDirectoryInExePath"}
 def ignored(k):
-    return k in IGNORE or k.startswith("CLAUDE_CODE_")
+    return k in IGNORE or k.startswith("CLAUDE_")
 loop = {}
 for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     k, _, h = line.rstrip("\n").partition("\t")
@@ -5909,6 +5932,30 @@ cost_session_update() {
     --arg id "$1" --argjson rec "$2"
 }
 
+memo_stats_line() {
+  # v0.28.0: the session's verify-memo facts as one JSON object — the loop's
+  # gate runs that reused a memo (`loop_hits`) and ran instead (`loop_misses`),
+  # the model's `phasekit verify` runs (`model_runs`), how many of those were
+  # memoisable (`model_reusable`), and the names (never values) that made the
+  # others not (`model_shown_vars`). Printed as `phasekit-memo:` at exit and
+  # kept on the session's cost sample. Empty output = nothing to report.
+  local f="$ARTIFACTS_DIR/logs/.memo-model-runs" runs=0 reusable=0 vars="" hits misses
+  hits="${MEMO_LOOP_HITS:-0}"; misses="${MEMO_LOOP_MISSES:-0}"
+  [[ "$hits" =~ ^[0-9]+$ ]] || hits=0
+  [[ "$misses" =~ ^[0-9]+$ ]] || misses=0
+  if [[ -f "$f" ]]; then
+    runs="$(grep -c '' "$f" 2>/dev/null)" || runs=0
+    reusable="$(grep -c '^reusable$' "$f" 2>/dev/null)" || reusable=0
+    vars="$(sed -n 's/^shown //p' "$f" 2>/dev/null | tr ' ' '\n' | grep -E '^[A-Za-z_][A-Za-z0-9_]*$' | sort -u | tr '\n' ' ' | sed 's/ $//')" || vars=""
+  fi
+  [[ "$runs" =~ ^[0-9]+$ ]] || runs=0
+  [[ "$reusable" =~ ^[0-9]+$ ]] || reusable=0
+  (( hits + misses + runs > 0 )) || return 0
+  jq -cn --argjson h "$hits" --argjson m "$misses" --argjson r "$runs" --argjson u "$reusable" --arg v "$vars" \
+    '{schema: 1, loop_hits: $h, loop_misses: $m, model_runs: $r, model_reusable: $u,
+      model_shown_vars: (if $v == "" then [] else ($v | split(" ")) end)}' 2>/dev/null
+}
+
 heavy_sessions_recent() {
   # Of the last 4 recorded sessions, how many were too heavy for their bound
   # (the F4 facts; the supervisor applies the "2 of the last 5" window with
@@ -6358,6 +6405,13 @@ arm_deadline_watchdog() {
     [[ "$tcb" -gt "$ty" ]] || tcb=0
   fi
   DEADLINE_LEAD="$lead"; DEADLINE_TAKE_CONTROL="$ty"; DEADLINE_BUILDER_TAKE_CONTROL="$tcb"; DEADLINE_SPAN="$span"
+  # v0.28.0 (the model's clock): the take-control points, exported for the
+  # session prompt (scripts/run-phase.sh) and the PostToolUse clock in
+  # .claude/hooks/wrapup-nudge.sh — seconds before the deadline, so a model
+  # knows WHEN its turn is ended, not just that it will be. Exported before
+  # the env snapshot, so a model's `phasekit verify` sees no difference.
+  export PHASEKIT_TAKE_CONTROL_SECONDS="$ty"
+  export PHASEKIT_BUILDER_TAKE_CONTROL_SECONDS="$tcb"
   arm_at=$((deadline - lead))
   echo "deadline watchdog: armed — sentinel at T-${lead}s, last-resort commit at T-${lastresort}s (span ${span}s), take control at T-${ty}s$( [[ "$tcb" -gt 0 ]] && echo " (build turn T-${tcb}s)")"
   cost_session_begin "$span" "$lead" "$ty" "$lu" "$cap"
@@ -6475,10 +6529,20 @@ run_until_done_exit_trap() {
   fi
   # v0.18.0: this session's cost sample says how it ended (after the reap,
   # so the watchdog's "killed" cannot overwrite a loop that concluded).
+  # v0.28.0: and how the verify memo did — hits, misses, the model's runs.
+  # Only the LOOP's own process (review finding 1): this trap also runs in a
+  # model's `phasekit verify` / `phasekit scope` process, which must never
+  # print the line into the model's tool output nor read a tally it does not
+  # own. MEMO_TALLY_OWNER is set only on the loop's main path.
+  local _memo=""
+  if [[ "${MEMO_TALLY_OWNER:-0}" == 1 ]]; then
+    _memo="$(memo_stats_line 2>/dev/null)" || _memo=""
+  fi
+  if [[ -n "$_memo" ]]; then echo "phasekit-memo: $_memo"; fi
   if [[ -n "${COST_SESSION_ID:-}" ]]; then
     local _exit=yielded
     [[ "${TOOK_CONTROL:-0}" == 1 ]] && _exit=took-control
-    cost_session_update "$COST_SESSION_ID" "$(jq -cn --arg e "$_exit" --arg p "${passes_done:-0}" '{exit: $e, passes: ($p | tonumber)}')" || true
+    cost_session_update "$COST_SESSION_ID" "$(jq -cn --arg e "$_exit" --arg p "${passes_done:-0}" --argjson memo "${_memo:-null}" '{exit: $e, passes: ($p | tonumber), memo: $memo}')" || true
   fi
   # v0.18.5: last, after every reap above — the loop's temporaries go with it
   # (only from the shell that made them; a subshell never removes them).
@@ -7327,6 +7391,11 @@ last_pass_start=""
 # v0.18.0: after every export the loop makes, before any turn — what a model's
 # `phasekit verify` compares its environment with.
 write_loop_env_snapshot || true
+# v0.28.0: this session's model-run tally starts empty (memo_stats_line), and
+# from here on this process owns it: the exit trap prints the phasekit-memo:
+# line only for the owner (a model-side subcommand process never reaches here).
+rm -f "$ARTIFACTS_DIR/logs/.memo-model-runs" 2>/dev/null || true
+MEMO_TALLY_OWNER=1
 
 # Per-iteration retry budget for transient claude CLI failures (e.g. an
 # API-side content-filter trip that aborts a response mid-stream, a 5xx, or
