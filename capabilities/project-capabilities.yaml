@@ -55,7 +55,6 @@ profiles:
       - LEARNINGS
     include_hooks:
       - deny-dangerous-commands
-      - compact-reanchor
       - require-verdict
       - wrapup-nudge
     include_scripts:
@@ -379,14 +378,6 @@ hooks:
     # then every 300 s (60 s in the last 15 min), per agent; only when the
     # loop set PHASEKIT_SESSION_DEADLINE.
 
-  compact-reanchor:
-    path: .claude/hooks/compact-reanchor.sh
-    required: false
-    ownership: scaffold
-    # v0.4.7 (ADOPTIONS item 1): SessionStart hook, fires ONLY on
-    # source=compact; re-anchors a compacted session with the earliest
-    # unapproved phase + SPEC acceptance criteria. Bounded, fail-open.
-
 scripts:
   run-phase:
     path: scripts/run-phase.sh
@@ -459,6 +450,17 @@ scripts:
     # `rules_touched` names only register ids) and its seeder (`init`). The
     # loop runs `check` at every landing; `phasekit check` and `phasekit rules
     # check` run it on demand. Absent or empty register: passes. Stdlib only.
+
+  phasekit-spec:
+    path: scripts/phasekit-spec.py
+    required: false
+    ownership: scaffold
+    # v0.29.0 (audit D2) the acceptance ledger docs/acceptance.json: `check`
+    # (shape, unique ids, no id lost since --base) runs at every landing of a
+    # ledger-mode project and in `phasekit check`/`verify`; `migrate` is the
+    # one-time SPEC → ledger conversion `phasekit spec migrate` drives (gated,
+    # one commit); `init` writes an empty ledger. Absent ledger: nothing is
+    # judged (append-only SPEC mode unchanged). Stdlib only.
 
   phasekit-tests:
     path: scripts/phasekit-tests.py
@@ -602,6 +604,9 @@ files:
   # --- scaffold (copied verbatim downstream) ---
   CONTINUE_PROMPT.txt:
     ownership: scaffold
+    # v0.29.0: two parts — the per-turn orientation above the
+    # `=== OPERATING RULES` marker line (the prompt), the rules below it
+    # (--append-system-prompt, byte-stable, cached). tests/test_prompt_split.py.
 
   contracts/interface.json:
     ownership: scaffold
@@ -850,3 +855,8 @@ files:
 
   docs/archive/SELF_APPLICATION_EXAMPLE.md:
     ownership: scaffold-internal
+
+  docs/archive/INCIDENTS.md:
+    ownership: scaffold-internal
+    # v0.29.0: the incidents that taught the process rules, dated; the rules
+    # themselves stay in the process docs (audit A3).

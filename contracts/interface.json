@@ -575,6 +575,22 @@
       "semantics": "Advisory-only threshold in KB for the once-per-session docs/LEARNINGS.md size note. At or over the threshold the loop prints one stderr line suggesting a curation pass per the file's own header rule; it never blocks, never rotates, and never alters prompts (the doc-rotation descope, 2026-08-20). Non-numeric values disable the check. Supervisors that want scheduling watch the same file size themselves."
     },
     {
+      "name": "PHASEKIT_DOC_WARN_KB",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh"],
+      "default": "40",
+      "container_forwarded": false,
+      "semantics": "v0.29.0 (audit A3). Advisory-only threshold in KB for the once-per-session document size note: at loop start, every top-level docs/*.md at or over it (LEARNINGS*.md, which has its own budget, and archive files excluded) is named in one stderr line (`run-until-done: note — document(s) over the N KB advisory budget: …`). Nothing is rotated, refused or injected; a supervisor may key a maintenance row on the line. Non-numeric values disable the check."
+    },
+    {
+      "name": "PHASEKIT_EVIDENCE_FILES",
+      "kind": "consumed",
+      "read_by": ["scripts/run-until-done.sh"],
+      "default": "unset — the tree decides (`git check-ignore artifacts/iterations/…`)",
+      "container_forwarded": true,
+      "semantics": "v0.29.0 (audit D3). Whether an approval landing writes the phase-close evidence file artifacts/iterations/<N>/<phase>.json into the commit. `1`: always (git add -f, even in a tree that ignores the directory); `0`: never; unset: written unless the tree ignores artifacts/iterations/ (the v0.29.0 seed, or `phasekit evidence untrack`). The record's own stamps are unaffected. Forwarded so a supervisor can set it per run."
+    },
+    {
       "name": "PHASEKIT_PROJECT_DIR",
       "kind": "both",
       "read_by": ["scripts/run-until-done.sh", "scripts/run-phase.sh", "scripts/container-setup.sh"],
@@ -648,7 +664,7 @@
       "set_by": ["scripts/run-phase.sh"],
       "default": "unset — the plugin's guard-probe hook is inert",
       "container_forwarded": false,
-      "semantics": "v0.19.0, the fail-closed guard self-check of a pinned run. Before every model turn run-phase.sh starts a throwaway, model-free `claude -p --plugin-dir <engine>/plugin` with this set to a file; the plugin's UserPromptSubmit hook proves the command guard refuses (a destructive command, and a commit under the loop) and every hook is present, writes '<token> ok' there and blocks the prompt (no model call). No token: the turn is REFUSED (run-phase.sh exits 7)."
+      "semantics": "v0.19.0, the fail-closed guard self-check of a pinned run. Before a run's first model turn (v0.29.0: and again whenever the plugin or the CLI changes — the key a green probe records in artifacts/logs/.guard-probe-ok is the plugin directory plus the stat of hooks.json, of every hook script it wires and of the `claude` binary; PHASEKIT_GUARD_PROBE_EVERY_TURN=1 probes every turn as before) run-phase.sh starts a throwaway, model-free `claude -p --plugin-dir <engine>/plugin` with this set to a file; the plugin's UserPromptSubmit hook proves the command guard refuses (a destructive command, and a commit under the loop) and every hook is present, writes '<token> ok' there and blocks the prompt (no model call). No token: the turn is REFUSED (run-phase.sh exits 7)."
     },
     {
       "name": "PHASEKIT_GUARD_PROBE_TOKEN",
@@ -666,6 +682,14 @@
       "default": "120",
       "container_forwarded": true,
       "semantics": "v0.19.0. Seconds the guard probe's throwaway `claude` may run; a probe that times out has proven nothing, so the turn is refused."
+    },
+    {
+      "name": "PHASEKIT_GUARD_PROBE_EVERY_TURN",
+      "kind": "consumed",
+      "read_by": ["scripts/run-phase.sh"],
+      "default": "0",
+      "container_forwarded": false,
+      "semantics": "v0.29.0 (audit A3). `1`: the guard self-check runs before EVERY model turn, as it did through v0.28.0. Otherwise a green probe is recorded with the key it proved (artifacts/logs/.guard-probe-ok) and a later turn of the same plugin + CLI pair skips the throwaway CLI start; a changed key or a failed probe probes again. Never forwarded: an operator's diagnostic."
     },
     {
       "name": "PHASEKIT_TEST_LAYOUT",
@@ -697,7 +721,7 @@
       "name": "phase-approval.json",
       "path": "artifacts/phase-approval.json",
       "writers": ["session"],
-      "consumers": ["scripts/run-until-done.sh", "scripts/enrich-project.py", ".claude/hooks/compact-reanchor.sh", "supervisor"],
+      "consumers": ["scripts/run-until-done.sh", "scripts/enrich-project.py", "supervisor"],
       "lifecycle": "durable — committed with the phase, deliberately never deleted by iteration cleanup; v0.18.0: stamped by the loop at landing like project-complete.json (`iteration` written or corrected, `base`); its `deferrals` (entries opened) and `closes` (keys closed) are applied to artifacts/deferrals.json but the approval itself keeps them as written; its landing writes the phase-close evidence artifacts/iterations/<N>/<phase>.json into the same commit; a refused landing leaves it unstaged, never staged; v0.18.2: its landing stamps `plan_paths` (see the planned-paths convention) — the phase's changed paths against the `Planned paths:` its docs/PHASES.md section declares",
       "verdict": true,
       "transient_signal": false,
@@ -859,7 +883,7 @@
       "transient_signal": false,
       "hidden": false,
       "internal": true,
-      "when": "v0.23.0: ui-check/<stamp>/ holds `phasekit ui-check` evidence (report.json, every screenshot, diff and replaced baseline, and the sha256 of every file the browser fetched). claude-iter-N[-retryM].jsonl (raw stream-json + stderr) and .log (rendered via phasekit-log-fmt.sh) per claude invocation. v0.18.0: also cost-ledger.json (the per-project cost model: the last 20 samples per measure — g_full, g_fast, w, m, r, pass — and the last 20 sessions with bound, lead, take-control, at_cap, heavy, exit yielded|took-control|killed; persists across sessions, read by the loop only — a supervisor reads the `phasekit-cost:` line), .deadline-yield (written when the watchdog takes control of a turn; the loop reads it; cleared at loop start), .loop-env (the loop's environment as names and truncated value hashes, never values, for `phasekit verify`'s reuse check; removed at exit), .carried-completion (the carry marker of a completion record whose landing was refused; v0.18.1: its content is the carried record's blob, so a commit that sweeps it in unchanged claims nothing), claude.pid (\"<pid> <role>\" of the model turn in flight, written by run-phase.sh and removed when the turn ends — the deadline watchdog's take-control target), v0.18.1: .completion-yield (written when the completion turn guard saw a commit land artifacts/project-complete.json during a turn on a clean tree and ended that turn; the loop reads it; cleared at loop start), .completion-guard-start (touched when a turn's guard starts; the freshness reference for .completion-yield), completion-guard.log (the guard's own log, one per project), post-completion/<stamp>/ (the bytes of paths written after the completion commit that the loop restored: tracked.patch and untracked/ — never committed), the per-subagent nudge markers and repeat clocks (.wrapup-nudge-*), and lock/tmp files of the loop's records. v0.28.0: .clock-last.<main|agent id> (the session clock's per-agent cadence markers; cleared at iteration start) and .memo-model-runs (one line per model `phasekit verify` this session, `reusable` or `shown <names>`; removed at loop start, read at exit for the `phasekit-memo:` line). v0.27.0: tests-measure/<UTC stamp>.json, the per-file results `phasekit tests measure` writes (the newest 10 kept; read by `phasekit tests`; facts.tests_measure.results_file). `phasekit tests` also READS cost-ledger.json (its g_fast/g_full samples and the newest session's bound_s), never writes it.",
+      "when": "v0.23.0: ui-check/<stamp>/ holds `phasekit ui-check` evidence (report.json, every screenshot, diff and replaced baseline, and the sha256 of every file the browser fetched). claude-iter-N[-retryM].jsonl (raw stream-json + stderr) and .log (rendered via phasekit-log-fmt.sh) per claude invocation. v0.18.0: also cost-ledger.json (the per-project cost model: the last 20 samples per measure — g_full, g_fast, w, m, r, pass — and the last 20 sessions with bound, lead, take-control, at_cap, heavy, exit yielded|took-control|killed; persists across sessions, read by the loop only — a supervisor reads the `phasekit-cost:` line), .deadline-yield (written when the watchdog takes control of a turn; the loop reads it; cleared at loop start), .loop-env (the loop's environment as names and truncated value hashes, never values, for `phasekit verify`'s reuse check; removed at exit), .carried-completion (the carry marker of a completion record whose landing was refused; v0.18.1: its content is the carried record's blob, so a commit that sweeps it in unchanged claims nothing), claude.pid (\"<pid> <role>\" of the model turn in flight, written by run-phase.sh and removed when the turn ends — the deadline watchdog's take-control target), v0.18.1: .completion-yield (written when the completion turn guard saw a commit land artifacts/project-complete.json during a turn on a clean tree and ended that turn; the loop reads it; cleared at loop start), .completion-guard-start (touched when a turn's guard starts; the freshness reference for .completion-yield), completion-guard.log (the guard's own log, one per project), post-completion/<stamp>/ (the bytes of paths written after the completion commit that the loop restored: tracked.patch and untracked/ — never committed), the per-subagent nudge markers and repeat clocks (.wrapup-nudge-*), and lock/tmp files of the loop's records. v0.28.0: .clock-last.<main|agent id> (the session clock's per-agent cadence markers; cleared at iteration start); v0.29.0: .guard-probe-ok (the key of the plugin + CLI pair the last green guard probe proved; a turn whose key matches skips the probe) and .memo-model-runs (one line per model `phasekit verify` this session, `reusable` or `shown <names>`; removed at loop start, read at exit for the `phasekit-memo:` line). v0.27.0: tests-measure/<UTC stamp>.json, the per-file results `phasekit tests measure` writes (the newest 10 kept; read by `phasekit tests`; facts.tests_measure.results_file). `phasekit tests` also READS cost-ledger.json (its g_fast/g_full samples and the newest session's bound_s), never writes it.",
       "keys": []
     },
     {"name": "design-review", "path": "artifacts/design-review/<iteration>-<phase>.json", "writers": ["session"], "consumers": ["supervisor", "planner"], "lifecycle": "durable — tracked and committed with the phase that ran the review; small (findings only: the screenshots it judged stay under the ignored artifacts/logs/ui-check/ and are named by sha256)", "verdict": false, "transient_signal": false, "hidden": false, "when": "v0.23.0. Written by the design-reviewer agent on a phase that touches UI (its planned or changed paths overlap `ui_paths` in docs/project/ui-pages.json) when docs/project/DESIGN_SYSTEM.md exists: {schema 1, iteration, phase, pages [{id, viewport, screenshot_sha256}], findings [{severity MAJOR|MINOR|NOTE, page, viewport, what, rule, suggestion}], verdict approve|changes-suggested}. Advisory: never a gate verdict; a MAJOR finding the phase does not fix is carried in the phase's `deferrals`. v0.24.0: a UI-touching landing without it prints one `ADVISORY design-review:` line and records `ui_landing.design_review.status` = missing (see the visual-changes convention); never a refusal.", "keys": ["schema", "iteration", "phase", "pages", "findings", "verdict"]},
@@ -982,7 +1006,7 @@
       "verdict": false,
       "transient_signal": false,
       "hidden": false,
-      "when": "Written by the loop, never by a session; supervised iterations only (a standalone run has no iteration to file it under).",
+      "when": "Written by the loop, never by a session; supervised iterations only (a standalone run has no iteration to file it under). v0.29.0: only into a tree that does not ignore artifacts/iterations/ (evidence_files_enabled: PHASEKIT_EVIDENCE_FILES=1 forces, =0 disables, else `git check-ignore`); the record's stamps (plan_paths, ui_landing) are written either way. A new project ignores the directory; `phasekit evidence untrack` moves an existing one over.",
       "keys": ["schema", "iteration", "phase", "base", "since", "changed", "note", "plan_paths", "ui_landing"]
     },
     {
@@ -1017,7 +1041,14 @@
       "marker": "SUPERSEDED by AC#",
       "declared_in": ["docs/QUALITY_GATES.md", "CONTINUE_PROMPT.txt"],
       "consumers": ["session", "supervisor"],
-      "semantics": "The SPEC's acceptance-criteria section is append-only: sessions add criteria and supersede them (prefix the old line with the marker, exactly, followed by the replacement criterion's number and a colon-space; full replacement text lives in the appended criterion), and never delete or renumber. Removals only via operator change-request. The marker literal is the cross-repo contract a supervisor's spec-change detector keys on: a removal or rewrite of an existing criterion line without it is a high-confidence violation; append-only changes auto-clear."
+      "semantics": "The SPEC's acceptance-criteria section is append-only: sessions add criteria and supersede them (prefix the old line with the marker, exactly, followed by the replacement criterion's number and a colon-space; full replacement text lives in the appended criterion), and never delete or renumber. Removals only via operator change-request. The marker literal is the cross-repo contract a supervisor's spec-change detector keys on: a removal or rewrite of an existing criterion line without it is a high-confidence violation; append-only changes auto-clear. v0.29.0: this convention governs a project WITHOUT docs/acceptance.json; a project in ledger mode (the acceptance-ledger convention) edits its SPEC in place and keeps the invariant in the ledger instead — a supervisor's detector reads the ledger there, not the prose."
+    },
+    {
+      "name": "acceptance-ledger",
+      "marker": "docs/acceptance.json",
+      "declared_in": ["docs/QUALITY_GATES.md", "CONTINUE_PROMPT.txt", "scripts/run-until-done.sh", "scripts/phasekit-spec.py"],
+      "consumers": ["session", "supervisor"],
+      "semantics": "v0.29.0 (audit D2). A project is in LEDGER MODE exactly when docs/acceptance.json exists: {schema: 1, entries: [{id, text, status, since?, superseded_by?, reason?}]} — `id` is `AC#` + letters, digits, dots, hyphens, unique and APPEND-ONLY (never deleted, renumbered or reused; cited as `AC#<id>` everywhere criteria are cited: deferral keys, records); `text` non-empty (editable while the meaning holds; a change of meaning is a new id and the old one superseded); `status` exactly one of open | met | superseded | withdrawn (superseded names `superseded_by`, an id of the ledger; withdrawn carries a non-empty `reason`). docs/SPEC.md is then a living document edited in place (the 40 KB advisory budget). The loop's gate (scripts/phasekit-spec.py check, exit 3 = findings): at every landing that rides a verdict — and in `phasekit verify`, `phasekit check` (exit 8) and `phasekit spec check` — every id the ledger had at HEAD (the previous landing) is still present, no duplicate id, every entry well-formed; a finding is a commit_refusal in artifacts/phase-verify-failed.json (the breaker bounding it) and a wrap-up keeps the verdicts out; a ledger that is gone from a tree whose HEAD had one is a finding too (leaving ledger mode is an operator's act). Absent ledger: nothing is judged. Entering: `phasekit spec migrate` (operator, at rest, gated, one commit: SPEC criteria → entries, all `met` with since \"migrated\", `SUPERSEDED by AC#y:` lines → superseded; the SPEC archived at docs/archive/SPEC-<date>.md, never read by the loop; a living skeleton written; red gate restores byte for byte) or `phasekit spec init` (an empty ledger). A supervisor reads the ledger as the criteria of record and the archive as history."
     },
     {
       "name": "approval-deferrals",
@@ -1104,7 +1135,7 @@
       "marker": "artifacts/iterations/<N>/<phase>.json",
       "declared_in": ["docs/QUALITY_GATES.md", "scripts/run-until-done.sh"],
       "consumers": ["session", "supervisor"],
-      "semantics": "v0.18.0. What an iteration or a phase changed is answered by phasekit, never rebuilt from `git rev-list --grep=<subject>`: the model-facing `phasekit scope [--iteration N] [--phase P] [--json]` (base, HEAD, the phase commits by trailer, the changed paths with status — it may read git), and the evidence file every approval landing commits (artifacts, `iterations`), which a test reads as a golden from the tree (hermetic-tests)."
+      "semantics": "v0.18.0. What an iteration or a phase changed is answered by phasekit, never rebuilt from `git rev-list --grep=<subject>`: the model-facing `phasekit scope [--iteration N] [--phase P] [--json]` (base, HEAD, the phase commits by trailer, the changed paths with status — it may read git), and the evidence file an approval landing commits (artifacts, `iterations`). v0.29.0 (audit D3): the file is opt-in by the tree — written only when the project does not ignore `artifacts/iterations/` (a new project ignores it from `phasekit init`; `phasekit evidence untrack` stops tracking it at rest, gated, files kept on disk; PHASEKIT_EVIDENCE_FILES=1|0 overrides) — and a test reads a golden file the project commits itself, never the loop's record (hermetic-tests)."
     },
     {
       "name": "hermetic-tests",
@@ -1699,6 +1730,16 @@
       },
       "passthrough": null
     },
+    "scripts/phasekit-spec.py": {
+      "codes": {
+        "0": "`check`: no ledger (append-only mode, nothing judged) or clean; `migrate`: done, or a dry run; `init`: wrote docs/acceptance.json",
+        "2": "CLI usage error (argparse)",
+        "3": "`check` only: findings, one line each on stdout (`--json`: in `findings`) — a malformed or duplicate entry, an id lost since --base — see the acceptance-ledger convention",
+        "4": "`init`/`migrate`: docs/acceptance.json already exists (never overwritten); `migrate`: no docs/SPEC.md, or no heading containing \"cceptance\" in it",
+        "5": "could not complete, and never means 'clean' or 'findings': the --repo path is not a directory, a file could not be read or written, the ledger at --base is not a readable ledger shape"
+      },
+      "passthrough": null
+    },
     "scripts/phasekit-rules.py": {
       "codes": {
         "0": "success: `check` found the register absent, empty, or every entry well-formed with every named test found, and every --record's `rules_touched` absent, null or naming only register ids; `init` wrote docs/project/RULES.md",
@@ -1764,9 +1805,9 @@
       "codes": {
         "0": "ok (an idempotent re-run that changes nothing is 0)",
         "1": "error (git or I/O failure, a commit that failed)",
-        "2": "usage, or not a project of the right kind: a bad or pre-v0.19.0 tag, a dirty tree or staged index for migrate/upgrade, local changes to engine files migrate would discard (without --discard-local), a vendored project given to init",
+        "2": "usage, or not a project of the right kind: a bad or pre-v0.19.0 tag, a dirty tree or staged index for migrate/upgrade (v0.29.0: and for `evidence untrack` and `spec migrate`, which also refuse inside a loop session; `spec migrate` on a project already in ledger mode, with no SPEC or no acceptance heading), local changes to engine files migrate would discard (without --discard-local), a vendored project given to init",
         "3": "`check` found a leftover in a pinned project: a tracked engine path (anything the engine's manifest calls scaffold, or .scaffold/), or .claude/settings.json still wiring vendored hook paths; `plugin status`: not installed",
-        "4": "the project's gate was not green under the new engine (migrate, upgrade): nothing changed — the tree, the index and the pin are as they were; v0.20.0 `verify-runner` (`phasekit verify --in-runner`): the gate was not green (red, a footprint, or timed out)",
+        "4": "the project's gate was not green under the new engine (migrate, upgrade; v0.29.0 `evidence untrack` and `spec migrate` under the project's own engine): nothing changed — the tree, the index and the pin are as they were; v0.20.0 `verify-runner` (`phasekit verify --in-runner`): the gate was not green (red, a footprint, or timed out)",
         "5": "v0.20.0, `verify-runner` only: the gate did not run (no docker, no daemon, no runner image, the runner could not start, an unusable contracts provider, or no gate configured) — never a host run; v0.21.0 `land-runner` (`phasekit land --in-runner`): not run (the same causes, or docker could not list running containers)",
         "6": "the pinned engine is not installed and was not fetched (`check` never fetches; elsewhere PHASEKIT_NO_AUTO_FETCH=1, or the tag is in neither the canonical clone nor its origin): the message names `phasekit engines install <tag>`",
         "7": "v0.21.0, `land-runner` (`phasekit land --in-runner`) only: refused — it would race a writer (a container mounting the tree, a git operation in progress, another landing) or the loop predates the landing witness; nothing ran (facts.land_in_runner; there, 3 = nothing to land and 4 = the landing failed)"
@@ -1784,12 +1825,6 @@
       "codes": {
         "0": "nothing refused — including an empty payload; a parse the hook cannot complete falls back to a narrow regex over the command text (which may refuse), and any other internal failure allows (a hook never wedges a session)",
         "2": "deny the tool call (PreToolUse hook contract): a DESTRUCTIVE command in any session (v0.18.3: git reset --hard; git clean -f with -d; a force or ref-deleting push — --force, -f, --force-with-lease, --delete/-d, --mirror, --prune, a +ref or :ref refspec; git tag -d/-f and git update-ref on refs/tags/; sudo; shred; a recursive rm of the repository's root, a directory above it, or its .git — an ordinary git push or git tag is NOT destructive and an interactive session may run it), or, under the loop, any git push, or a git command that writes this repository's history, refs or index (v0.18.2, the loop-owns-commits convention); ONE line on stderr"
-      },
-      "passthrough": null
-    },
-    ".claude/hooks/compact-reanchor.sh": {
-      "codes": {
-        "0": "always — contractually fail-open; internal python failures are swallowed and output is capped at 2048 bytes"
       },
       "passthrough": null
     },

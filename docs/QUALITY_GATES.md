@@ -180,6 +180,35 @@ historical citation.
 Everything outside the acceptance-criteria section keeps its ordinary
 editing rules.
 
+### Ledger mode (v0.29.0)
+
+The same invariant, out of the prose. A project is in **ledger mode** when
+`docs/acceptance.json` exists: one entry per criterion — `id` (`AC#…`,
+append-only: never deleted, renumbered or reused), `text`, `status` (exactly
+`open | met | superseded | withdrawn`; `superseded` names `superseded_by`,
+`withdrawn` carries a `reason`), optional `since`. `docs/SPEC.md` is then a
+**living document**: it states the behaviour as it now is, is edited in place
+and stays under the 40 KB advisory budget; its history is git. The gate
+becomes mechanical: at every landing that rides a verdict (and in `phasekit
+verify`, `phasekit check`, `phasekit spec check`) the loop refuses a ledger
+that lost an id it had at the previous landing, a duplicate id or a malformed
+entry (`scripts/phasekit-spec.py check`; the refusal is a `commit_refusal` in
+`artifacts/phase-verify-failed.json`, the breaker bounding it). Text may be
+edited while the meaning holds; a change of meaning is a new id and the old
+one `superseded`. Reviewers diff the ledger, not the prose. Measured reason:
+SPECs of 1.2–3.8 MB in the fleet, written to by three sessions in four and
+read by none (median read 0 lines).
+
+Entering ledger mode is an operator's act, once per project, at rest:
+`phasekit spec migrate` parses the SPEC's acceptance sections (numbered items
+→ `AC#n`, explicit `AC#x`/`AC-x` ids, `SUPERSEDED by AC#y:` → superseded),
+writes the ledger (every criterion `met`, `since: "migrated"` — the next
+session corrects what is open), archives the SPEC at `docs/archive/SPEC-<date>.md`
+(never read by the loop) and writes a living skeleton; gated like `phasekit
+migrate`, a red gate restores the tree byte for byte. A new project starts in
+ledger mode with `phasekit spec init`. Lines under an acceptance heading that
+carry no id are counted and left in the archive, never dropped silently.
+
 ## Deferred-scope gate
 An in-scope acceptance item (a SPEC criterion, or a named ask in the
 iteration's change-request) that a session decides not to implement is a
@@ -461,7 +490,7 @@ always-planned paths: `artifacts/**`, `docs/PHASES.md`, `docs/LEARNINGS*.md`.
 
 At every approval-class landing the loop compares the phase's changed paths
 with the declaration and records the result as `plan_paths` in the landed
-record, the phase-close evidence file (`artifacts/iterations/<N>/<phase>.json`)
+record, the phase-close evidence file when the tree tracks one (`artifacts/iterations/<N>/<phase>.json`, v0.29.0)
 and `boundary-state.json`, plus ONE stderr line: `status` is `inside`,
 `outside` (with `unplanned`, `unplanned_count`), `no-plan-declared` (never
 zero — `unplanned_count` is null) or `underivable`. It warns and never
@@ -569,25 +598,12 @@ Three mechanisms in `scripts/run-until-done.sh` keep the family uncommitted:
 
 ## Evidence integrity gate
 
-Gate results and citations are claims about a *specific tree*; they rot silently when the tree moves. (Upstreamed 2026-08-11 from foundry-dashboard, which adopted these rules at its iteration-10 close after stale evidence decided three consecutive signoffs — the phase numbers cited below are that project's, kept as the motivating record.)
+A gate result, a measurement or a `path:line` citation is a claim about a *specific tree*; it rots silently when the tree moves, and nothing about a stale claim looks stale. The rules (upstreamed 2026-08-11 from foundry-dashboard, where stale evidence decided three consecutive signoffs; the incident record is `docs/archive/INCIDENTS.md`):
 
-### Evidence must name the tree it judged
-Adopted at the iteration-10 close, after it decided three consecutive signoffs. A gate result is a claim about a *specific tree*, and it stops being true the moment that tree changes — but nothing about a stale result looks stale, so it gets cited long after it expired.
-
-- **Every gate records the md5 of the files it judged.** A browser pass records the md5 of every file the browser fetched, at the START and again at the END of the run (the second catches a tree that shifted under the gate). Put them in the gate's own evidence file, not in prose — and that evidence file lives under an **ignored** path such as `artifacts/logs/`, never a tracked one: the pre-commit gate is read-only over the tree (v0.14.10, "Pre-commit verification gate" below), and a tracked evidence file the gate rewrites is exactly the footprint it refuses.
-- **Before citing a gate result, compare — do not infer.** Recompute the md5s and diff them against the record. "Is this evidence still valid?" then has a yes/no answer instead of an argument.
-- **A fix round that touches a file the gate judged INVALIDATES that gate.** Either keep fix rounds to tests, docs and artifacts — which is what makes the original evidence still citable — or re-run the gate. Do not reason that a change "cannot have affected" what was measured.
-- **Never stitch a partial run into a signoff.** An interrupted gate with no verdict is VOID; re-run it. Overlapping numbers from the dead run are not a verdict, and salvaging them is how a phase gets signed off on evidence nobody ever finished producing.
-- **Records are not test fixtures (v0.19.3).** Evidence records are compared by the session when it cites them. A test that a record exists or passed is paperwork ("A project's tests test the project").
-
-Why this is a gate and not a nicety: at Phase 29 a memo cited a browser round that predated its own final source edits, *in the same paragraph* that explained why superseded evidence must not be cited. At Phase 30 the identical defect recurred one phase later — a session updated the memo to say "all 23 md5s matched", then changed three of the 23 files before it was interrupted. Both were caught by comparison, and neither would have been caught by reading.
-
-### A `path:line` citation is a claim about a tree, too
-Same failure, cheaper instrument. Every phase that edits a source file shifts the lines below its edit, silently invalidating citations elsewhere in the repo — this is what blocked Phases 27, 28, 29 and 30, each time via the diff's *own* edits.
-
-- **After editing source, sweep the citations that edit moved** — programmatically, then read each target line to confirm it still says what the citing text claims. "The line exists" is not the check; "the line means what I said" is.
-- **A citation in a PRESENT-TENSE claim must resolve against the current tree.** If it describes what the code does *today*, re-point it.
-- **A citation in a frozen record is left alone, and the record says so.** Intake documents (`docs/change-requests/*.md`), the decision log (`artifacts/decision-memo.md`), signoff artifacts (`artifacts/phase-approval.json`, `artifacts/iterations/*`), and phase blocks explicitly marked as HISTORY describe the tree *as it was*; re-pointing them would falsely imply the code still reads that way. These are exempt by virtue of being dated records — but the exemption has to be *stated in the document*, or the next reader cannot tell a frozen citation from a rotted one. A frozen record is still corrected when it was wrong **when written**, or when a later phase falsifies a standing claim it makes — in place, with the correction marked.
+- **Every gate records what it judged.** A browser pass records the sha256 of every file the browser fetched, at the START and at the END of the run (the second catches a tree that shifted under the gate), in the gate's own record under an **ignored** path such as `artifacts/logs/` — never a tracked one: the pre-commit gate is read-only over the tree (v0.14.10, "Pre-commit verification gate"), and a tracked record the gate rewrites is exactly the footprint it refuses.
+- **Before citing a result, compare — do not infer.** Recompute the digests and diff them against the record; "is this evidence still valid?" then has a yes/no answer. A fix round that touches a file the gate judged INVALIDATES that gate: keep fix rounds to tests, docs and artifacts, or re-run it. An interrupted gate with no verdict is VOID; never stitch a partial run into a signoff.
+- **A `path:line` citation is the same claim.** After editing source, sweep the citations the edit moved and read each target line again: "the line exists" is not the check, "the line means what I said" is. A present-tense claim resolves against the current tree; a dated record (an intake document, a decision memo, a landed verdict) describes the tree *as it was* and says so in the document, and is corrected in place only when it was wrong when written.
+- **Evidence is the gate's record, not a file in git (v0.29.0).** What a phase changed is the loop's to answer: `phasekit scope` for a session, the landed record's stamps (`plan_paths`, `ui_landing`), the boundary state and the cost ledger for the loop, the supervisor's database for an operator. The phase-close evidence FILE (`artifacts/iterations/<N>/<phase>.json`) is written only into a tree that does not ignore `artifacts/iterations/` — a new project ignores it from its first commit, an existing one stops tracking it with `phasekit evidence untrack` (at rest, gated, the files kept on disk; `--path` untracks and ignores another evidence directory with it), and `PHASEKIT_EVIDENCE_FILES=1|0` overrides the tree. **Records are not test fixtures (v0.19.3):** a test that a record exists or passed is paperwork ("A project's tests test the project").
 
 ## Pre-commit verification gate
 The wrapper runs a project-defined fast-check command before creating any phase commit, regardless of whether `AUTO_PUSH` is enabled. Mechanism lives in the scaffold (`scripts/run-until-done.sh`); policy lives in the project (`scripts/phasekit-verify.sh`).
@@ -677,11 +693,11 @@ The loop watches for this drift mechanically. Under a supervisor's session bound
 
 ### Hermetic tests (v0.18.0)
 
-**A test reads the current tree and declared fixtures, never git history.** No `git log`, `rev-list`, `show <rev>:`, `blame` or `diff <rev>` of the project's own repository from a test; a fact about the past is an **evidence file** — the one phasekit writes at every phase close, `artifacts/iterations/<N>/<phase>.json` (what the phase changed since the previous close: path, status and the sha256 of the content at close), or a golden file the project commits itself.
+**A test reads the current tree and declared fixtures, never git history.** No `git log`, `rev-list`, `show <rev>:`, `blame` or `diff <rev>` of the project's own repository from a test; a fact about the past is a **golden file** the project commits itself (v0.29.0: the loop's phase-close evidence file is written only into a tree that does not ignore `artifacts/iterations/`; a session asks `phasekit scope` instead).
 
 Why: a test that finds "the phase 177 commit" by subject silently compares against the wrong tree the day a subject is wrong — xmeo's 55 scope suites did, after a copy-forward record committed iteration 88's work under iteration 87's subject. History is not an input a test declares; the tree is.
 
-- "Phase 177 must leave `demo/` unmoved": compare the tree's bytes against the evidence file's `changed` (or its absence from it), not against `git show <phase commit>:demo/…`.
+- "Phase 177 must leave `demo/` unmoved": a test compares the tree against a golden file the project commits, never against `git show <phase commit>:demo/…`; a session reads `phasekit scope --phase 177`.
 - "What did this iteration change" for a *session* (not a test): `bash scripts/phasekit.sh scope [--phase P] [--json]` — it reads git so tests do not have to.
 - A test that builds its OWN scratch repository and runs git inside it is hermetic; the rule is about the project's history.
 

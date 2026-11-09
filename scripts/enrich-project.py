@@ -4065,6 +4065,7 @@ ALWAYS_INSTALLED_FILE_PATHS = (
     "scripts/phasekit-contracts.py",
     "scripts/phasekit-roadmap.py",
     "scripts/phasekit-rules.py",
+    "scripts/phasekit-spec.py",
     "scripts/phasekit-surface.py",
     "scripts/phasekit-tests.py",
     "scripts/phasekit-ui-check.mjs",

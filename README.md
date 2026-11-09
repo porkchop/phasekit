@@ -120,6 +120,7 @@ phasekit plugin install|status   # the Claude Code plugin
 phasekit docs                    # print the engine's docs directory
 phasekit hook <name>             # run one of the engine's hooks (stdin passed through)
 phasekit migrate [--dry-run]     # convert a vendored project to a pinned one
+phasekit evidence untrack [--path P] [--dry-run]   # stop tracking phase-close evidence (v0.29.0): files kept on disk, ignored, one gated commit
 phasekit channel [name]          # show/set self-update channel (stable|edge|<ref>)
 phasekit self-update             # move the phasekit install along its channel
 ```
@@ -144,7 +145,7 @@ What `phasekit migrate` does, exactly:
 2. **Refuses to discard local edits.** If any engine file the manifest names was edited since phasekit wrote it, or carries a standing `--keep-local`, it lists them and stops (exit 2). Move what you need into project-owned files (`docs/project/<NAME>.md` is the companion for a process doc) and re-run, or pass `--discard-local` to let the engine's copy replace them.
    **Refuses project files that read engine paths (v0.19.2).** Before it deletes anything or runs the gate, it scans the project's own code (tests, scripts, source) for reads of an engine file by its in-tree path — `contracts/interface.json` included — and stops (exit 2) with each `file:line: path`. Read the contract through `$PHASEKIT_CONTRACT` instead (exported in both layouts; `phasekit facts --path` by hand; see `docs/QUALITY_GATES.md` "Tests read the declared surface"). `--force` skips this pre-flight and leaves the verdict to the gate. `phasekit check` shows the same list ahead of time, as the `migration-readiness` hint.
 3. **Deletes exactly** the files the manifest records as `scaffold` class, and `.scaffold/`. Project-owned files (SPEC, PHASES, CONVENTIONS, `AGENTS.md`, `.claude/CLAUDE.md`, the gate, ...) are not touched.
-4. **Strips phasekit's hook wiring** (the four engine hooks under `.claude/hooks/`) from `.claude/settings.json`; its permissions and any hooks of the project's own are unchanged. The plugin supplies the hooks from now on.
+4. **Strips phasekit's hook wiring** (the engine hooks under `.claude/hooks/`) from `.claude/settings.json`; its permissions and any hooks of the project's own are unchanged. The plugin supplies the hooks from now on.
 5. **Writes** `.phasekit-version`.
 6. **Runs the project's gate under the engine** (the same gate `phasekit upgrade` runs; `PHASEKIT_UPGRADE_VERIFY` chooses host or container). Red: every byte is restored, nothing is committed, exit 4.
 7. **Commits** the result in one commit (`chore(phasekit): migrate to the engine outside the repo (vX.Y.Z)`). It never pushes: push when you are ready.
@@ -335,12 +336,12 @@ Agent definitions live in the engine's `.claude/agents/`. In a pinned project th
 
 ### Safety hooks
 
-The `deny-dangerous-commands` command guard runs as a `PreToolUse` hook on every `Bash` call, interactive or autonomous (hooks still run under `bypassPermissions`). In every session it refuses the destructive commands — `git reset --hard`, `git clean -fd`, force or ref-deleting pushes, tag deletion/overwrite, `sudo`, `shred`, a recursive `rm` of the repository root or its `.git`. Under the loop it also refuses every git write to the repository and any `git push` (the loop owns every commit); an interactive session may push and commit normally. See the engine's `docs/QUALITY_GATES.md` "The loop owns every commit". Three more hooks complete the set: `require-verdict` (Stop), `wrapup-nudge` (PreToolUse and PostToolUse) and `compact-reanchor` (SessionStart after compaction).
+The `deny-dangerous-commands` command guard runs as a `PreToolUse` hook on every `Bash` call, interactive or autonomous (hooks still run under `bypassPermissions`). In every session it refuses the destructive commands — `git reset --hard`, `git clean -fd`, force or ref-deleting pushes, tag deletion/overwrite, `sudo`, `shred`, a recursive `rm` of the repository root or its `.git`. Under the loop it also refuses every git write to the repository and any `git push` (the loop owns every commit); an interactive session may push and commit normally. See the engine's `docs/QUALITY_GATES.md` "The loop owns every commit". Two more hooks complete the set: `require-verdict` (Stop) and `wrapup-nudge` (PreToolUse and PostToolUse; since v0.28.0 also the session clock). (`compact-reanchor`, a SessionStart hook for compacted sessions, was retired in v0.29.0: it fired 0 times in 574 session logs, and the loop's fresh-turn architecture re-anchors every turn from the prompt.)
 
 In a pinned project the hooks come from the **plugin**, not from `.claude/settings.json`:
 
 - **Interactive sessions** get them from the plugin installed for Claude Code (`phasekit plugin install`; `install.sh` and `phasekit init` do it). Without the plugin an interactive session in the project runs without the guard; `phasekit check` warns about it loudly. The plugin is inert outside phasekit projects.
-- **The loop** passes the engine's own plugin (`--plugin-dir <engine>/plugin`) to every turn, and before every model turn runs a **guard self-check**: a throwaway, model-free `claude -p` whose prompt the plugin's `guard-probe` hook blocks after proving that the plugin loaded, that its hooks.json wires every hook on its event, and that the command guard — called through the same dispatcher a tool call takes — refuses `git reset --hard` (and `git commit` under the loop). It cannot fire the PreToolUse or Stop events themselves (that would need a model turn). No proof, no turn: `run-phase.sh` refuses the turn (exit 7; the loop retries per `PHASEKIT_ITER_RETRY`, then exits 7, committing nothing). A pinned session never runs without its guard.
+- **The loop** passes the engine's own plugin (`--plugin-dir <engine>/plugin`) to every turn, and before a run's first model turn (and again whenever the plugin or the CLI changes) runs a **guard self-check**: a throwaway, model-free `claude -p` whose prompt the plugin's `guard-probe` hook blocks after proving that the plugin loaded, that its hooks.json wires every hook on its event, and that the command guard — called through the same dispatcher a tool call takes — refuses `git reset --hard` (and `git commit` under the loop). It cannot fire the PreToolUse or Stop events themselves (that would need a model turn). No proof, no turn: `run-phase.sh` refuses the turn (exit 7; the loop retries per `PHASEKIT_ITER_RETRY`, then exits 7, committing nothing). A pinned session never runs without its guard.
 
 **Rule: never make project settings permissive to support autonomous mode.** Use local settings or CLI flags instead.
 
@@ -370,7 +371,7 @@ The phasekit repository is the engine (an engine in the store is a read-only cop
   CLAUDE.md                       # phasekit's own Claude instructions
   settings.json                   # phasekit's own settings + hooks
   agents/                         # subagent role definitions (9 agents)
-  hooks/                          # deny-dangerous-commands, require-verdict, wrapup-nudge, compact-reanchor
+  hooks/                          # deny-dangerous-commands, require-verdict, wrapup-nudge
   skills/autonomous-product-builder/  # packaged workflow skill
 .claude-plugin/marketplace.json   # the directory marketplace the plugin installs from
 plugin/                           # the Claude Code plugin: hooks.json, run-hook.sh, agents (links into .claude/)

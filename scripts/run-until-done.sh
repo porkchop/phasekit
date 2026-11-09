@@ -2197,6 +2197,9 @@ Make them stageable (an empty or nested repository: remove its .git or move it o
     # re-written byte-identical is no landing, and a rewritten evidence file
     # would defeat the no-churn gate below (review round 1).
     if artifact_never_landed "$file"; then write_phase_evidence "$file"; fi
+  else
+    # v0.29.0 (review B2): a checkpoint never carries a ledger with findings.
+    keep_bad_ledger_out
   fi
 
   # Substantive-change gate. A blocked or stalled iteration must still write
@@ -2239,6 +2242,14 @@ Make them stageable (an empty or nested repository: remove its .git or move it o
     shape_bad="$(rules_register_refusals)"
     if [[ -n "$shape_bad" ]]; then
       record_rules_register_refusal "$shape_bad"
+      unstage_verdicts_after_refusal
+      return 1
+    fi
+    # v0.29.0: a ledger-mode project never loses a criterion id at a landing
+    # (acceptance_ledger_refusals).
+    shape_bad="$(acceptance_ledger_refusals)"
+    if [[ -n "$shape_bad" ]]; then
+      record_acceptance_ledger_refusal "$shape_bad"
       unstage_verdicts_after_refusal
       return 1
     fi
@@ -3675,6 +3686,105 @@ rules_register_refusals() {
   return 0
 }
 
+acceptance_ledger_refusals() {
+  # v0.29.0 (audit D2): a project in LEDGER mode (docs/acceptance.json exists,
+  # on disk or at HEAD) keeps every criterion id across landings: the ledger
+  # parses, every entry is well-formed, and every id the ledger had at HEAD —
+  # the previous landing — is still there (status may move). Prints one line
+  # per finding (scripts/phasekit-spec.py check, exit 3), nothing otherwise.
+  # Silent — never a refusal — without a ledger (append-only SPEC mode, the
+  # convention unchanged) and when the checker is missing or cannot complete
+  # (fail-open: a WARN names it). $1 = "verdict" (`phasekit verify`): judge
+  # only when a verdict record rides, as the landing would. Always returns 0.
+  local ledger="$ROOT_DIR/docs/acceptance.json" tool="${ENGINE_DIR:-$ROOT_DIR}/scripts/phasekit-spec.py"
+  local f recs=0 out rc=0 err base
+  base="$(acceptance_ledger_base)"
+  # review B2 second pass: judged against the BASELINE, not HEAD — a wip that
+  # carried the ledger's deletion must not read as "never had one"
+  if [[ ! -e "$ledger" ]] && ! git -C "$ROOT_DIR" cat-file -e "$base:docs/acceptance.json" 2>/dev/null; then
+    return 0
+  fi
+  if [[ "${1:-}" == verdict ]]; then
+    for f in phase-approval.json project-complete.json; do
+      [[ -f "$ARTIFACTS_DIR/$f" ]] || continue
+      artifact_never_landed "$ARTIFACTS_DIR/$f" || continue
+      if [[ "$f" == project-complete.json ]]; then completion_record_rides || continue; fi
+      recs=1
+    done
+    [[ "$recs" -eq 1 ]] || return 0
+  fi
+  if [[ ! -f "$tool" ]]; then
+    echo "run-until-done: WARN — acceptance ledger check skipped: $tool is missing" >&2
+    return 0
+  fi
+  if [[ ! -e "$ledger" ]]; then
+    echo "docs/acceptance.json: the ledger is gone from the tree (it was committed at ${base:0:12}) — a project leaves ledger mode only by an operator's hand, never in a landing"
+    return 0
+  fi
+  err="$(mktemp)" || return 0
+  out="$(python3 "$tool" check --repo "$ROOT_DIR" --base "$base" 2>"$err")" || rc=$?
+  if [[ "$rc" -eq 3 ]]; then
+    printf '%s\n' "$out"
+  elif [[ "$rc" -ne 0 ]]; then
+    echo "run-until-done: WARN — acceptance ledger check skipped: the checker exited $rc ($(head -n 1 "$err" 2>/dev/null))" >&2
+  fi
+  rm -f "$err"
+  return 0
+}
+
+acceptance_ledger_base() {
+  # v0.29.0 (review B2): the baseline every id must survive from is the last
+  # commit that LANDED the ledger — a verdict landing (phase, completion, the
+  # squash or merge-back that carries one) or a commit the loop did not make
+  # (an operator's `phasekit spec migrate`, a supervisor's intake) — never a
+  # checkpoint (update, wrapup, wip): a checkpoint may carry a session's
+  # unjudged edit, and judging against it would let a lost id through two
+  # commits later. Prints a revision; HEAD when nothing older qualifies.
+  local line sha kind
+  while IFS=$'\t' read -r sha kind; do
+    case "$kind" in
+      ""|phase|completion|squash|merge-back|intake) printf '%s' "$sha"; return 0 ;;
+    esac
+  done < <(git -C "$ROOT_DIR" log -n 400 --format='%H%x09%(trailers:key=Phasekit-Kind,valueonly,separator=%x2C)' HEAD -- docs/acceptance.json 2>/dev/null)
+  printf '%s' HEAD
+}
+
+keep_bad_ledger_out() {
+  # v0.29.0 (review B2): a ledger with findings never rides ANY loop commit.
+  # The verdict landing refuses it (acceptance_ledger_refusals at the landing
+  # site); an update or wrap-up checkpoint — which commits the staged tree
+  # unjudged — puts docs/acceptance.json back as HEAD has it in the INDEX
+  # (the worktree keeps the session's edit, uncommitted) so the next verdict
+  # landing judges it against the same baseline. One WARN names the findings.
+  local f="docs/acceptance.json" bad
+  if git -C "$ROOT_DIR" diff --cached --quiet -- "$f" 2>/dev/null; then return 0; fi
+  bad="$(acceptance_ledger_refusals)"
+  [[ -n "$bad" ]] || return 0
+  git -C "$ROOT_DIR" reset -q -- "$f" 2>/dev/null || true
+  echo "run-until-done: WARN — docs/acceptance.json has findings and stays OUT of this checkpoint commit (the next verdict landing judges it): $(printf '%s\n' "$bad" | sed -n '1,2p' | tr '\n' ' ')" >&2
+  return 0
+}
+
+record_acceptance_ledger_refusal() {
+  # $1 = acceptance_ledger_refusals' lines; $2 = "once" (the wrap-up).
+  local lines label="acceptance ledger (docs/acceptance.json)"
+  lines="$(printf '%s\n' "$1" | sed -n '1,30p')"
+  echo "run-until-done: REFUSED — the acceptance ledger (docs/acceptance.json) has findings:" >&2
+  printf '%s\n' "$lines" | sed 's/^/  /' >&2
+  if [[ "${2:-}" == once ]] && jq -e --arg l "$label" --arg t "$lines" \
+       '.commit_refusal == true and .label == $l and ((.log_tail // "") | tostring | contains($t))' \
+       "$ARTIFACTS_DIR/phase-verify-failed.json" >/dev/null 2>&1; then
+    echo "  (already recorded for these findings; no breaker attempt spent)" >&2
+    return 0
+  fi
+  record_commit_refusal "$label" "$lines
+docs/acceptance.json is this project's acceptance ledger (docs/QUALITY_GATES.md \"Spec integrity gate\", ledger mode): one entry per criterion, ids append-only, status mutable. Fix each line above:
+  - a lost id: put the entry back (ids are never deleted or renumbered) and mark it \`superseded\` with \`superseded_by\` naming its replacement, or \`withdrawn\` with a \`reason\`;
+  - a malformed entry: \`id\` is \`AC#\` + letters, digits, dots, hyphens; \`text\` non-empty; \`status\` one of open | met | superseded | withdrawn;
+  - a duplicate id: give the newer criterion a new id.
+\`phasekit spec check\` runs the same check. THEN RE-WRITE THE RECORD YOU WROTE (same content is fine): the loop lands only a verdict written after this refusal. End your turn — the loop retries the landing."
+}
+
 record_rules_register_refusal() {
   # $1 = rules_register_refusals' lines; $2 = "once" (the wrap-up), as
   # record_deferral_shape_refusal: the same unchanged refusal already
@@ -4667,6 +4777,26 @@ evidence_driver() {
   fi
 }
 
+evidence_files_enabled() {
+  # v0.29.0 (audit D3): whether a landing writes the phase-close evidence
+  # FILE (artifacts/iterations/<N>/<P>.json) into the commit. The record
+  # stamps (plan_paths, ui_landing) are written either way; only the file is
+  # optional. PHASEKIT_EVIDENCE_FILES=1 forces it, =0 turns it off; unset,
+  # the project decides through git: a tree whose .gitignore ignores
+  # artifacts/iterations/ (the v0.29.0 seed, or `phasekit evidence untrack`)
+  # gets no file (the writer stages with `git add -f`, so the ignore alone
+  # never stopped it) and every other tree gets one, exactly as before. 2,070 tracked evidence files on the largest
+  # fleet project were measured against a median test read of zero.
+  case "${PHASEKIT_EVIDENCE_FILES:-}" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+  if git -C "$ROOT_DIR" check-ignore -q -- "artifacts/iterations/0/0.json" 2>/dev/null; then
+    return 1
+  fi
+  return 0
+}
+
 write_phase_evidence() {
   # $1 = the artifact driving this approval-class commit; call AFTER the tree
   # is staged. Writes artifacts/iterations/<N>/<P>.json (complete.json for a
@@ -4708,6 +4838,8 @@ write_phase_evidence() {
   ui="$(phase_ui_check "$p" "$since" "$n")"
   _stamp_ui_landing "$f" "$ui"
   [[ -n "$n" ]] || return 0
+  # v0.29.0: the file is opt-in by the tree (evidence_files_enabled above).
+  evidence_files_enabled || return 0
   if [[ -z "$p" && "$name" != complete ]]; then echo "run-until-done: WARN — the approval names no usable phase; no phase-close evidence written (F5)." >&2; return 0; fi
   [[ -n "$since" ]] || return 0
   rel="artifacts/iterations/$n/$name.json"
@@ -5003,6 +5135,13 @@ phasekit_verify() {
     echo "phasekit verify: fix each entry as docs/QUALITY_GATES.md \"Project rules register\" says (\`## <ID> — <rule>\` with \`- Incident:\`, \`- Implemented in:\`, \`- Test:\`; unique ids; a Test that exists, or \`no test yet\`) and name only register ids in rules_touched; then run it again (\`phasekit rules check\` is the same check). The gate was not run." >&2
     return 1
   fi
+  shape_bad="$(acceptance_ledger_refusals verdict)"
+  if [[ -n "$shape_bad" ]]; then
+    echo "phasekit verify: RED — the landing will refuse this verdict: the acceptance ledger (docs/acceptance.json) has findings:" >&2
+    printf '%s\n' "$shape_bad" | sed -n '1,30s/^/  /p' >&2
+    echo "phasekit verify: ids are never deleted or renumbered — put a lost entry back as superseded (superseded_by) or withdrawn (reason); fix malformed entries (docs/QUALITY_GATES.md \"Spec integrity gate\", ledger mode); then run it again (\`phasekit spec check\` is the same check). The gate was not run." >&2
+    return 1
+  fi
   drv="$(evidence_driver)"
   stage_landing_tree "$drv" landing
   if [[ -n "${STAGE_LOCKED:-}" ]]; then
@@ -5211,7 +5350,7 @@ hermetic_tests_advisory() {
   [[ -n "$hits" ]] || return 0
   n="$(printf '%s\n' "$hits" | wc -l | tr -d ' ')"
   first="$(printf '%s\n' "$hits" | sed -n '1,5p' | paste -sd, - | sed 's/,/, /g')"
-  echo "ADVISORY: $n test files appear to read git history ($first$( [[ "$n" -gt 5 ]] && echo ", …")) — a test reads the tree and declared fixtures, never the project's history; a fact about the past is an evidence file (artifacts/iterations/<N>/<phase>.json). See docs/QUALITY_GATES.md \"Hermetic tests\" (a test over a scratch repository it builds itself is fine). Advisory only: the gate is unchanged."
+  echo "ADVISORY: $n test files appear to read git history ($first$( [[ "$n" -gt 5 ]] && echo ", …")) — a test reads the tree and declared fixtures, never the project's history; a fact about the past is a golden file the project commits itself (a session asks \`phasekit scope\`). See docs/QUALITY_GATES.md \"Hermetic tests\" (a test over a scratch repository it builds itself is fine). Advisory only: the gate is unchanged."
   return 0
 }
 
@@ -6175,6 +6314,11 @@ deadline_lastresort_commit() {
     fi
     if [[ "$_gp_pending" -eq 0 ]]; then
       git add -A 2>/dev/null || { sleep 2; continue; }
+      # v0.29.0 (review B2): the last-resort wip never carries a ledger with
+      # findings (a deleted or id-losing docs/acceptance.json stays out).
+      # Guarded like the other post-v0.13 helpers: the fork inherits it
+      # (defined above the arm line); the narrow test prelude does not.
+      if command -v keep_bad_ledger_out >/dev/null 2>&1; then keep_bad_ledger_out; fi
     fi
     _disarm_deploy_artifact ready-to-deploy.json
     _disarm_deploy_artifact project-complete.json
@@ -6715,9 +6859,22 @@ wrapup_commit() {
     fi
   fi
   if [[ -n "$_wdrv" ]]; then
+    # v0.29.0: and for a landing the acceptance ledger refuses.
+    _wledger="$(acceptance_ledger_refusals)"
+    if [[ -n "$_wledger" ]]; then
+      record_acceptance_ledger_refusal "$_wledger" once
+      echo "Wrap-up: the verdicts stay out (the acceptance ledger has findings); committing the rest as a checkpoint." >&2
+      git reset -q -- "$ARTIFACTS_DIR/phase-approval.json" "$ARTIFACTS_DIR/project-complete.json" 2>/dev/null || true
+      _wdrv=""
+      _wnote="; ALSO your verdict was kept out because the acceptance ledger (docs/acceptance.json) has findings ($(printf '%s\n' "$_wledger" | sed -n '1,2p' | tr '\n' ' ')) — fix them (phasekit spec check)"
+    fi
+  fi
+  if [[ -n "$_wdrv" ]]; then
     if artifact_never_landed "$_wdrv"; then write_phase_evidence "$_wdrv"; fi
   else
     reset_derived_state
+    # v0.29.0 (review B2): a wrap-up checkpoint never carries a bad ledger.
+    keep_bad_ledger_out
   fi
   if git diff --cached --quiet -- ':/' \
        ":(exclude)$ARTIFACTS_DIR/phase-blocked.json" \
@@ -6833,7 +6990,7 @@ compose_light_prompt() {
 === PHASEKIT LIGHT MODE (this session) ===
 This session runs in LIGHT execution mode: the task was triaged as small
 (single-surface, low blast radius). Reduced ceremony applies. These rules
-OVERRIDE the standard operating rules below wherever they conflict:
+OVERRIDE the standard operating rules (your system prompt) wherever they conflict:
 - Treat the whole task as ONE collapsed phase: build + verify + review in a
   single pass. Do not decompose it into multiple phases.
 - Do NOT use the strategy-planner or architecture-red-team subagents.
@@ -7275,6 +7432,32 @@ if [[ -f "$ROOT_DIR/docs/LEARNINGS.md" ]] && [[ "$LEARNINGS_WARN_KB" =~ ^[0-9]+$
     fi
   fi
 fi
+
+# --- Document size advisory (v0.29.0, audit A3) ------------------------------
+# One stderr line, once per session, naming every project document under
+# docs/ (top level only; archives and LEARNINGS, which has its own budget,
+# excluded) over PHASEKIT_DOC_WARN_KB (default 40). The process surface a
+# project carries is paid for by every session that reads it: 1.2–3.8 MB
+# SPECs were measured in the fleet with a median read of 0 lines. Advisory
+# only — nothing is rotated, refused or injected; a supervisor may key a
+# maintenance row on the line. Non-numeric values disable the check.
+docs_size_advisory() {
+  local warn_kb="${PHASEKIT_DOC_WARN_KB:-40}" f kb over=()
+  [[ "$warn_kb" =~ ^[0-9]+$ ]] || return 0
+  [[ -d "$ROOT_DIR/docs" ]] || return 0
+  for f in "$ROOT_DIR"/docs/*.md; do
+    [[ -f "$f" ]] || continue
+    case "$(basename "$f")" in
+      LEARNINGS*.md|*[Aa][Rr][Cc][Hh][Ii][Vv][Ee]*) continue ;;
+    esac
+    kb=$(( $(wc -c < "$f") / 1024 ))
+    if (( kb >= warn_kb )); then over+=("docs/$(basename "$f") ${kb} KB"); fi
+  done
+  (( ${#over[@]} > 0 )) || return 0
+  echo "run-until-done: note — document(s) over the ${warn_kb} KB advisory budget: $(IFS=';'; echo "${over[*]}" | sed 's/;/; /g'). Every session pays to carry what it reads; a living document states current behaviour and keeps its history in git (docs/QUALITY_GATES.md \"Spec integrity gate\"). Advisory only." >&2
+  return 0
+}
+docs_size_advisory
 
 # --- Iteration-mode resolution (v0.6.0) -------------------------------------
 # Eligibility guard: light mode with a stub/absent verify gate is refused —

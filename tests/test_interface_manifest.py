@@ -333,8 +333,7 @@ class ExitCodes(unittest.TestCase):
         """The hooks are small enough for equality: every declared code is a
         literal and every literal is declared."""
         for rel in (".claude/hooks/require-verdict.sh",
-                    ".claude/hooks/deny-dangerous-commands.sh",
-                    ".claude/hooks/compact-reanchor.sh"):
+                    ".claude/hooks/deny-dangerous-commands.sh"):
             declared = {int(c) for c in manifest()["exit_codes"][rel]["codes"]}
             self.assertEqual(declared, literal_exit_codes(REPO_ROOT / rel), rel)
 

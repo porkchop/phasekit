@@ -81,11 +81,16 @@ class AddsMissingRegistrations(SyncFixture):
         self.assertIn("./.claude/hooks/require-verdict.sh", commands)
 
     def test_matchers_are_carried_over_not_invented(self):
+        # v0.29.0: the SessionStart (compact) registration is gone with the
+        # retired hook; the Bash matcher on the command guard is the one the
+        # template carries, and the nudge's entries carry none.
         self.write_settings({"hooks": {}})
         self.sync()
         hooks = self.read_settings()["hooks"]
-        session_start = hooks["SessionStart"][0]
-        self.assertEqual(session_start["matcher"], "compact")
+        self.assertNotIn("SessionStart", hooks)
+        by_cmd = {h["command"]: e.get("matcher") for e in hooks["PreToolUse"] for h in e["hooks"]}
+        self.assertEqual(by_cmd["./.claude/hooks/deny-dangerous-commands.sh"], "Bash")
+        self.assertIsNone(by_cmd["./.claude/hooks/wrapup-nudge.sh"])
 
     def test_a_settings_file_with_no_hooks_key_at_all_is_handled(self):
         self.write_settings({"permissions": {"allow": [], "deny": []}})

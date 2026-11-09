@@ -749,6 +749,11 @@ run_container() {
   if [[ -n "${PHASEKIT_SESSION_DEADLINE:-}" ]]; then
     docker_args+=(-e PHASEKIT_SESSION_DEADLINE="$PHASEKIT_SESSION_DEADLINE")
   fi
+  # v0.29.0 (audit D3): whether the landing writes the phase-close evidence
+  # file; unset, the tree decides (see evidence_files_enabled in the loop).
+  if [[ -n "${PHASEKIT_EVIDENCE_FILES:-}" ]]; then
+    docker_args+=(-e PHASEKIT_EVIDENCE_FILES="$PHASEKIT_EVIDENCE_FILES")
+  fi
   # Deadline-watchdog tuning knobs (v0.13.0) ride beside the deadline they
   # qualify; defaults are computed in-loop, so forwarding is only needed when
   # an operator overrides them.

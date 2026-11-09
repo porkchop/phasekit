@@ -414,6 +414,8 @@ def require_project(kind):
 # The hooks phasekit itself wires in a vendored project (the plugin provides
 # them in a pinned one). A project's OWN hooks under .claude/hooks/ are its
 # business: never stripped, never a leftover.
+# v0.29.0: compact-reanchor retired (0 fires in 574 session logs); it stays in
+# this STRIP list so a migrate still removes a pre-v0.29.0 project's wiring.
 ENGINE_HOOKS = ("deny-dangerous-commands", "require-verdict", "wrapup-nudge", "compact-reanchor")
 _ENGINE_HOOK_RE = re.compile(r"(^|[\s/\"'])\.claude/hooks/(" + "|".join(ENGINE_HOOKS) + r")\.sh\b")
 
@@ -657,6 +659,268 @@ def render_pinned_files(root, profile, tag):
     return written
 
 
+# --- phase evidence (v0.29.0, audit D3) -----------------------------------------
+# The loop's phase-close evidence files (artifacts/iterations/<N>/<P>.json) are
+# the loop's record, not project content: the run ledger, the session logs and
+# a supervisor's database hold what they duplicated, and a tracked copy is read
+# by no test (median read 0 on the largest fleet project, 2,070 files). A new
+# project ignores the directory from its first commit; an existing one stops
+# tracking it with `phasekit evidence untrack`, at rest, gated like a migrate.
+EVIDENCE_IGNORE_LINE = "artifacts/iterations/"
+EVIDENCE_IGNORE_BLOCK = ("\n# phasekit v0.29.0: phase-close evidence is the loop's record, "
+                         "not project content\n" + EVIDENCE_IGNORE_LINE + "\n")
+EVIDENCE_SUBJECT = "chore(phasekit): untrack phase evidence (artifacts/iterations/)"
+
+
+def gitignore_ignores_evidence(root):
+    r = _git(root, "check-ignore", "-q", "--", "artifacts/iterations/0/0.json")
+    return r.returncode == 0
+
+
+def _path_ignored(root, rel):
+    probe = rel.rstrip("/") + "/0.probe" if rel.endswith("/") else rel
+    return _git(root, "check-ignore", "-q", "--", probe).returncode == 0
+
+
+def seed_evidence_ignore(root, extra=()):
+    """Append the ignore block to .gitignore for the evidence directory and
+    any EXTRA path the tree does not already ignore (a path left untracked
+    but not ignored would be swept back in by the loop's next landing).
+    Returns the path written, or None when nothing was needed."""
+    lines = [rel for rel in [EVIDENCE_IGNORE_LINE, *extra] if not _path_ignored(root, rel)]
+    if not lines:
+        return None
+    gi = root / ".gitignore"
+    text = gi.read_text(encoding="utf-8") if gi.is_file() else ""
+    if text and not text.endswith("\n"):
+        text += "\n"
+    block = ("# phasekit v0.29.0: phase-close evidence is the loop's record, not project content\n"
+             + "\n".join(lines) + "\n")
+    gi.write_text(text + ("\n" if text else "") + block, encoding="utf-8")
+    return ".gitignore"
+
+
+def cmd_evidence(args):
+    if args.action != "untrack":
+        raise PinError("usage: phasekit evidence untrack [--path P]... [--dry-run]", EXIT_USAGE)
+    refuse_under_loop("evidence untrack")
+    root = require_project(None)
+    if not _has_head(root):
+        raise PinError("the repository has no commits yet", EXIT_USAGE)
+    dirty = tree_dirty(root)
+    if dirty:
+        raise PinError("the working tree is not clean (commit or stash first): "
+                       + "; ".join(dirty[:6]), EXIT_USAGE)
+    extras = [p.strip() for p in (args.path or []) if p.strip()]
+    paths = [EVIDENCE_IGNORE_LINE] + [p.rstrip("/") + ("/" if (root / p).is_dir() else "")
+                                      for p in extras]
+    tracked = []
+    tracked_paths = []
+    for p in paths:
+        under = [t for t in _git(root, "ls-files", "--", p).stdout.splitlines() if t]
+        if under:
+            tracked_paths.append(p)
+        tracked += under
+    to_ignore = [p for p in paths if not _path_ignored(root, p)]
+    if not tracked and not to_ignore:
+        say(f"phasekit evidence untrack: {root.name} tracks no evidence under {', '.join(paths)} "
+            "and already ignores it — nothing to do")
+        return EXIT_OK
+    say(f"phasekit evidence untrack: {root.name}")
+    say(f"  untrack {len(tracked)} file(s) under {', '.join(paths)} (kept on disk)")
+    for line in to_ignore:
+        say(f"  add `{line}` to .gitignore")
+    if args.dry_run:
+        for t in tracked[:40]:
+            say(f"    - {t}")
+        if len(tracked) > 40:
+            say(f"    … {len(tracked) - 40} more")
+        return EXIT_OK
+    lay = layout(root)
+    engine = resolve_engine(root) if lay == "pinned" else root
+    gi = root / ".gitignore"
+    gi_before = gi.read_bytes() if gi.is_file() else None
+    index_path = Path(_git(root, "rev-parse", "--git-path", "index").stdout.strip())
+    if not index_path.is_absolute():
+        index_path = root / index_path
+    index_bytes = index_path.read_bytes() if index_path.is_file() else None
+
+    def restore():
+        reset = _git(root, "reset", "-q", "--", ".")
+        if index_bytes is not None:
+            try:
+                index_path.write_bytes(index_bytes)
+            except OSError as exc:
+                warn(f"phasekit evidence untrack: could not restore the git index ({exc}); "
+                     "run `git reset` before committing anything")
+        elif reset.returncode != 0:
+            warn("phasekit evidence untrack: `git reset` failed; run it before committing anything")
+        if gi_before is None:
+            try:
+                gi.unlink()
+            except FileNotFoundError:
+                pass
+        else:
+            gi.write_bytes(gi_before)
+
+    try:
+        staged = []
+        if tracked:
+            # only the paths that match something: `git rm` is fatal on a
+            # pathspec that matches no file (review M3)
+            r = _git(root, "rm", "-q", "-r", "--cached", "--", *tracked_paths)
+            if r.returncode != 0:
+                raise PinError("git rm --cached failed: " + (r.stderr or "").strip())
+            staged += paths
+        if to_ignore:
+            seed_evidence_ignore(root, paths[1:])
+            stage_exactly(root, [".gitignore"])
+            staged.append(".gitignore")
+        result = run_gate(root, engine)
+        if not report_gate(result, "evidence untrack"):
+            restore()
+            warn("phasekit evidence untrack: nothing changed (the tree is as it was).")
+            return EXIT_GATE_RED
+        # The index already holds exactly this command's changes (the removals
+        # and .gitignore); commit_exactly would `git add --all` the paths and
+        # re-stage what was just untracked, so commit the index as it stands,
+        # after checking it holds nothing else.
+        changed = _changed_paths(root)
+        if changed is None:
+            raise PinError("could not read the index")
+        allowed = set(tracked) | {".gitignore"}
+        stray = sorted(set(changed) - allowed)
+        if stray:
+            raise PinError("the index holds changes this command did not make: "
+                           + ", ".join(stray[:8]))
+        body = (f"Untracked {len(tracked)} phase-close evidence file(s); the files stay on disk, "
+                "ignored. The loop writes no new ones in a tree that ignores artifacts/iterations/ "
+                "(phasekit v0.29.0). The run ledger, the session logs and the supervisor's records "
+                "hold what they duplicated.")
+        r = _git(root, "commit", "-q", "-m", EVIDENCE_SUBJECT, "-m", body)
+        if r.returncode != 0:
+            last = ((r.stderr or r.stdout or "").strip().splitlines() or ["?"])[-1]
+            raise PinError("commit failed: " + last)
+        sha = _git(root, "rev-parse", "--short=12", "HEAD").stdout.strip()
+    except PinError:
+        restore()
+        raise
+    say(f"phasekit evidence untrack: done{(' — commit ' + sha) if sha else ''}")
+    return EXIT_OK
+
+
+# --- phasekit spec migrate (v0.29.0, audit D2) -----------------------------------
+_SPEC_TOOL = None
+
+
+def spec_tool(engine):
+    """scripts/phasekit-spec.py of ENGINE as a module (its name has a hyphen)."""
+    global _SPEC_TOOL
+    if _SPEC_TOOL is None:
+        path = Path(engine) / "scripts" / "phasekit-spec.py"
+        if not path.is_file():
+            raise PinError(f"this project's engine has no acceptance-ledger tool ({path}); "
+                           "it needs phasekit v0.29.0 or later", EXIT_USAGE)
+        spec = importlib.util.spec_from_file_location("phasekit_spec_tool", path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        _SPEC_TOOL = module
+    return _SPEC_TOOL
+
+
+SPEC_MIGRATE_SUBJECT = "chore(phasekit): enter acceptance-ledger mode (docs/acceptance.json)"
+
+
+def cmd_spec_migrate(args):
+    """SPEC criteria → docs/acceptance.json; the SPEC archived; a living
+    skeleton written; the project's gate run; ONE commit. Red: byte-for-byte
+    restore (exit 4). An operator's command, at rest."""
+    refuse_under_loop("spec migrate")
+    root = require_project(None)
+    if not _has_head(root):
+        raise PinError("the repository has no commits yet", EXIT_USAGE)
+    dirty = tree_dirty(root)
+    if dirty:
+        raise PinError("the working tree is not clean (commit or stash first): "
+                       + "; ".join(dirty[:6]), EXIT_USAGE)
+    lay = layout(root)
+    engine = resolve_engine(root) if lay == "pinned" else ENGINE
+    tool = spec_tool(engine)
+    try:
+        plan = tool.migrate_plan(root)
+    except tool.MigrateError as exc:
+        code = EXIT_USAGE if exc.code == tool.EXIT_EXISTS else EXIT_ERROR
+        raise PinError(str(exc), code) from exc
+    c = plan["counts"]
+    say(f"phasekit spec migrate: {root.name} -> ledger mode")
+    say(f"  {len(plan['entries'])} criteria -> {tool.LEDGER} ({c['met']} met, "
+        f"{c['superseded']} superseded, {c['withdrawn']} withdrawn; "
+        f"{c['skipped_lines']} id-less line(s) stay in the archive)")
+    say(f"  {tool.SPEC} ({plan['spec_bytes']} bytes) -> {plan['archive']}; living skeleton "
+        f"{plan['skeleton_bytes']} bytes")
+    missing = plan.get("cited_not_captured") or []
+    if missing:
+        say(f"  {len(missing)} id(s) the SPEC cites were NOT captured as criteria: "
+            + ", ".join(missing[:30]) + (" …" if len(missing) > 30 else ""))
+        if not args.allow_missing:
+            raise PinError(f"refused — {len(missing)} cited id(s) would be missing from the ledger "
+                           "(listed above); give each a numbered or `AC#<id>` line the SPEC cites, "
+                           "or pass --allow-missing (they stay in the archive only)", EXIT_USAGE)
+    if args.dry_run:
+        for e in plan["entries"][:40]:
+            say(f"    {e['id']} [{e['status']}] {e['text'][:80]}")
+        if len(plan["entries"]) > 40:
+            say(f"    … {len(plan['entries']) - 40} more")
+        return EXIT_OK
+    gate_engine = engine if lay == "pinned" else root
+    spec_path = root / tool.SPEC
+    spec_before = spec_path.read_bytes()
+    index_path = Path(_git(root, "rev-parse", "--git-path", "index").stdout.strip())
+    if not index_path.is_absolute():
+        index_path = root / index_path
+    index_bytes = index_path.read_bytes() if index_path.is_file() else None
+
+    def restore():
+        reset = _git(root, "reset", "-q", "--", ".")
+        if index_bytes is not None:
+            try:
+                index_path.write_bytes(index_bytes)
+            except OSError as exc:
+                warn(f"phasekit spec migrate: could not restore the git index ({exc}); "
+                     "run `git reset` before committing anything")
+        elif reset.returncode != 0:
+            warn("phasekit spec migrate: `git reset` failed; run it before committing anything")
+        for rel in (tool.LEDGER, plan["archive"]):
+            try:
+                (root / rel).unlink()
+            except FileNotFoundError:
+                pass
+            e_prune_empty_parents(root, (root / rel).parent)
+        spec_path.write_bytes(spec_before)
+
+    try:
+        written = tool.apply_migration(root, plan)
+        stage_exactly(root, written)
+        result = run_gate(root, gate_engine)
+        if not report_gate(result, "spec migrate"):
+            restore()
+            warn("phasekit spec migrate: nothing changed (the tree is as it was).")
+            return EXIT_GATE_RED
+        body = (f"{len(plan['entries'])} acceptance criteria moved from docs/SPEC.md into "
+                f"{tool.LEDGER} ({c['met']} met, {c['superseded']} superseded, "
+                f"{c['withdrawn']} withdrawn; {c['skipped_lines']} id-less line(s) archived). "
+                f"The SPEC is archived at {plan['archive']} and docs/SPEC.md is now a "
+                "living document (phasekit v0.29.0, ledger mode).")
+        sha = commit_exactly(root, written, SPEC_MIGRATE_SUBJECT, body=body)
+    except PinError:
+        restore()
+        raise
+    say(f"phasekit spec migrate: done{(' — commit ' + sha) if sha else ''}. Next: a session "
+        "edits docs/SPEC.md into current behaviour and marks open criteria `open` in the ledger.")
+    return EXIT_OK
+
+
 def cmd_init(args):
     cwd = Path(os.getcwd()).resolve()
     root = project_root(cwd)
@@ -686,6 +950,11 @@ def cmd_init(args):
     say(f"phasekit init: {root.name} on phasekit {tag} (profile {args.profile})")
     written = render_pinned_files(root, args.profile, tag)
     (root / "artifacts").mkdir(exist_ok=True)
+    # v0.29.0: a new project never tracks phase-close evidence.
+    gi = seed_evidence_ignore(root)
+    if gi:
+        written.append(gi)
+        say(f"  wrote: {gi} (+ {EVIDENCE_IGNORE_LINE})")
     sha = None
     if not args.no_commit:
         sha = commit_exactly(root, written, f"{INIT_SUBJECT} {tag} ({args.profile})")
@@ -1359,6 +1628,16 @@ def main(argv=None):
     pp = sub.add_parser("plugin")
     pp.add_argument("action", nargs="?", default="status", choices=["install", "status"])
     sub.add_parser("docs")
+    psm = sub.add_parser("spec-migrate")
+    psm.add_argument("--dry-run", action="store_true")
+    psm.add_argument("--allow-missing", action="store_true",
+                     help="migrate even when ids the SPEC cites were not captured as criteria")
+    pev = sub.add_parser("evidence")
+    pev.add_argument("action", nargs="?", default="untrack", choices=["untrack"])
+    pev.add_argument("--path", action="append",
+                     help="another tracked path under artifacts/ to untrack with the evidence "
+                          "(repeatable; the gate judges the result)")
+    pev.add_argument("--dry-run", action="store_true")
     pv = sub.add_parser("verify-runner")
     pv.add_argument("--in-runner", action="store_true",
                     help="accepted: the spelling `phasekit verify --in-runner` passes it")
@@ -1388,7 +1667,9 @@ def main(argv=None):
     args = p.parse_args(argv)
     handlers = {"resolve": cmd_resolve, "engines": cmd_engines, "init": cmd_init,
                 "migrate": cmd_migrate, "check": cmd_check, "upgrade": cmd_upgrade,
-                "plugin": cmd_plugin, "docs": cmd_docs, "verify-runner": cmd_verify_runner,
+                "plugin": cmd_plugin, "docs": cmd_docs, "evidence": cmd_evidence,
+                "spec-migrate": cmd_spec_migrate,
+                "verify-runner": cmd_verify_runner,
                 "land-runner": cmd_land_runner}
     try:
         return handlers[args.verb](args)

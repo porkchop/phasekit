@@ -79,9 +79,8 @@ fixed-timestep loop, seedable randomness, and a unit-tested core.
 
 - Tests are hermetic: a test reads the tree and declared fixtures, never git
   history (no `git log`/`rev-list`/`show <rev>:`/`blame` of this repository).
-  A fact about a past phase is an evidence file — phasekit commits
-  `artifacts/iterations/<N>/<phase>.json` at every phase close — or a golden
-  file (docs/QUALITY_GATES.md "Hermetic tests").
+  A fact about a past phase is a golden file the project commits itself (a
+  session asks `phasekit scope`; docs/QUALITY_GATES.md "Hermetic tests").
 - Tests read the declared surface: a test reads this project's own tree and
   phasekit's DECLARED surface (`contracts/interface.json` `facts`, or
   `bash scripts/phasekit.sh facts --json`), never the files phasekit owns (the

@@ -13,6 +13,9 @@
 #   phasekit self-update          move this phasekit clone along its channel
 #   phasekit roadmap next|done|init  the OPTIONAL docs/ROADMAP.md (see scripts/phasekit-roadmap.py)
 #   phasekit rules check|init     (v0.26.0) the project rules register docs/project/RULES.md
+#   phasekit spec check|init|migrate   (v0.29.0) the acceptance ledger docs/acceptance.json:
+#                                 check (ids kept since HEAD), init (an empty ledger), migrate
+#                                 (an operator's gated one-commit conversion of the SPEC)
 #                                 (see scripts/phasekit-rules.py)
 #   phasekit tests [report] [--json] [--failures FILE] [--session-bound S] [--measure FILE]
 #                                 (v0.27.0) the test-suite hygiene measure: per-tier time vs
@@ -67,6 +70,8 @@
 # before. See docs/INSTALL_LIFECYCLE.md.
 #   phasekit init [profile]       a new pinned project (pin + project docs + gate), one commit
 #   phasekit migrate              a vendored project -> pinned (exact, gated, one commit)
+#   phasekit evidence untrack [--path P]... [--dry-run]   (v0.29.0) stop tracking the loop's
+#                                 phase-close evidence files (kept on disk, ignored; gated, one commit)
 #   phasekit loop                 the phase loop on the HOST against this project
 #   phasekit run                  the phase loop in the CONTAINER (scripts/container-setup.sh run)
 #   phasekit container <cmd>      container-setup.sh build|setup|run|shell for this project
@@ -249,11 +254,34 @@ rules_check_verb() {
   "${PHASEKIT_PYTHON:-python3}" "$dir/phasekit-rules.py" check --repo "$root" || rrc=$?
   if [[ "$rrc" -eq 3 ]]; then
     echo "RULES: docs/project/RULES.md has findings (above); docs/QUALITY_GATES.md \"Project rules register\"" >&2
-    [[ "$crc" -ne 0 ]] || exit 8
+    [[ "$crc" -ne 0 ]] || crc=8
   elif [[ "$rrc" -ne 0 ]]; then
     echo "phasekit check: note — the rules checker could not complete (exit $rrc)" >&2
   fi
   exit "$crc"
+}
+
+# v0.29.0: `phasekit check` also judges the acceptance ledger of a project in
+# ledger mode (docs/acceptance.json); findings in an otherwise clean check are
+# exit 8, as the rules register's. Runs before rules_check_verb (which exits).
+spec_check_verb() {
+  local root="$1" crc="$2" dir src=0
+  if [[ -z "$root" || "$crc" -eq 6 || ! -e "$root/docs/acceptance.json" ]]; then
+    return 0
+  fi
+  dir="$(rules_tool_dir "$root" 2>/dev/null)" || dir=""
+  if [[ -z "$dir" || ! -f "$dir/phasekit-spec.py" ]]; then
+    echo "phasekit check: note — docs/acceptance.json was not checked (this engine has no ledger checker)" >&2
+    return 0
+  fi
+  "${PHASEKIT_PYTHON:-python3}" "$dir/phasekit-spec.py" check --repo "$root" || src=$?
+  if [[ "$src" -eq 3 ]]; then
+    echo "LEDGER: docs/acceptance.json has findings (above); docs/QUALITY_GATES.md \"Spec integrity gate\" (ledger mode)" >&2
+    SPEC_CHECK_FINDINGS=1
+  elif [[ "$src" -ne 0 ]]; then
+    echo "phasekit check: note — the ledger checker could not complete (exit $src)" >&2
+  fi
+  return 0
 }
 
 verb="${1:-}"
@@ -285,9 +313,12 @@ case "$verb" in
     else
       "${ENGINE[@]}" --check "$PWD" "$@" || crc=$?
     fi
+    SPEC_CHECK_FINDINGS=0
+    spec_check_verb "$root" "$crc"
+    if [[ "$SPEC_CHECK_FINDINGS" == 1 && "$crc" -eq 0 ]]; then crc=8; fi
     rules_check_verb "$root" "$crc"
     ;;
-  init|migrate|engines|plugin|docs|resolve)
+  init|migrate|engines|plugin|docs|resolve|evidence)
     require_pin_tool "$verb"
     exec "${PIN[@]}" "$@"
     ;;
@@ -314,7 +345,7 @@ case "$verb" in
     shift
     name="${1:-}"
     if [[ ! "$name" =~ ^[a-z][a-z-]*$ ]]; then
-      echo "phasekit hook: usage: phasekit hook <name> (deny-dangerous-commands, require-verdict, wrapup-nudge, compact-reanchor)" >&2
+      echo "phasekit hook: usage: phasekit hook <name> (deny-dangerous-commands, require-verdict, wrapup-nudge)" >&2
       exit 2
     fi
     root="$(pk_project_root)"
@@ -430,6 +461,25 @@ elif d.get("invalid"):
       pass+=(--declared-json "$declared")
     fi
     PHASEKIT_SCAFFOLD_ROOT="$SCAFFOLD_ROOT" exec node "$engine/scripts/phasekit-ui-check.mjs" --project "$project_root" "${pass[@]}"
+    ;;
+  spec)
+    # v0.29.0 (audit D2): the acceptance ledger. `check` and `init` are the
+    # tool's (the project's engine, as `rules`); `migrate` is an operator's
+    # gated, one-commit conversion (phasekit-pin.py spec-migrate).
+    shift
+    if [[ "${1:-}" == migrate ]]; then
+      shift
+      require_pin_tool "spec migrate"
+      exec "${PIN[@]}" spec-migrate "$@"
+    fi
+    root="$(pk_project_root)"
+    tool_dir="$(rules_tool_dir "$root")"
+    if [[ ! -f "$tool_dir/phasekit-spec.py" ]]; then
+      echo "phasekit spec: note — this project's engine has no ledger tool; using $SCRIPT_DIR/phasekit-spec.py" >&2
+      tool_dir="$SCRIPT_DIR"
+    fi
+    if (( $# > 0 )) && [[ -n "$root" && " $* " != *" --repo"* ]]; then set -- "$@" --repo "$root"; fi
+    exec "${PHASEKIT_PYTHON:-python3}" "$tool_dir/phasekit-spec.py" "$@"
     ;;
   rules)
     shift

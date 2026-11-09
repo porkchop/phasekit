@@ -25,6 +25,19 @@ fi
 
 PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
 
+# v0.29.0 (audit A3): the prompt file has two parts. Above the marker line is
+# the per-turn ORIENTATION (what to read, what to do first) — the user prompt.
+# Below it are the OPERATING RULES — delivered as the system prompt
+# (--append-system-prompt), one copy, byte-identical across sessions and
+# turns so the harness caches it, and never re-stated per turn. A file without
+# the marker is sent whole as the prompt (an older or custom prompt file).
+SYSTEM_RULES_MARKER='=== OPERATING RULES'
+SYSTEM_RULES=""
+if grep -q "^${SYSTEM_RULES_MARKER}" "$PROMPT_FILE"; then
+  SYSTEM_RULES="$(awk -v m="$SYSTEM_RULES_MARKER" 'f { print } !f && index($0, m) == 1 { f = 1 }' "$PROMPT_FILE")"
+  PROMPT_CONTENT="$(awk -v m="$SYSTEM_RULES_MARKER" 'index($0, m) == 1 { exit } { print }' "$PROMPT_FILE")"
+fi
+
 # v0.28.0 (the model's clock): the session prompt ENDS with the time — the
 # deadline in UTC and as T-minus seconds, and the take-control point — so the
 # first words the model reads carry what the PostToolUse clock
@@ -137,8 +150,8 @@ GUARD_REFUSED_RC=7
 # carries (tests/test_engine_outside.py pins this list to the manifest). Its
 # seed templates (SPEC, PHASES, …) and internal docs are never offered.
 ENGINE_PROCESS_DOCS="ADR_TEMPLATE CONTAINERIZATION CONTRACTS EXECUTION_MODES INSTALL_LIFECYCLE MUTATION_TESTING QUALITY_GATES REASONING_PROFILES USAGE_PATTERNS"
-render_pinned_prompt() {
-  local text="$1" name ver repl
+rewrite_engine_doc_paths() {
+  local text="$1" name repl
   # `&`, `\` and `#` would be sed syntax in the replacement
   repl="$(printf '%s' "$ENGINE_DIR" | sed -e 's/[\\&#]/\\&/g')"
   for name in $ENGINE_PROCESS_DOCS; do
@@ -146,6 +159,11 @@ render_pinned_prompt() {
     [[ -e "$ROOT_DIR/docs/$name.md" ]] && continue
     text="$(printf '%s' "$text" | sed -E "s#(^|[^/A-Za-z0-9_.-])docs/$name\\.md#\\1$repl/docs/$name.md#g")"
   done
+  printf '%s' "$text"
+}
+render_pinned_prompt() {
+  local text ver
+  text="$(rewrite_engine_doc_paths "$1")"
   ver="$(cat "$ENGINE_DIR/.engine-version" 2>/dev/null || git -C "$ENGINE_DIR" describe --tags --always 2>/dev/null || echo unknown)"
   cat <<ENGINE_EOF
 === PHASEKIT ENGINE (this session) ===
@@ -189,6 +207,39 @@ guard_probe() {
   fi
   echo "phasekit: REFUSING the turn — the guard self-check failed (${got:-the guard-probe hook of the plugin never ran, so the plugin did not load}). A pinned run never starts a model turn without its command guard and stop hook (plugin: $PLUGIN_DIR)." >&2
   return 1
+}
+
+# v0.29.0 (audit A3): the probe proves a PLUGIN + CLI pair; the pair does not
+# change between the turns of a run, so one green probe per pair is enough.
+# Its key — the plugin dir, the stat of hooks.json, of the dispatcher
+# run-hook.sh, of plugin.json and of every hook script it wires, and of the
+# `claude` binary — is kept in artifacts/logs; a turn
+# whose key matches skips the throwaway CLI start (seconds per turn, ~1/3 of
+# the loop's own overhead on a short turn). Any change to the pair, a failed
+# probe, or PHASEKIT_GUARD_PROBE_EVERY_TURN=1 probes again. The marker is
+# written only after a green probe and is the loop's (never committed).
+GUARD_PROBE_MARK="$LOG_DIR/.guard-probe-ok"
+guard_probe_key() {
+  local h bin
+  bin="$(command -v claude 2>/dev/null || echo /nonexistent)"
+  printf '%s|%s|%s' "$PLUGIN_DIR" \
+    "$(stat -L -c '%Y:%s' "$PLUGIN_DIR/hooks/hooks.json" "$PLUGIN_DIR/hooks/run-hook.sh" \
+        "$PLUGIN_DIR/.claude-plugin/plugin.json" "$bin" 2>/dev/null | tr '\n' ',')" \
+    "$(for h in deny-dangerous-commands require-verdict wrapup-nudge; do stat -L -c '%Y:%s' "$PLUGIN_DIR/hooks/scripts/$h.sh" 2>/dev/null || echo missing; done | tr '\n' ',')"
+}
+guard_probe_once() {
+  local key have=""
+  key="$(guard_probe_key)"
+  if [[ "${PHASEKIT_GUARD_PROBE_EVERY_TURN:-0}" != 1 && -r "$GUARD_PROBE_MARK" ]]; then
+    IFS= read -r have < "$GUARD_PROBE_MARK" || have=""
+    if [[ -n "$have" && "$have" == "$key" ]]; then
+      return 0
+    fi
+  fi
+  rm -f "$GUARD_PROBE_MARK" 2>/dev/null || true
+  guard_probe || return 1
+  printf '%s\n' "$key" > "$GUARD_PROBE_MARK" 2>/dev/null || true
+  return 0
 }
 trap 'rm -f "$PIDFILE" "${TURN_MARK:-}" 2>/dev/null' EXIT
 
@@ -305,10 +356,13 @@ far. Then do what the prompt below asks.
 '
 
 # One claude invocation. $1 = tee mode ("" or -a), the rest = extra flags.
+# v0.29.0: the operating rules ride as the system prompt (see SYSTEM_RULES).
 run_claude() {
   local tee_mode="$1"; shift
+  local -a rules=()
+  if [[ -n "$SYSTEM_RULES" ]]; then rules=(--append-system-prompt "$SYSTEM_RULES"); fi
   ( echo "$BASHPID ${PHASEKIT_ITER:-manual}" > "$PIDFILE"
-    exec claude "${CLAUDE_FLAGS[@]}" "$@" -p "$PROMPT_CONTENT" ) 2>&1 \
+    exec claude "${CLAUDE_FLAGS[@]}" "${rules[@]}" "$@" -p "$PROMPT_CONTENT" ) 2>&1 \
     | tee $tee_mode "$RAW_LOG" \
     | "${FORMAT_CMD[@]}" \
     | tee $tee_mode "$LOG_FILE"
@@ -332,7 +386,10 @@ start_new_session() {
 
 if [[ "$PINNED" == 1 ]]; then
   PROMPT_CONTENT="$(render_pinned_prompt "$PROMPT_CONTENT")"
-  if ! guard_probe; then
+  # The rules name the engine's docs by path too (no preamble: that is the
+  # turn's, the rules stay byte-stable for the whole run).
+  if [[ -n "$SYSTEM_RULES" ]]; then SYSTEM_RULES="$(rewrite_engine_doc_paths "$SYSTEM_RULES")"; fi
+  if ! guard_probe_once; then
     exit "$GUARD_REFUSED_RC"
   fi
 fi

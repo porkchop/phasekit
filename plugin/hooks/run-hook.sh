@@ -2,7 +2,7 @@
 #
 # phasekit plugin hook dispatcher (v0.19.0).
 #
-# The plugin (plugin/hooks/hooks.json) wires phasekit's four hooks through this
+# The plugin (plugin/hooks/hooks.json) wires phasekit's three hooks through this
 # one script: `run-hook.sh <name>` runs .claude/hooks/<name>.sh from the SAME
 # engine (plugin/hooks/scripts is a link to it; a plugin cache copy carries the
 # files themselves), so the hooks have one source and the read-only engine
@@ -40,7 +40,7 @@ here="${BASH_SOURCE[0]%/*}"
 [[ "$here" == "${BASH_SOURCE[0]}" ]] && here="."
 here="$(cd "$here" 2>/dev/null && pwd)" || here=""
 scripts="$here/scripts"
-HOOKS="deny-dangerous-commands require-verdict wrapup-nudge compact-reanchor"
+HOOKS="deny-dangerous-commands require-verdict wrapup-nudge"
 
 probe_fail() {
   printf 'FAIL %s\n' "$1" > "$PHASEKIT_GUARD_PROBE" 2>/dev/null || true
@@ -63,7 +63,7 @@ guard_probe() {
   # in hooks.json on its event, through this dispatcher.
   local hj="$here/hooks.json" want
   for want in "PreToolUse deny-dangerous-commands" "PreToolUse wrapup-nudge" "PostToolUse wrapup-nudge" \
-              "Stop require-verdict" "SessionStart compact-reanchor"; do
+              "Stop require-verdict"; do
     jq -e --arg ev "${want%% *}" --arg h "${want#* }" \
       '[.hooks[$ev][]?.hooks[]?.command // empty] | any(test("run-hook\\.sh\"? " + $h + "$"))' \
       "$hj" >/dev/null 2>&1 || probe_fail "hooks.json does not wire ${want#* } on ${want%% *}"
@@ -92,7 +92,7 @@ guard_probe() {
 
 case "$name" in
   guard-probe) guard_probe ;;
-  deny-dangerous-commands|require-verdict|wrapup-nudge|compact-reanchor) ;;
+  deny-dangerous-commands|require-verdict|wrapup-nudge) ;;
   *) cat >/dev/null 2>&1 || true; exit 0 ;;
 esac
 
