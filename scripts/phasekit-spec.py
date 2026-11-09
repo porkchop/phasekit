@@ -113,8 +113,11 @@ EXPLICIT_ID_RE = re.compile(
 # a NUMERIC id cited anywhere in the document (`AC#12`, `AC#12(f)`); the plan
 # must capture every one of them or say which it did not (review B1). Not a
 # range (`AC#76-100`), not a placeholder (`AC#N`, `AC#nn`), not an alphanumeric
-# id (`AC#E14.7`: those are captured only from the lines that define them).
-CITED_RE = re.compile(r"AC#(\d+)(?![\d]|-\d)")
+# or dotted id (`AC#E14.7`, `AC#249.f`, `AC#579.5`: those are captured only
+# from the lines that define them — v0.29.1: a dotted citation is not a
+# citation of its numeric prefix; xmeo's 28 "uncaptured" ids were all
+# `SUPERSEDED by AC#249.f:` markers naming dotted criteria).
+CITED_RE = re.compile(r"AC#(\d+)(?![\d]|-\d|\.[A-Za-z0-9])")
 LIST_ITEM_RE = re.compile(r"^\s{0,3}(?:[-*+]|\d+[.)])\s+")
 NUMBERED_RE = re.compile(r"^\s{0,3}(\d+)[.)]\s+(.*)$")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")

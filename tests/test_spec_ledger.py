@@ -188,6 +188,10 @@ The verifiable form AC#76-100 established, the appended AC#129-132, a placeholde
 (AC#108 and AC#129 are: they are cited on their own below).
 108. A real criterion cited by the prose above.
 129. Another one.
+
+## Dotted ids (v0.29.1)
+- AC#249.f: the dotted criterion itself, defined here.
+SUPERSEDED by AC#249.f: - AC249.b: a dotted citation names the dotted id, never a criterion 249.
 """
 
 
@@ -251,8 +255,9 @@ class Migration(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         plan = json.loads(r.stdout)
         self.assertEqual(plan["ids"], ["AC#1", "AC#2", "AC#324", "AC#325", "AC#326", "AC#342",
-                                       "AC#108", "AC#129"])
-        self.assertEqual(plan["cited_not_captured"], [], "ranges and placeholders are not citations")
+                                       "AC#108", "AC#129", "AC#249.f", "AC#249.b"])
+        self.assertEqual(plan["cited_not_captured"], [],
+                         "ranges, placeholders and dotted ids are not numeric citations")
         r = tool("migrate", "--repo", str(self.root))
         self.assertEqual(r.returncode, 0, r.stderr)
         by = {e["id"]: e for e in json.loads((self.root / LEDGER).read_text())["entries"]}
